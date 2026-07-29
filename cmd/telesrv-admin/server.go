@@ -66,6 +66,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/set-frozen", s.requireAuthAPI(http.HandlerFunc(s.handleSetAccountFrozenAPI)))
 	mux.Handle("POST /api/actions/grant-premium", s.requireAuthAPI(http.HandlerFunc(s.handleGrantPremiumAPI)))
 	mux.Handle("POST /api/actions/grant-stars", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarsAPI)))
+	mux.Handle("POST /api/actions/grant-star-gift", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarGiftAPI)))
 	mux.Handle("POST /api/actions/set-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetVerifiedAPI)))
 	mux.Handle("POST /api/actions/set-channel-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelVerifiedAPI)))
 	mux.Handle("POST /api/actions/revoke-sessions", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeSessionsAPI)))
@@ -575,6 +576,38 @@ func (s *server) handleGrantStarsAPI(w http.ResponseWriter, r *http.Request) {
 		Amount:      body.Amount,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/grant-stars", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type grantStarGiftAPIRequest struct {
+	CommandID  string `json:"command_id"`
+	Reason     string `json:"reason"`
+	Confirm    bool   `json:"confirm"`
+	UserID     int64  `json:"user_id"`
+	Username   string `json:"username"`
+	Phone      string `json:"phone"`
+	GiftID     int64  `json:"gift_id"`
+	PriceLabel string `json:"price_label"`
+	Message    string `json:"message"`
+	HideName   bool   `json:"hide_name"`
+}
+
+func (s *server) handleGrantStarGiftAPI(w http.ResponseWriter, r *http.Request) {
+	var body grantStarGiftAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.GrantStarGiftRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "grant-star-gift"),
+		UserID:      body.UserID,
+		Username:    body.Username,
+		Phone:       body.Phone,
+		GiftID:      body.GiftID,
+		PriceLabel:  body.PriceLabel,
+		Message:     body.Message,
+		HideName:    body.HideName,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/grant-star-gift", req)
 	writeCommandResultAPI(w, result, err)
 }
 

@@ -16,6 +16,8 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
   const [busy, setBusy] = useState(false);
   const [months, setMonths] = useState("1");
   const [starsAmount, setStarsAmount] = useState("1000");
+  const [giftId, setGiftId] = useState("");
+  const [giftPriceLabel, setGiftPriceLabel] = useState("");
   const [freezeUntil, setFreezeUntil] = useState(() => toDateTimeLocal(new Date(Date.now() + 7 * 86400_000)));
   const [freezeAppealURL, setFreezeAppealURL] = useState("");
 
@@ -183,6 +185,34 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
                 tone="warn"
                 path="/api/actions/grant-stars"
                 payload={() => ({ user_id: account.ID, amount: toInt(starsAmount) })}
+                onDone={load}
+              />
+              <label className="duration-field">
+                <span>{t("account.giftId")}</span>
+                <input
+                  aria-label={t("account.giftIdAria")}
+                  value={giftId}
+                  onChange={(event) => setGiftId(event.target.value)}
+                  type="number"
+                  min="1"
+                />
+              </label>
+              <label className="duration-field">
+                <span>{t("account.giftPriceLabel")}</span>
+                <input
+                  aria-label={t("account.giftPriceLabelAria")}
+                  value={giftPriceLabel}
+                  onChange={(event) => setGiftPriceLabel(event.target.value)}
+                  type="text"
+                  placeholder="1000 YUT"
+                />
+              </label>
+              <ActionButton
+                label={t("account.grantStarGift")}
+                icon={<Star size={15} />}
+                tone="warn"
+                path="/api/actions/grant-star-gift"
+                payload={() => ({ user_id: account.ID, gift_id: toInt(giftId), price_label: giftPriceLabel })}
                 onDone={load}
               />
               <ActionButton
