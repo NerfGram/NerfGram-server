@@ -229,6 +229,37 @@ func (s *Service) ImportContacts(ctx context.Context, userID int64, inputs []dom
 	if err != nil {
 		return domain.ImportContactsResult{}, err
 	}
+	// Enforce "who can find me by phone number" (PrivacyKeyAddedByPhone) so a
+	// bulk import can't be used to mass-discover which arbitrary phone
+	// numbers are registered on the server. Without this check, ImportContacts
+	// is a full phone-number oracle: any authenticated account (trivial to
+	// create) could brute-force a whole number range and harvest every
+	// registered phone number, bypassing privacy settings entirely.
+	if s.privacy != nil && len(targets) > 0 {
+		targetIDs := make([]int64, 0, len(targets))
+		for _, target := range targets {
+			targetIDs = append(targetIDs, target.ID)
+		}
+		visibility, err := s.privacy.CanSeeBatch(ctx, targetIDs, userID, []domain.PrivacyKey{domain.PrivacyKeyAddedByPhone})
+		if err != nil {
+			return domain.ImportContactsResult{}, err
+		}
+		filtered := make([]domain.User, 0, len(targets))
+		for _, target := range targets {
+			// Existing contacts remain discoverable regardless of the
+			// AddedByPhone setting — you already know this person.
+			if s.contacts != nil {
+				if _, found, err := s.contacts.Get(ctx, userID, target.ID); err == nil && found {
+					filtered = append(filtered, target)
+					continue
+				}
+			}
+			if keys, ok := visibility[target.ID]; ok && keys[domain.PrivacyKeyAddedByPhone] {
+				filtered = append(filtered, target)
+			}
+		}
+		targets = filtered
+	}
 	byPhone := make(map[string]domain.User, len(targets))
 	for _, target := range targets {
 		if target.Phone != "" {
