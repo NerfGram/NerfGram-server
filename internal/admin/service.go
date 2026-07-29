@@ -22,6 +22,7 @@ const (
 	ActionSetAccountFrozen        = "account.set_frozen"
 	ActionGrantPremium            = "account.grant_premium"
 	ActionGrantStars              = "account.grant_stars"
+	ActionGrantStarGift           = "account.grant_star_gift"
 	ActionSetVerified             = "account.set_verified"
 	ActionSetChannelVerified      = "channel.set_verified"
 	ActionRevokeSessions          = "account.revoke_sessions"
@@ -64,6 +65,8 @@ type AuthKeyRevoker interface {
 
 type UsersService interface {
 	AdminUser(ctx context.Context, userID int64) (domain.User, bool, error)
+	AdminUserByUsername(ctx context.Context, username string) (domain.User, bool, error)
+	AdminUserByPhone(ctx context.Context, phone string) (domain.User, bool, error)
 	GrantPremium(ctx context.Context, userID int64, months int) (domain.User, error)
 	SetVerified(ctx context.Context, userID int64, verified bool) (domain.User, error)
 }
@@ -97,6 +100,9 @@ type MessagesService interface {
 }
 
 type GiftsService interface {
+	GiftByID(ctx context.Context, id int64) (domain.StarGift, bool, error)
+	IssuePurchaseForm(ctx context.Context, form domain.StarGiftPurchaseForm) (domain.StarGiftPurchaseForm, error)
+	Purchase(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error)
 	PrepareAnimation(fileName string, data []byte) (domain.StarGiftAnimation, error)
 	PrepareOfficialAnimation(fileName string, data []byte) (domain.StarGiftAnimation, error)
 	CreateCatalogRevision(ctx context.Context, write domain.StarGiftCatalogWrite) (domain.StarGiftCatalogEntry, error)
@@ -314,6 +320,23 @@ type GrantStarsRequest struct {
 	CommandMeta
 	UserID int64 `json:"user_id"`
 	Amount int64 `json:"amount"`
+}
+
+// GrantStarGiftRequest grants an existing catalog gift to a recipient
+// identified by UserID, Username, or Phone (checked in that priority order).
+// PriceLabel is purely informational (recorded in the command's audit
+// details) — it is never charged; delivery is funded internally from the
+// official system account so it goes through the same tested purchase path
+// as a normal paid gift.
+type GrantStarGiftRequest struct {
+	CommandMeta
+	UserID     int64  `json:"user_id,omitempty"`
+	Username   string `json:"username,omitempty"`
+	Phone      string `json:"phone,omitempty"`
+	GiftID     int64  `json:"gift_id"`
+	PriceLabel string `json:"price_label,omitempty"`
+	Message    string `json:"message,omitempty"`
+	HideName   bool   `json:"hide_name,omitempty"`
 }
 
 type SetVerifiedRequest struct {
@@ -559,6 +582,140 @@ func (s *Service) GrantStars(ctx context.Context, req GrantStarsRequest) (Comman
 			details["notify_error"] = err.Error()
 		}
 		return CommandResult{Message: "stars granted", Details: details}, nil
+	})
+}
+
+// resolveAdminRecipient looks up a target user for an admin action by
+// UserID, Username, or Phone, in that priority order. Exactly one of the
+// three should normally be set.
+func (s *Service) resolveAdminRecipient(ctx context.Context, userID int64, username, phone string) (domain.User, error) {
+	if s == nil || s.users == nil {
+		return domain.User{}, fmt.Errorf("admin user dependency is not configured")
+	}
+	switch {
+	case userID > 0:
+		u, found, err := s.users.AdminUser(ctx, userID)
+		if err != nil {
+			return domain.User{}, err
+		}
+		if !found {
+			return domain.User{}, domain.ErrUserNotFound
+		}
+		return u, nil
+	case strings.TrimSpace(username) != "":
+		u, found, err := s.users.AdminUserByUsername(ctx, username)
+		if err != nil {
+			return domain.User{}, err
+		}
+		if !found {
+			return domain.User{}, domain.ErrUserNotFound
+		}
+		return u, nil
+	case strings.TrimSpace(phone) != "":
+		u, found, err := s.users.AdminUserByPhone(ctx, phone)
+		if err != nil {
+			return domain.User{}, err
+		}
+		if !found {
+			return domain.User{}, domain.ErrUserNotFound
+		}
+		return u, nil
+	default:
+		return domain.User{}, fmt.Errorf("one of user_id, username, or phone is required")
+	}
+}
+
+// GrantStarGift delivers an existing catalog gift to a recipient for free.
+// It does not invent a parallel "free gift" code path: it funds the official
+// system account for exactly the gift's catalog price and sends it through
+// the same purchase-form + Purchase flow used for a real paid gift, so all
+// the usual invariants (availability counters, per-user limits, idempotent
+// delivery) are enforced by already-tested code. PriceLabel is never charged
+// against the recipient — it's recorded in the command's audit details only,
+// for the admin's own bookkeeping (e.g. an internal marketplace price tag).
+func (s *Service) GrantStarGift(ctx context.Context, req GrantStarGiftRequest) (CommandResult, error) {
+	if req.GiftID <= 0 {
+		return CommandResult{}, fmt.Errorf("gift_id is required")
+	}
+	if s == nil || s.users == nil || s.gifts == nil || s.stars == nil {
+		return CommandResult{}, fmt.Errorf("admin gift dependencies are not configured")
+	}
+	recipient, err := s.resolveAdminRecipient(ctx, req.UserID, req.Username, req.Phone)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	if recipient.Bot {
+		return CommandResult{}, fmt.Errorf("cannot grant a gift to a bot account")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionGrantStarGift, recipient.ID, domain.Peer{}, req, func() (CommandResult, error) {
+		gift, found, err := s.gifts.GiftByID(ctx, req.GiftID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrStarGiftInvalid
+		}
+		details := map[string]any{
+			"recipient_user_id":  recipient.ID,
+			"recipient_username": recipient.Username,
+			"recipient_phone":    recipient.Phone,
+			"gift_id":            gift.ID,
+			"gift_title":         gift.Title,
+			"gift_stars":         gift.Stars,
+			"price_label":        req.PriceLabel,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "dry-run completed", Details: details}, nil
+		}
+		now := s.now()
+		// Fund the house/system account for exactly this gift's price. This
+		// keeps the transfer inside the existing, tested purchase ledger
+		// instead of writing a new free-grant path that could drift out of
+		// sync with availability/per-user-limit bookkeeping.
+		if _, err := s.stars.Credit(ctx, domain.OfficialSystemUserID, gift.Stars, domain.StarsReasonAdjust,
+			domain.Peer{}, "Admin gift grant funding", req.Reason); err != nil {
+			return CommandResult{}, err
+		}
+		form := domain.StarGiftPurchaseForm{
+			BuyerUserID: domain.OfficialSystemUserID,
+			To:          domain.Peer{Type: domain.PeerTypeUser, ID: recipient.ID},
+			GiftID:      gift.ID,
+			RevisionID:  gift.RevisionID,
+			HideName:    req.HideName,
+			Message:     req.Message,
+			ChargeStars: gift.Stars,
+			IssuedAt:    now.Unix(),
+			ExpiresAt:   now.Unix() + 600,
+		}
+		issued, err := s.gifts.IssuePurchaseForm(ctx, form)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		commandKey := strings.TrimSpace(req.CommandMeta.CommandID)
+		if commandKey == "" {
+			commandKey = fmt.Sprintf("admin-gift-grant:%d:%d", recipient.ID, issued.FormID)
+		}
+		purchaseReq := domain.StarGiftPurchaseRequest{
+			BuyerUserID: domain.OfficialSystemUserID,
+			To:          issued.To,
+			GiftID:      issued.GiftID,
+			RevisionID:  issued.RevisionID,
+			HideName:    issued.HideName,
+			Message:     issued.Message,
+			ChargeStars: issued.ChargeStars,
+			FormID:      issued.FormID,
+			CommandKey:  commandKey,
+			Date:        int(now.Unix()),
+		}
+		result, err := s.gifts.Purchase(ctx, purchaseReq)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details["saved_gift_id"] = result.Saved.ID
+		if err := s.notifyUserChanged(ctx, recipient); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "gift granted", Details: details}, nil
 	})
 }
 

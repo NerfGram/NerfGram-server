@@ -132,6 +132,27 @@ func (s *Service) AdminUser(ctx context.Context, userID int64) (domain.User, boo
 	return s.loadBaseUserByID(ctx, userID)
 }
 
+// AdminUserByUsername resolves a username to a user for admin/back-office use.
+// Unlike ResolveUsername, this bypasses privacy projection: admin actions act
+// on the raw account, not on what a given viewer is allowed to see.
+func (s *Service) AdminUserByUsername(ctx context.Context, username string) (domain.User, bool, error) {
+	username = normalizeUsername(username)
+	if !validUsername(username) {
+		return domain.User{}, false, domain.ErrUsernameInvalid
+	}
+	return s.users.ByUsername(ctx, username)
+}
+
+// AdminUserByPhone resolves a phone number to a user for admin/back-office
+// use. Bypasses privacy projection for the same reason as AdminUserByUsername.
+func (s *Service) AdminUserByPhone(ctx context.Context, phone string) (domain.User, bool, error) {
+	phone = normalizePhone(phone)
+	if phone == "" {
+		return domain.User{}, false, domain.ErrPhoneNotOccupied
+	}
+	return s.users.ByPhone(ctx, phone)
+}
+
 // ByIDs 批量返回指定用户。调用方必须已登录；缺失用户不会出现在结果中。
 func (s *Service) ByIDs(ctx context.Context, currentUserID int64, userIDs []int64) ([]domain.User, error) {
 	if currentUserID == 0 {
