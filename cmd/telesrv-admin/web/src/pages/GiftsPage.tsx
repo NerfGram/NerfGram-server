@@ -95,6 +95,8 @@ export function GiftsPage() {
   const [includeCollectible, setIncludeCollectible] = useState(true);
   const [upgradeStars, setUpgradeStars] = useState("0");
   const [supplyTotal, setSupplyTotal] = useState("0");
+  const [releasedByType, setReleasedByType] = useState("");
+  const [releasedById, setReleasedById] = useState("");
   const [slugPrefix, setSlugPrefix] = useState("");
 	const [giftID, setGiftID] = useState("0");
   const [title, setTitle] = useState("");
@@ -165,7 +167,9 @@ export function GiftsPage() {
 			stars,
 			convert_stars: convertStars,
       enabled,
-      sort_order: Number(sortOrder)
+      sort_order: Number(sortOrder),
+      supply_total: Number(supplyTotal),
+      ...(releasedByType ? { released_by_type: releasedByType, released_by_id: Number(releasedById) } : {})
     }));
     form.set("file", file, file.name);
     return form;
@@ -343,6 +347,26 @@ export function GiftsPage() {
                   <span className="gift-file-copy"><span className="gift-field-label">{t("gifts.animation")}</span><strong>{file ? file.name : t("gifts.filePrompt")}</strong><small>{file ? formatBytes(file.size) : t("gifts.fileHint")}</small></span>
                   <span className="gift-file-action">{file ? t("gifts.changeFile") : t("gifts.chooseFile")}</span>
                 </label>
+                <div className="gift-fields-grid">
+                  <label>
+                    <span>{t("gifts.supplyTotal")}</span>
+                    <input type="number" min="0" value={supplyTotal} onChange={(e) => { setSupplyTotal(e.target.value); setPreview(null); }} />
+                    <small>{t("gifts.supplyTotalHint")}</small>
+                  </label>
+                  <label>
+                    <span>{t("gifts.releasedByType")}</span>
+                    <select value={releasedByType} onChange={(e) => { setReleasedByType(e.target.value); setPreview(null); }}>
+                      <option value="">{t("gifts.releasedByNone")}</option>
+                      <option value="user">{t("gifts.releasedByUser")}</option>
+                      <option value="channel">{t("gifts.releasedByChannel")}</option>
+                    </select>
+                  </label>
+                  {releasedByType && <label>
+                    <span>{t("gifts.releasedById")}</span>
+                    <input type="number" value={releasedById} onChange={(e) => { setReleasedById(e.target.value); setPreview(null); }} />
+                    <small>{t("gifts.releasedByHint")}</small>
+                  </label>}
+                </div>
               </>}
               <div className="gift-fields-grid">
                 <label><span>{t("gifts.title")}</span><input value={title} maxLength={128} placeholder={t("gifts.titlePlaceholder")} onChange={(e) => { setTitle(e.target.value); setPreview(null); }} /></label>

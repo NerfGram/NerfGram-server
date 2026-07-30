@@ -253,6 +253,20 @@ type ImportStarGiftRequest struct {
 	FileName     string `json:"file_name"`
 	ContentSHA   string `json:"content_sha256"`
 	Data         []byte `json:"-"`
+	// SupplyTotal is the total number of copies of this (non-collectible)
+	// gift that can ever be sold. 0 means unlimited -- and an unlimited
+	// gift can never later be upgraded to a collectible/NFT version; only
+	// a supply-limited gift (SupplyTotal > 0) is eligible for that, as a
+	// separate step (CreateCollectibleRevision).
+	SupplyTotal int `json:"supply_total,omitempty"`
+	// ReleasedByType/ReleasedByID optionally set who "released" this gift
+	// (shown to clients as "Released by @username"), e.g. an official
+	// channel or a user/bot. Either both must be set or both left empty.
+	// ReleasedByType must be "user" or "channel". The referenced peer must
+	// have a username -- the client always renders "Released by
+	// @<username>", so a peer without one can't be set here.
+	ReleasedByType string `json:"released_by_type,omitempty"`
+	ReleasedByID   int64  `json:"released_by_id,omitempty"`
 }
 
 type ImportOfficialStarGiftRequest struct {
@@ -1067,14 +1081,60 @@ func (s *Service) DeletePrivateHistory(ctx context.Context, req DeletePrivateHis
 	})
 }
 
+// resolveReleasedByPeer validates a "released by" peer reference and
+// returns it as a domain.Peer. It requires the referenced user or channel
+// to have a username, since clients always render "Released by
+// @<username>" and there'd be nothing to show otherwise.
+func (s *Service) resolveReleasedByPeer(ctx context.Context, peerType string, peerID int64) (domain.Peer, error) {
+	switch strings.ToLower(strings.TrimSpace(peerType)) {
+	case "user":
+		if s.users == nil {
+			return domain.Peer{}, fmt.Errorf("admin user dependency is not configured")
+		}
+		u, found, err := s.users.AdminUser(ctx, peerID)
+		if err != nil {
+			return domain.Peer{}, err
+		}
+		if !found {
+			return domain.Peer{}, domain.ErrUserNotFound
+		}
+		if strings.TrimSpace(u.Username) == "" {
+			return domain.Peer{}, fmt.Errorf("released_by user has no username")
+		}
+		return domain.Peer{Type: domain.PeerTypeUser, ID: u.ID}, nil
+	case "channel":
+		if s.channels == nil {
+			return domain.Peer{}, fmt.Errorf("admin channels dependency is not configured")
+		}
+		ch, err := s.channels.GetChannelByID(ctx, peerID)
+		if err != nil {
+			return domain.Peer{}, err
+		}
+		if strings.TrimSpace(ch.Username) == "" {
+			return domain.Peer{}, fmt.Errorf("released_by channel has no username")
+		}
+		return domain.Peer{Type: domain.PeerTypeChannel, ID: ch.ID}, nil
+	default:
+		return domain.Peer{}, fmt.Errorf("released_by_type must be \"user\" or \"channel\"")
+	}
+}
+
 func (s *Service) ImportStarGift(ctx context.Context, req ImportStarGiftRequest) (CommandResult, error) {
 	if s == nil || s.gifts == nil {
 		return CommandResult{}, fmt.Errorf("star gift service is not configured")
 	}
 	if req.GiftID < 0 || req.Stars <= 0 || req.ConvertStars < 0 || req.ConvertStars > req.Stars ||
 		req.SortOrder < math.MinInt32 || req.SortOrder > math.MaxInt32 ||
-		len([]rune(strings.TrimSpace(req.Title))) > domain.MaxStarGiftTitleRunes {
+		len([]rune(strings.TrimSpace(req.Title))) > domain.MaxStarGiftTitleRunes || req.SupplyTotal < 0 {
 		return CommandResult{}, domain.ErrStarGiftInvalid
+	}
+	var releasedBy domain.Peer
+	if req.ReleasedByType != "" || req.ReleasedByID != 0 {
+		var err error
+		releasedBy, err = s.resolveReleasedByPeer(ctx, req.ReleasedByType, req.ReleasedByID)
+		if err != nil {
+			return CommandResult{}, err
+		}
 	}
 	animation, err := s.gifts.PrepareAnimation(req.FileName, req.Data)
 	if err != nil {
@@ -1089,6 +1149,7 @@ func (s *Service) ImportStarGift(ctx context.Context, req ImportStarGiftRequest)
 			"source_format": animation.SourceFormat, "source_name": animation.SourceName,
 			"sha256": req.ContentSHA, "width": animation.Width, "height": animation.Height,
 			"frame_rate": animation.FrameRate, "compressed_bytes": len(animation.TGS), "json_bytes": len(animation.JSON),
+			"supply_total": req.SupplyTotal, "released_by_type": req.ReleasedByType, "released_by_id": req.ReleasedByID,
 		}
 		if req.DryRun {
 			return CommandResult{Message: "star gift import validated", Details: details}, nil
@@ -1097,6 +1158,8 @@ func (s *Service) ImportStarGift(ctx context.Context, req ImportStarGiftRequest)
 			GiftID: req.GiftID, Title: req.Title, Stars: req.Stars, ConvertStars: req.ConvertStars,
 			Enabled: req.Enabled, SortOrder: req.SortOrder, Animation: animation,
 			Actor: req.Actor, CommandID: req.CommandID,
+			Limited: req.SupplyTotal > 0, AvailabilityTotal: req.SupplyTotal, AvailabilityRemains: req.SupplyTotal,
+			ReleasedBy: releasedBy,
 		})
 		if err != nil {
 			return CommandResult{Details: details}, err
