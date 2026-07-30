@@ -67,6 +67,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/grant-premium", s.requireAuthAPI(http.HandlerFunc(s.handleGrantPremiumAPI)))
 	mux.Handle("POST /api/actions/grant-stars", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarsAPI)))
 	mux.Handle("POST /api/actions/grant-star-gift", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarGiftAPI)))
+	mux.Handle("POST /api/actions/set-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleSetCollectibleUsernameAPI)))
+	mux.Handle("POST /api/actions/remove-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleRemoveCollectibleUsernameAPI)))
 	mux.Handle("POST /api/actions/set-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetVerifiedAPI)))
 	mux.Handle("POST /api/actions/set-channel-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelVerifiedAPI)))
 	mux.Handle("POST /api/actions/revoke-sessions", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeSessionsAPI)))
@@ -608,6 +610,56 @@ func (s *server) handleGrantStarGiftAPI(w http.ResponseWriter, r *http.Request) 
 		HideName:    body.HideName,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/grant-star-gift", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setCollectibleUsernameAPIRequest struct {
+	CommandID      string `json:"command_id"`
+	Reason         string `json:"reason"`
+	Confirm        bool   `json:"confirm"`
+	Username       string `json:"username"`
+	Currency       string `json:"currency"`
+	Amount         int64  `json:"amount"`
+	CryptoCurrency string `json:"crypto_currency"`
+	CryptoAmount   int64  `json:"crypto_amount"`
+	URL            string `json:"url"`
+}
+
+func (s *server) handleSetCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
+	var body setCollectibleUsernameAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetCollectibleUsernameRequest{
+		CommandMeta:    s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-collectible-username"),
+		Username:       body.Username,
+		Currency:       body.Currency,
+		Amount:         body.Amount,
+		CryptoCurrency: body.CryptoCurrency,
+		CryptoAmount:   body.CryptoAmount,
+		URL:            body.URL,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/usernames/set-collectible", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type removeCollectibleUsernameAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Username  string `json:"username"`
+}
+
+func (s *server) handleRemoveCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
+	var body removeCollectibleUsernameAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.RemoveCollectibleUsernameRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "remove-collectible-username"),
+		Username:    body.Username,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/usernames/remove-collectible", req)
 	writeCommandResultAPI(w, result, err)
 }
 

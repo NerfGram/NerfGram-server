@@ -478,10 +478,12 @@ func run(logger *zap.Logger) error {
 	codeStore := redisstore.NewCodeStore(rdb)
 	rateLimiter := redisstore.NewRateLimiter(rdb)
 	activeSessions := mtprotoedge.NewSessionManager(logger.Named("mtprotoedge").Named("sessions"))
+	collectibleUsernameStore := postgres.NewCollectibleUsernameStore(pool)
 	adminService := adminapp.NewService(adminapp.Dependencies{
-		Commands:      adminStore,
-		Restrictions:  adminStore,
-		OfficialGifts: officialgifts.New(cfg.OfficialGiftsDir),
+		Commands:             adminStore,
+		Restrictions:         adminStore,
+		OfficialGifts:        officialgifts.New(cfg.OfficialGiftsDir),
+		CollectibleUsernames: collectibleUsernameStore,
 	})
 	go maintenance.NewRetentionWorker(dispatchOutboxStore, tempAuthKeyStore, logger.Named("maintenance").Named("retention"),
 		cfg.UpdateEventRetention,
@@ -820,6 +822,7 @@ func run(logger *zap.Logger) error {
 		EphemeralPush:        ephemeralStore,
 		EphemeralReports:     ephemeralReportStore,
 		Users:                usersService,
+		CollectibleUsernames: collectibleUsernameStore,
 		Updates:              updatesService,
 		BootstrapUpdates:     bootstrapUpdateStore,
 		BotAPIUpdates:        botAPIUpdateStore,

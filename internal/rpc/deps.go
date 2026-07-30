@@ -241,6 +241,12 @@ type UsersService interface {
 	ByIDs(ctx context.Context, currentUserID int64, userIDs []int64) ([]domain.User, error)
 }
 
+// CollectibleUsernameService serves admin-assigned Fragment-style collectible
+// username metadata (backs fragment.getCollectibleInfo).
+type CollectibleUsernameService interface {
+	Get(ctx context.Context, username string) (domain.CollectibleUsername, bool, error)
+}
+
 // BatchViewerUsersResolver 是 UsersService 的可选能力：跨多个 viewer 一次性投影同一组 user
 // （fan-out 模板化，把 per-recipient 的 ByIDs(=ForViewer) 折叠成 O(owner) 查询）。结果按 viewer
 // 与 ByIDs(viewer, ids) 字节等价（personal photo overlay 除外，见 users.ByIDsForViewers）。
@@ -873,6 +879,7 @@ type Deps struct {
 	EphemeralPush        store.EphemeralPushBroker
 	EphemeralReports     store.EphemeralReportStore
 	Users                UsersService
+	CollectibleUsernames CollectibleUsernameService
 	Updates              UpdatesService
 	BootstrapUpdates     store.BootstrapUpdateJobStore
 	BotAPIUpdates        store.BotAPIUpdateStore

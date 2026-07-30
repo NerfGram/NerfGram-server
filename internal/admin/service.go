@@ -19,20 +19,22 @@ import (
 )
 
 const (
-	ActionSetAccountFrozen        = "account.set_frozen"
-	ActionGrantPremium            = "account.grant_premium"
-	ActionGrantStars              = "account.grant_stars"
-	ActionGrantStarGift           = "account.grant_star_gift"
-	ActionSetVerified             = "account.set_verified"
-	ActionSetChannelVerified      = "channel.set_verified"
-	ActionRevokeSessions          = "account.revoke_sessions"
-	ActionDeletePrivateMessages   = "messages.delete_private_messages"
-	ActionDeletePrivateHistory    = "messages.delete_private_history"
-	ActionImportStarGift          = "gifts.import"
-	ActionImportOfficialStarGift  = "gifts.official.import"
-	ActionPublishGiftCollectibles = "gifts.collectibles.publish"
-	ActionSetStarGiftEnabled      = "gifts.set_enabled"
-	ActionSetStarGiftSortOrder    = "gifts.set_sort_order"
+	ActionSetAccountFrozen          = "account.set_frozen"
+	ActionGrantPremium              = "account.grant_premium"
+	ActionGrantStars                = "account.grant_stars"
+	ActionGrantStarGift             = "account.grant_star_gift"
+	ActionSetCollectibleUsername    = "username.set_collectible"
+	ActionRemoveCollectibleUsername = "username.remove_collectible"
+	ActionSetVerified               = "account.set_verified"
+	ActionSetChannelVerified        = "channel.set_verified"
+	ActionRevokeSessions            = "account.revoke_sessions"
+	ActionDeletePrivateMessages     = "messages.delete_private_messages"
+	ActionDeletePrivateHistory      = "messages.delete_private_history"
+	ActionImportStarGift            = "gifts.import"
+	ActionImportOfficialStarGift    = "gifts.official.import"
+	ActionPublishGiftCollectibles   = "gifts.collectibles.publish"
+	ActionSetStarGiftEnabled        = "gifts.set_enabled"
+	ActionSetStarGiftSortOrder      = "gifts.set_sort_order"
 
 	maxCommandIDLength       = 128
 	maxActorLength           = 128
@@ -115,43 +117,52 @@ type GiftsService interface {
 	CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 }
 
+// CollectibleUsernamesStore lets admins mark a username as a Fragment-style
+// collectible/NFT username with a display price+currency.
+type CollectibleUsernamesStore interface {
+	Set(ctx context.Context, cu domain.CollectibleUsername, createdBy string) (domain.CollectibleUsername, error)
+	Delete(ctx context.Context, username string) error
+}
+
 type OfficialGiftsSource interface {
 	List(ctx context.Context) ([]officialgifts.GiftSummary, error)
 	Bundle(ctx context.Context, giftID int64, includeCollectible bool) (officialgifts.Bundle, error)
 }
 
 type Dependencies struct {
-	Commands        CommandRepository
-	Restrictions    RestrictionStore
-	Auth            AuthService
-	Revoker         AuthKeyRevoker
-	Users           UsersService
-	Stars           StarsService
-	StarsNotifier   StarsNotifier
-	UserNotifier    UserNotifier
-	Channels        ChannelsService
-	ChannelNotifier ChannelNotifier
-	Messages        MessagesService
-	Gifts           GiftsService
-	OfficialGifts   OfficialGiftsSource
-	Now             func() time.Time
+	Commands             CommandRepository
+	Restrictions         RestrictionStore
+	Auth                 AuthService
+	Revoker              AuthKeyRevoker
+	Users                UsersService
+	Stars                StarsService
+	StarsNotifier        StarsNotifier
+	UserNotifier         UserNotifier
+	Channels             ChannelsService
+	ChannelNotifier      ChannelNotifier
+	Messages             MessagesService
+	Gifts                GiftsService
+	CollectibleUsernames CollectibleUsernamesStore
+	OfficialGifts        OfficialGiftsSource
+	Now                  func() time.Time
 }
 
 type Service struct {
-	commands        CommandRepository
-	restrictions    RestrictionStore
-	auth            AuthService
-	revoker         AuthKeyRevoker
-	users           UsersService
-	stars           StarsService
-	starsNotifier   StarsNotifier
-	userNotifier    UserNotifier
-	channels        ChannelsService
-	channelNotifier ChannelNotifier
-	messages        MessagesService
-	gifts           GiftsService
-	officialGifts   OfficialGiftsSource
-	now             func() time.Time
+	commands             CommandRepository
+	restrictions         RestrictionStore
+	auth                 AuthService
+	revoker              AuthKeyRevoker
+	users                UsersService
+	stars                StarsService
+	starsNotifier        StarsNotifier
+	userNotifier         UserNotifier
+	channels             ChannelsService
+	channelNotifier      ChannelNotifier
+	messages             MessagesService
+	gifts                GiftsService
+	collectibleUsernames CollectibleUsernamesStore
+	officialGifts        OfficialGiftsSource
+	now                  func() time.Time
 }
 
 func NewService(deps Dependencies) *Service {
@@ -195,6 +206,9 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	}
 	if deps.Gifts != nil {
 		s.gifts = deps.Gifts
+	}
+	if deps.CollectibleUsernames != nil {
+		s.collectibleUsernames = deps.CollectibleUsernames
 	}
 	if deps.OfficialGifts != nil {
 		s.officialGifts = deps.OfficialGifts
@@ -716,6 +730,89 @@ func (s *Service) GrantStarGift(ctx context.Context, req GrantStarGiftRequest) (
 			details["notify_error"] = err.Error()
 		}
 		return CommandResult{Message: "gift granted", Details: details}, nil
+	})
+}
+
+// SetCollectibleUsernameRequest marks a username as a Fragment-style
+// collectible/NFT username with a display price. Currency/Amount and
+// CryptoCurrency/CryptoAmount are purely informational display fields (e.g.
+// Currency="YUT", Amount=1000) -- nothing is actually charged; this only
+// changes what fragment.getCollectibleInfo reports to clients.
+type SetCollectibleUsernameRequest struct {
+	CommandMeta
+	Username       string `json:"username"`
+	Currency       string `json:"currency,omitempty"`
+	Amount         int64  `json:"amount,omitempty"`
+	CryptoCurrency string `json:"crypto_currency,omitempty"`
+	CryptoAmount   int64  `json:"crypto_amount,omitempty"`
+	URL            string `json:"url,omitempty"`
+	PurchaseDate   int64  `json:"purchase_date,omitempty"`
+}
+
+func (s *Service) SetCollectibleUsername(ctx context.Context, req SetCollectibleUsernameRequest) (CommandResult, error) {
+	username := strings.TrimSpace(strings.TrimPrefix(req.Username, "@"))
+	if username == "" {
+		return CommandResult{}, fmt.Errorf("username is required")
+	}
+	if s == nil || s.collectibleUsernames == nil {
+		return CommandResult{}, fmt.Errorf("admin collectible-username dependency is not configured")
+	}
+	var targetUserID int64
+	if s.users != nil {
+		if owner, found, err := s.users.AdminUserByUsername(ctx, username); err == nil && found {
+			targetUserID = owner.ID
+		}
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetCollectibleUsername, targetUserID, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{
+			"username":        username,
+			"currency":        req.Currency,
+			"amount":          req.Amount,
+			"crypto_currency": req.CryptoCurrency,
+			"crypto_amount":   req.CryptoAmount,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "dry-run completed", Details: details}, nil
+		}
+		saved, err := s.collectibleUsernames.Set(ctx, domain.CollectibleUsername{
+			Username:       username,
+			PurchaseDate:   req.PurchaseDate,
+			Currency:       req.Currency,
+			Amount:         req.Amount,
+			CryptoCurrency: req.CryptoCurrency,
+			CryptoAmount:   req.CryptoAmount,
+			URL:            req.URL,
+		}, strings.TrimSpace(req.CommandMeta.Actor))
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details["purchase_date"] = saved.PurchaseDate
+		return CommandResult{Message: "username marked collectible", Details: details}, nil
+	})
+}
+
+type RemoveCollectibleUsernameRequest struct {
+	CommandMeta
+	Username string `json:"username"`
+}
+
+func (s *Service) RemoveCollectibleUsername(ctx context.Context, req RemoveCollectibleUsernameRequest) (CommandResult, error) {
+	username := strings.TrimSpace(strings.TrimPrefix(req.Username, "@"))
+	if username == "" {
+		return CommandResult{}, fmt.Errorf("username is required")
+	}
+	if s == nil || s.collectibleUsernames == nil {
+		return CommandResult{}, fmt.Errorf("admin collectible-username dependency is not configured")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionRemoveCollectibleUsername, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"username": username}
+		if req.DryRun {
+			return CommandResult{Message: "dry-run completed", Details: details}, nil
+		}
+		if err := s.collectibleUsernames.Delete(ctx, username); err != nil {
+			return CommandResult{}, err
+		}
+		return CommandResult{Message: "collectible status removed", Details: details}, nil
 	})
 }
 

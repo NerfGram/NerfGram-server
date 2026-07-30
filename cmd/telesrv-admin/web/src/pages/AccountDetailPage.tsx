@@ -18,6 +18,8 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
   const [starsAmount, setStarsAmount] = useState("1000");
   const [giftId, setGiftId] = useState("");
   const [giftPriceLabel, setGiftPriceLabel] = useState("");
+  const [collectibleCurrency, setCollectibleCurrency] = useState("");
+  const [collectibleAmount, setCollectibleAmount] = useState("");
   const [freezeUntil, setFreezeUntil] = useState(() => toDateTimeLocal(new Date(Date.now() + 7 * 86400_000)));
   const [freezeAppealURL, setFreezeAppealURL] = useState("");
 
@@ -213,6 +215,47 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
                 tone="warn"
                 path="/api/actions/grant-star-gift"
                 payload={() => ({ user_id: account.ID, gift_id: toInt(giftId), price_label: giftPriceLabel })}
+                onDone={load}
+              />
+              <label className="duration-field">
+                <span>{t("account.collectibleCurrency")}</span>
+                <input
+                  aria-label={t("account.collectibleCurrencyAria")}
+                  value={collectibleCurrency}
+                  onChange={(event) => setCollectibleCurrency(event.target.value)}
+                  type="text"
+                  placeholder="YUT"
+                />
+              </label>
+              <label className="duration-field">
+                <span>{t("account.collectibleAmount")}</span>
+                <input
+                  aria-label={t("account.collectibleAmountAria")}
+                  value={collectibleAmount}
+                  onChange={(event) => setCollectibleAmount(event.target.value)}
+                  type="number"
+                  min="0"
+                  placeholder="1000"
+                />
+              </label>
+              <ActionButton
+                label={t("account.setCollectibleUsername")}
+                icon={<Star size={15} />}
+                tone="warn"
+                path="/api/actions/set-collectible-username"
+                payload={() => ({
+                  username: account.Username,
+                  currency: collectibleCurrency,
+                  amount: toInt(collectibleAmount),
+                })}
+                onDone={load}
+              />
+              <ActionButton
+                label={t("account.removeCollectibleUsername")}
+                icon={<Star size={15} />}
+                tone="danger"
+                path="/api/actions/remove-collectible-username"
+                payload={() => ({ username: account.Username })}
                 onDone={load}
               />
               <ActionButton
