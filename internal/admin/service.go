@@ -698,8 +698,8 @@ func (s *Service) GrantStarGift(ctx context.Context, req GrantStarGiftRequest) (
 			HideName:    req.HideName,
 			Message:     req.Message,
 			ChargeStars: gift.Stars,
-			IssuedAt:    now.Unix(),
-			ExpiresAt:   now.Unix() + 600,
+			IssuedAt:    int(now.Unix()),
+			ExpiresAt:   int(now.Unix() + 600),
 		}
 		issued, err := s.gifts.IssuePurchaseForm(ctx, form)
 		if err != nil {
