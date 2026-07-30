@@ -475,6 +475,20 @@ func (s *Service) createPhoneCode(ctx context.Context, phone string, existingUse
 	code := s.fixedCode
 	channel := codeChannelPhone
 	deliveryID := ""
+	// Existing accounts never get the static dev code: it's already delivered
+	// in-app to the user's other logged-in sessions via deliverLoginCode
+	// below, so a random code here is both safe (an attacker who doesn't
+	// already control a session can't see it) and usable (the real owner
+	// can). Only brand-new signups (existingUserID == 0), which have no
+	// other session to deliver to, fall back to the fixed dev code when no
+	// real SMS provider is configured.
+	if existingUserID != 0 {
+		var err error
+		code, err = randomDigits(s.phoneCodeLength)
+		if err != nil {
+			return "", err
+		}
+	}
 	if s.phoneCodeSender != nil {
 		code, err = randomDigits(s.phoneCodeLength)
 		if err != nil {
