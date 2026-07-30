@@ -23,6 +23,7 @@ const maxCloseFriendsCount = 5000
 type phonePrivacyService interface {
 	userprojection.PrivacyEvaluator
 	AddAllowUser(ctx context.Context, ownerUserID int64, key domain.PrivacyKey, targetUserID int64) (domain.PrivacyRules, bool, error)
+	CanSeeBatch(ctx context.Context, ownerUserIDs []int64, viewerUserID int64, keys []domain.PrivacyKey) (map[int64]map[domain.PrivacyKey]bool, error)
 }
 
 // Service 提供通讯录查询。
