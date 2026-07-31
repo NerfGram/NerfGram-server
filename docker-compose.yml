@@ -6,7 +6,7 @@ services:
     image: postgres:17-alpine
     container_name: telesrv-postgres
     # Keep some sane defaults for dev
-    command:
+    command:  
       - "postgres"
       - "-c"
       - "max_locks_per_transaction=512"
@@ -65,11 +65,40 @@ services:
       TELESRV_POSTGRES_DSN: "postgres://telesrv:telesrv@postgres:5432/telesrv?sslmode=disable"
       TELESRV_REDIS_ADDR: "redis:6379"
       TELESRV_BLOB_DIR: "/app/data/blobs"
+      TELESRV_ADMIN_UI_ADDR: "0.0.0.0:2600"
+      TELESRV_ADMIN_API_ADDR: "0.0.0.0:2599"
+      # Set these in your .env or override via environment for security
+      TELESRV_ADMIN_API_TOKEN: "changeme_admin_api_token"
+      TELESRV_ADMIN_UI_PASSWORD: "changeme_ui_password"
     volumes:
       - ./data:/app/data
     ports:
       - "2398:2398"
       - "2399:2399"
+      # admin UI is exposed by the separate telesrv-admin service
+    restart: unless-stopped
+  telesrv-admin:
+    build:
+      context: .
+      dockerfile: Dockerfile.admin
+    container_name: telesrv-admin
+    image: telesrv-admin:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      telesrv:
+        condition: service_started
+    environment:
+      TELESRV_ADMIN_UI_ADDR: "0.0.0.0:2600"
+      TELESRV_ADMIN_API_ADDR: "http://telesrv:2599"
+      TELESRV_ADMIN_API_TOKEN: "changeme_admin_api_token"
+      TELESRV_ADMIN_UI_PASSWORD: "changeme_ui_password"
+      TELESRV_ADMIN_SESSION_KEY: "changeme_admin_session_key"
+      TELESRV_POSTGRES_DSN: "postgres://telesrv:telesrv@postgres:5432/telesrv?sslmode=disable"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "2600:2600"
     restart: unless-stopped
 
 volumes:

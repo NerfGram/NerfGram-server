@@ -1,0 +1,19 @@
+FROM golang:1.26-alpine AS builder
+ARG GOPROXY=https://proxy.golang.org
+ENV GOPROXY=${GOPROXY}
+WORKDIR /src
+RUN --mount=type=cache,target=/var/cache/apk apk add --no-cache git ca-certificates
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY . .
+# Build the admin UI binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /app/telesrv-admin ./cmd/telesrv-admin
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=builder /app/telesrv-admin /app/telesrv-admin
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+VOLUME ["/app/data"]
+EXPOSE 2600/tcp
+USER nonroot
+ENTRYPOINT ["/app/telesrv-admin"]
+
