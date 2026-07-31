@@ -442,7 +442,7 @@ func tgChannel(viewerUserID int64, ch domain.Channel, self *domain.ChannelMember
 	}
 	if ch.Username != "" {
 		out.SetUsername(ch.Username)
-		out.SetUsernames(tgUsernames(ch.Username, "", false))
+		out.SetUsernames(tgUsernames(ch.Username, nil))
 	}
 	if color := tgPeerColor(ch.Color); color != nil {
 		out.SetColor(color)

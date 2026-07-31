@@ -17,5 +17,18 @@ build
 vendor
 /*.tar
 
+# Runtime data — mounted as a volume, must not bust the build context cache.
 data
 
+# Local BuildKit export (docker compose cache_to); not part of the image context.
+.docker-build-cache
+
+# Docs and local tooling (not compiled into telesrv images).
+docs
+scripts
+.github
+*.md
+
+# Admin UI sources; image embeds cmd/telesrv-admin/web/dist only.
+cmd/telesrv-admin/web/node_modules
+cmd/telesrv-admin/web/src

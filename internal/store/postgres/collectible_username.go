@@ -66,25 +66,24 @@ func (s *CollectibleUsernameStore) Get(ctx context.Context, username string) (do
 	return cu, true, nil
 }
 
-// ByOwners batch-loads each owner's collectible username (at most one per
-// owner), for populating domain.User when serializing many users at once.
-func (s *CollectibleUsernameStore) ByOwners(ctx context.Context, ownerUserIDs []int64) (map[int64]domain.CollectibleUsername, error) {
+// ByOwners batch-loads each owner's collectible usernames (zero or more per owner).
+func (s *CollectibleUsernameStore) ByOwners(ctx context.Context, ownerUserIDs []int64) (map[int64][]domain.CollectibleUsername, error) {
 	if len(ownerUserIDs) == 0 {
 		return nil, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT `+collectibleUsernameColumns+` FROM public.collectible_usernames WHERE owner_user_id = ANY($1)`, ownerUserIDs)
+	rows, err := s.db.Query(ctx, `SELECT `+collectibleUsernameColumns+` FROM public.collectible_usernames WHERE owner_user_id = ANY($1) ORDER BY owner_user_id, username`, ownerUserIDs)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[int64]domain.CollectibleUsername, len(ownerUserIDs))
+	out := make(map[int64][]domain.CollectibleUsername, len(ownerUserIDs))
 	for rows.Next() {
 		cu, err := scanCollectibleUsername(rows)
 		if err != nil {
 			return nil, err
 		}
 		if cu.OwnerUserID != 0 {
-			out[cu.OwnerUserID] = cu
+			out[cu.OwnerUserID] = append(out[cu.OwnerUserID], cu)
 		}
 	}
 	return out, rows.Err()
@@ -118,8 +117,8 @@ func (s *CollectibleUsernameStore) Issue(ctx context.Context, cu domain.Collecti
 			return domain.ErrUsernameOccupied
 		}
 		if _, err := tx.Exec(ctx, `
-INSERT INTO peer_usernames (username_lower, peer_type, peer_id)
-VALUES ($1, $2, $3)`, normalized, peerUsernameTypeUser, cu.OwnerUserID); err != nil {
+INSERT INTO peer_usernames (username_lower, peer_type, peer_id, is_editable)
+VALUES ($1, $2, $3, false)`, normalized, peerUsernameTypeUser, cu.OwnerUserID); err != nil {
 			if isUniqueViolation(err) {
 				return domain.ErrUsernameOccupied
 			}

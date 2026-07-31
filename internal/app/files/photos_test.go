@@ -706,7 +706,7 @@ func (f *fakeGIFTranscoder) Transcode(_ context.Context, _ []byte) (GIFVideo, er
 	return f.result, f.err
 }
 
-func (f *fakeVideoThumbnailer) Extract(context.Context, []byte, string) ([]byte, error) {
+func (f *fakeVideoThumbnailer) Extract(_ context.Context, _ []byte, _ string, _ int) ([]byte, error) {
 	f.calls++
 	if f.err != nil {
 		return nil, f.err

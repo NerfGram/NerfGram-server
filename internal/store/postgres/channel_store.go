@@ -119,7 +119,7 @@ EXISTS (SELECT 1 FROM channel_invites ci WHERE ci.channel_id = c.id AND NOT ci.r
 c.linked_chat_id, c.linked_community_id, c.monoforum, c.linked_monoforum_id, c.slowmode_seconds, c.boosts_unrestrict, c.default_banned_rights::text,
 c.available_reactions::text, c.color_set, c.color, c.color_background_emoji_id, c.profile_color_set, c.profile_color, c.profile_color_background_emoji_id, c.emoji_status_document_id, c.emoji_status_until,
 c.wallpaper::text, c.participants_count, c.admins_count, c.kicked_count, c.banned_count, c.top_message_id, c.pinned_message_id, c.pts,
-c.ttl_period, c.date, c.deleted, c.photo_id, c.photo_dc_id, c.photo_stripped,
+c.ttl_period, c.date, c.deleted, c.photo_id, c.photo_dc_id, c.photo_stripped, c.photo_has_video,
 c.active_call_id, c.active_call_access_hash, c.active_call_not_empty`
 
 const channelMessageColumns = `channel_id, id, random_id, sender_user_id, from_peer_type, from_peer_id,

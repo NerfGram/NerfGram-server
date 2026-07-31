@@ -306,6 +306,7 @@ type UserIdentityService interface {
 	UpdateUsername(ctx context.Context, userID int64, username string) (domain.User, error)
 	UpdateBirthday(ctx context.Context, userID int64, birthday domain.Birthday) (domain.User, error)
 	UpdatePersonalChannel(ctx context.Context, userID int64, channelID int64) (domain.User, error)
+	SetMainProfileTab(ctx context.Context, userID int64, tab string) (domain.User, error)
 	ResolveUsername(ctx context.Context, currentUserID int64, username string) (domain.User, bool, error)
 	ResolvePhone(ctx context.Context, currentUserID int64, phone string) (domain.User, bool, error)
 }

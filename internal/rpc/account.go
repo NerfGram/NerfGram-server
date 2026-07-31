@@ -68,6 +68,9 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 		return r.onAccountUpdatePersonalChannel(ctx, layerRequest.
 			Channel)
 	})
+	registerRPC[*tg.AccountSetMainProfileTabRequest](d, tlprofile.SemanticMethodAccountSetMainProfileTab, func(ctx context.Context, layerRequest *tg.AccountSetMainProfileTabRequest) (any, error) {
+		return r.onAccountSetMainProfileTab(ctx, layerRequest)
+	})
 	registerRPC[*tg.AccountGetPasswordRequest](d, tlprofile.SemanticMethodAccountGetPassword, func(ctx context.Context, layerRequest *tg.AccountGetPasswordRequest) (any, error) {
 		return r.onAccountGetPassword(ctx)
 	})
@@ -1890,7 +1893,7 @@ func (r *Router) pushUsernameUpdate(ctx context.Context, u domain.User) {
 			UserID:    u.ID,
 			FirstName: u.FirstName,
 			LastName:  u.LastName,
-			Usernames: tgUsernames(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
+			Usernames: tgUsernames(u.Username, userCollectibles(u)),
 		}},
 		Users: []tg.UserClass{r.tgSelfUser(u)},
 		Date:  int(r.clock.Now().Unix()),

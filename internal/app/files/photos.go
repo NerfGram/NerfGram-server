@@ -172,6 +172,7 @@ func (s *Service) createAvatarVideoFromUpload(ctx context.Context, file domain.U
 	if body.Size == 0 {
 		return domain.Photo{}, domain.ErrPhotoInvalid
 	}
+	body = s.maybeFaststartVideoBlob(ctx, "video/mp4", body)
 	photoID := randomID()
 	blob := domain.FileBlob{
 		LocationKey: fmt.Sprintf("photo:%d:u", photoID),
@@ -190,11 +191,12 @@ func (s *Service) createAvatarVideoFromUpload(ctx context.Context, file domain.U
 	if err != nil {
 		return domain.Photo{}, err
 	}
+	videoW, videoH := s.avatarVideoDimensions(ctx, body)
 	sizes = append(sizes, domain.PhotoSize{
 		Kind:         domain.PhotoSizeKindVideo,
 		Type:         "u",
-		W:            640,
-		H:            640,
+		W:            videoW,
+		H:            videoH,
 		Size:         int(body.Size),
 		VideoStartTs: videoStartTs,
 	})
@@ -794,7 +796,7 @@ func (s *Service) generateVideoThumbFallback(ctx context.Context, docID int64, d
 	if s.thumbs == nil || !documentSpecIsVideo(spec) || len(data) > videoThumbnailMaxInputBytes {
 		return domain.PhotoSize{}, false
 	}
-	thumbData, err := s.thumbs.Extract(ctx, data, spec.MimeType)
+	thumbData, err := s.thumbs.Extract(ctx, data, spec.MimeType, documentVideoThumbMaxEdge)
 	if err != nil {
 		s.log.Warn("server-side video thumbnail fallback failed",
 			zap.Int64("document_id", docID),
@@ -858,7 +860,7 @@ type photoSizeSpec struct {
 }
 
 func photoSizeSpecsForAvatar(data []byte) []photoSizeSpec {
-	w, h := imageDimensions(data, 640, 640)
+	w, h := imageDimensions(data, avatarMaxSize, avatarMaxSize)
 	shortSide := w
 	if h < shortSide {
 		shortSide = h
@@ -901,7 +903,8 @@ func scaleDown(w, h, max int) (int, int) {
 }
 
 const (
-	avatarStillSize            = 640
+	avatarMaxSize              = 1024
+	avatarStillSize            = avatarMaxSize
 	avatarMarkupScale          = 0.70
 	avatarMarkupMaxSourceBytes = 2 << 20 // emoji/sticker thumb 小对象保护线。
 )
@@ -917,7 +920,7 @@ func (s *Service) avatarVideoStill(ctx context.Context, body assembledUploadBlob
 	if s.thumbs != nil && body.Size > 0 && body.Size <= videoThumbnailMaxInputBytes {
 		data, total, err := s.blobs.GetRange(ctx, body.ObjectKey, 0, body.Size)
 		if err == nil && int64(len(data)) == total && total == body.Size {
-			if thumb, err := s.thumbs.Extract(ctx, data, "video/mp4"); err == nil && len(thumb) > 0 {
+			if thumb, err := s.thumbs.Extract(ctx, data, "video/mp4", avatarMaxSize); err == nil && len(thumb) > 0 {
 				return thumb
 			} else if err != nil {
 				s.log.Debug("extract avatar video first frame failed, falling back to composed still",
@@ -933,6 +936,37 @@ func (s *Service) avatarVideoStill(ctx context.Context, body assembledUploadBlob
 		}
 	}
 	return s.generatedAvatarStill(ctx, markup)
+}
+
+func (s *Service) avatarVideoDimensions(ctx context.Context, body assembledUploadBlob) (int, int) {
+	w, h := avatarMaxSize, avatarMaxSize
+	prober, ok := s.thumbs.(VideoDimensionProber)
+	if !ok || prober == nil || body.Size <= 0 || body.Size > videoThumbnailMaxInputBytes {
+		return w, h
+	}
+	data, total, err := s.blobs.GetRange(ctx, body.ObjectKey, 0, body.Size)
+	if err != nil || int64(len(data)) != total || total != body.Size {
+		return w, h
+	}
+	probeW, probeH, err := prober.ProbeDimensions(ctx, data, "video/mp4")
+	if err != nil || probeW <= 0 || probeH <= 0 {
+		return w, h
+	}
+	return avatarVideoDisplayDimensions(probeW, probeH)
+}
+
+func avatarVideoDisplayDimensions(sourceW, sourceH int) (int, int) {
+	if sourceW <= 0 || sourceH <= 0 {
+		return avatarMaxSize, avatarMaxSize
+	}
+	side := sourceW
+	if sourceH > side {
+		side = sourceH
+	}
+	if side > avatarMaxSize {
+		side = avatarMaxSize
+	}
+	return side, side
 }
 
 func (s *Service) generatedAvatarStill(ctx context.Context, markup domain.PhotoSize) []byte {

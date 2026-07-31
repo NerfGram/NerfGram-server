@@ -938,14 +938,16 @@ func (s *CommunityStore) SetCommunityPhoto(_ context.Context, user, id int64, ph
 	return s.editViewLocked(user, id, domain.CommunityMember.CanChangeInfo, func(c *domain.Community) bool {
 		pid, dc := int64(0), 0
 		var stripped []byte
+		photoHasVideo := false
 		if photo != nil {
 			pid, dc = photo.ID, photo.DCID
 			stripped = domain.StrippedFromSizes(photo.Sizes)
+			photoHasVideo = domain.PhotoHasVideo(photo.Sizes)
 		}
-		if c.PhotoID == pid && c.PhotoDCID == dc && string(c.PhotoStripped) == string(stripped) {
+		if c.PhotoID == pid && c.PhotoDCID == dc && string(c.PhotoStripped) == string(stripped) && c.PhotoHasVideo == photoHasVideo {
 			return false
 		}
-		c.PhotoID, c.PhotoDCID, c.PhotoStripped = pid, dc, append([]byte(nil), stripped...)
+		c.PhotoID, c.PhotoDCID, c.PhotoStripped, c.PhotoHasVideo = pid, dc, append([]byte(nil), stripped...), photoHasVideo
 		return true
 	})
 }

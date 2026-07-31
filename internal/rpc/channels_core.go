@@ -145,7 +145,7 @@ func (r *Router) onChannelsGetFullChannel(ctx context.Context, input tg.InputCha
 				}
 			}
 			return &tg.MessagesChatFull{
-				FullChat: tgCommunityFull(view),
+				FullChat: r.enrichCommunityFull(ctx, view),
 				Chats:    tgCommunityHydratedChats(userID, view),
 				Users:    tgUsers(view.Users),
 			}, nil
@@ -188,6 +188,9 @@ func (r *Router) onChannelsGetFullChannel(ctx context.Context, input tg.InputCha
 		return nil, err
 	}
 	full := tgChannelFull(view, r.cfg.PublicBaseURL)
+	full.ChatPhoto = r.enrichChatPhotoFull(ctx, view.Channel.PhotoID, view.Channel.PhotoHasVideo, func() tg.PhotoClass {
+		return tgChannelChatPhotoFull(view.Channel)
+	})
 	r.applyStarGiftsCountToChannelFull(ctx, view.Channel.ID, full)
 	userIDs := []int64{view.Channel.CreatorUserID, view.Self.UserID}
 	// 注：Bots 过滤实际会返回群内 bot（TestGroupBotRPCShape 覆盖），这里据此富化 full.BotInfo。

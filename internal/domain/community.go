@@ -38,6 +38,7 @@ type Community struct {
 	PhotoID             int64
 	PhotoDCID           int
 	PhotoStripped       []byte
+	PhotoHasVideo       bool
 }
 
 type CommunityMemberRole string

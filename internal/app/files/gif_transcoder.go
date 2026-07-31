@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -155,14 +154,6 @@ func (t *FFmpegGIFTranscoder) probe(ctx context.Context, path string) (GIFVideo,
 		return GIFVideo{}, fmt.Errorf("incomplete gif video metadata")
 	}
 	return GIFVideo{Width: stream.Width, Height: stream.Height, Duration: duration}, nil
-}
-
-func parsePositiveFloat(value string) float64 {
-	v, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-	if err != nil || v <= 0 {
-		return 0
-	}
-	return v
 }
 
 func commandError(op string, err error, output []byte) error {

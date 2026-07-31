@@ -26,6 +26,7 @@ logs/
 tmp/
 .gocache/
 .tdesktop-e2e/
+.docker-build-cache/
 
 # IDE
 .idea/

@@ -389,10 +389,11 @@ func (s *ChannelStore) SetChannelPhoto(ctx context.Context, userID, channelID in
 		return domain.SetChannelPhotoResult{}, domain.ErrChannelAdminRequired
 	}
 	var (
-		photoID  int64
-		dcID     int
-		stripped []byte
-		action   domain.ChannelMessageAction
+		photoID       int64
+		dcID          int
+		stripped      []byte
+		photoHasVideo bool
+		action        domain.ChannelMessageAction
 	)
 	if photo != nil && photo.ID != 0 {
 		if channel.PhotoID == photo.ID {
@@ -401,6 +402,7 @@ func (s *ChannelStore) SetChannelPhoto(ctx context.Context, userID, channelID in
 		photoID = photo.ID
 		dcID = photo.DCID
 		stripped = domain.StrippedFromSizes(photo.Sizes)
+		photoHasVideo = domain.PhotoHasVideo(photo.Sizes)
 		action = domain.ChannelMessageAction{
 			Type:  domain.ChannelActionChatEditPhoto,
 			Photo: domain.ClonePhotoPtr(photo),
@@ -414,8 +416,8 @@ func (s *ChannelStore) SetChannelPhoto(ctx context.Context, userID, channelID in
 	if stripped == nil {
 		stripped = []byte{}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE channels SET photo_id = $2, photo_dc_id = $3, photo_stripped = $4, updated_at = now() WHERE id = $1`,
-		channelID, photoID, dcID, stripped); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE channels SET photo_id = $2, photo_dc_id = $3, photo_stripped = $4, photo_has_video = $5, updated_at = now() WHERE id = $1`,
+		channelID, photoID, dcID, stripped, photoHasVideo); err != nil {
 		return domain.SetChannelPhotoResult{}, fmt.Errorf("update channel photo: %w", err)
 	}
 	if s.rowCache != nil {
@@ -424,6 +426,7 @@ func (s *ChannelStore) SetChannelPhoto(ctx context.Context, userID, channelID in
 	channel.PhotoID = photoID
 	channel.PhotoDCID = dcID
 	channel.PhotoStripped = stripped
+	channel.PhotoHasVideo = photoHasVideo
 	msg, event, err := s.insertServiceMessage(ctx, tx, channel, userID, date, action)
 	if err != nil {
 		return domain.SetChannelPhotoResult{}, err

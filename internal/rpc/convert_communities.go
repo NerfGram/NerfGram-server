@@ -1,6 +1,8 @@
 package rpc
 
 import (
+	"context"
+
 	"github.com/iamxvbaba/td/tg"
 
 	"telesrv/internal/domain"
@@ -13,6 +15,9 @@ func tgCommunityPhoto(c domain.Community) tg.ChatPhotoClass {
 	out := &tg.ChatPhoto{PhotoID: c.PhotoID, DCID: c.PhotoDCID}
 	if len(c.PhotoStripped) > 0 {
 		out.SetStrippedThumb(c.PhotoStripped)
+	}
+	if c.PhotoHasVideo {
+		out.SetHasVideo(true)
 	}
 	return out
 }
@@ -74,6 +79,14 @@ func tgCommunityFull(view domain.CommunityView) *tg.CommunityFull {
 		out.SetPeerLinkRequestsPending(view.PendingRequests)
 	}
 	return out
+}
+
+func (r *Router) enrichCommunityFull(ctx context.Context, view domain.CommunityView) *tg.CommunityFull {
+	full := tgCommunityFull(view)
+	full.ChatPhoto = r.enrichChatPhotoFull(ctx, view.Community.PhotoID, view.Community.PhotoHasVideo, func() tg.PhotoClass {
+		return tgCommunityFullPhoto(view.Community)
+	})
+	return full
 }
 
 func tgCommunityHydratedChats(viewerUserID int64, view domain.CommunityView) []tg.ChatClass {

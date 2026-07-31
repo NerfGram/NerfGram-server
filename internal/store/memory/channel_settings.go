@@ -246,6 +246,7 @@ func (s *ChannelStore) SetChannelPhoto(_ context.Context, userID, channelID int6
 		channel.PhotoID = photo.ID
 		channel.PhotoDCID = photo.DCID
 		channel.PhotoStripped = domain.StrippedFromSizes(photo.Sizes)
+		channel.PhotoHasVideo = domain.PhotoHasVideo(photo.Sizes)
 	} else {
 		if channel.PhotoID == 0 {
 			return domain.SetChannelPhotoResult{}, domain.ErrChannelNotModified
@@ -254,6 +255,7 @@ func (s *ChannelStore) SetChannelPhoto(_ context.Context, userID, channelID int6
 		channel.PhotoID = 0
 		channel.PhotoDCID = 0
 		channel.PhotoStripped = nil
+		channel.PhotoHasVideo = false
 	}
 	msg, event := s.appendChannelServiceMessageLocked(channelID, userID, date, action)
 	channel.TopMessageID = msg.ID

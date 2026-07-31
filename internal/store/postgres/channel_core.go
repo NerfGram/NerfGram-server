@@ -501,7 +501,7 @@ func channelScanDest(ch *domain.Channel, rights, reactionPolicy *string, wallpap
 		reactionPolicy, &ch.Color.HasColor, &ch.Color.Color, &ch.Color.BackgroundEmojiID, &ch.ProfileColor.HasColor, &ch.ProfileColor.Color, &ch.ProfileColor.BackgroundEmojiID, &ch.EmojiStatus.DocumentID, &ch.EmojiStatus.Until,
 		wallpaper, &ch.ParticipantsCount, &ch.AdminsCount, &ch.KickedCount, &ch.BannedCount, &ch.TopMessageID,
 		&ch.PinnedMessageID, &ch.Pts, &ch.TTLPeriod, &ch.Date, &ch.Deleted,
-		&ch.PhotoID, &ch.PhotoDCID, &ch.PhotoStripped,
+		&ch.PhotoID, &ch.PhotoDCID, &ch.PhotoStripped, &ch.PhotoHasVideo,
 		&ch.ActiveCallID, &ch.ActiveCallAccessHash, &ch.ActiveCallNotEmpty,
 	}
 }

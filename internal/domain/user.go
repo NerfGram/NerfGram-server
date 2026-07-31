@@ -111,9 +111,16 @@ type User struct {
 	// active/shown one; the owner controls this via account.toggleUsername.
 	CollectibleUsername       string
 	CollectibleUsernameActive bool
+	// CollectibleUsernames lists every admin-issued collectible username for
+	// this account (may be multiple). CollectibleUsername/-Active mirror the
+	// active entry for legacy call sites.
+	CollectibleUsernames []CollectibleUsername
 	// Fake marks the account with the client-visible "Fake" warning badge
 	// (e.g. for scam accounts), set by an admin.
-	Fake        bool
+	Fake bool
+	// MainProfileTab is the profile page tab the user selected via
+	// account.setMainProfileTab (empty = client default).
+	MainProfileTab string
 	CountryCode string
 	Verified    bool
 	Support     bool

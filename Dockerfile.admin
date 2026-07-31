@@ -1,19 +1,39 @@
-FROM golang:1.26-alpine AS builder
-ARG GOPROXY=https://proxy.golang.org
-ENV GOPROXY=${GOPROXY}
+# syntax=docker/dockerfile:1.4
+#
+# Admin UI binary (embeds prebuilt cmd/telesrv-admin/web/dist). BuildKit cache mounts
+# keep apk and Go module/build caches warm across rebuilds.
+#
+ARG GO_VERSION=1.26
+FROM golang:${GO_VERSION}-alpine AS builder
+LABEL stage=builder
 WORKDIR /src
-RUN --mount=type=cache,target=/var/cache/apk apk add --no-cache git ca-certificates
+
+RUN --mount=type=cache,target=/var/cache/apk \
+    apk add git ca-certificates
+
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod download
+
 COPY . .
-# Build the admin UI binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /app/telesrv-admin ./cmd/telesrv-admin
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /app/telesrv-admin ./cmd/telesrv-admin
 
 FROM gcr.io/distroless/static:nonroot
+LABEL stage=runtime
+WORKDIR /app
+
 COPY --from=builder /app/telesrv-admin /app/telesrv-admin
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
 VOLUME ["/app/data"]
 EXPOSE 2600/tcp
+
 USER nonroot
 ENTRYPOINT ["/app/telesrv-admin"]
-

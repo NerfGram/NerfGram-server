@@ -7,6 +7,16 @@ import (
 	"telesrv/internal/domain"
 )
 
+func userCollectibles(u domain.User) []domain.CollectibleUsername {
+	if len(u.CollectibleUsernames) > 0 {
+		return u.CollectibleUsernames
+	}
+	if u.CollectibleUsername != "" {
+		return []domain.CollectibleUsername{{Username: u.CollectibleUsername, Active: u.CollectibleUsernameActive}}
+	}
+	return nil
+}
+
 // tgSelfUser 把 domain.User 转为 self 标记的 tg.User（optional 字段由 Encode 自动 SetFlags）。
 func tgSelfUser(u domain.User) *tg.User {
 	if u.Deleted {
@@ -17,7 +27,7 @@ func tgSelfUser(u domain.User) *tg.User {
 		AccessHash:    u.AccessHash,
 		FirstName:     u.FirstName,
 		LastName:      u.LastName,
-		Username:      tgActiveUsername(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
+		Username:      tgActiveUsername(u.Username, userCollectibles(u)),
 		Phone:         u.Phone,
 		Self:          true,
 		Verified:      u.Verified,
@@ -26,7 +36,7 @@ func tgSelfUser(u domain.User) *tg.User {
 		Contact:       u.Contact,
 		MutualContact: u.Mutual,
 		CloseFriend:   u.CloseFriend,
-		Usernames:     tgUsernames(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
+		Usernames:     tgUsernames(u.Username, userCollectibles(u)),
 	}
 	applyTgUserBotFields(out, u)
 	applyTgUserPremiumFields(out, u)
@@ -49,7 +59,7 @@ func tgUser(u domain.User) *tg.User {
 		AccessHash:    u.AccessHash,
 		FirstName:     u.FirstName,
 		LastName:      u.LastName,
-		Username:      tgActiveUsername(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
+		Username:      tgActiveUsername(u.Username, userCollectibles(u)),
 		Phone:         u.Phone,
 		Verified:      u.Verified,
 		Fake:          u.Fake,
@@ -57,7 +67,7 @@ func tgUser(u domain.User) *tg.User {
 		Contact:       u.Contact,
 		MutualContact: u.Mutual,
 		CloseFriend:   u.CloseFriend,
-		Usernames:     tgUsernames(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
+		Usernames:     tgUsernames(u.Username, userCollectibles(u)),
 	}
 	applyTgUserBotFields(out, u)
 	applyTgUserPremiumFields(out, u)
@@ -215,27 +225,38 @@ func tgUserStatus(status domain.UserStatus) tg.UserStatusClass {
 }
 
 // tgUsernames builds the usernames[] vector: the account's own editable
-// username plus, if one has been issued, its admin-issued collectible
-// username. Exactly one of the two is Active at a time -- whichever the
-// owner last selected via account.toggleUsername (defaulting to the
-// editable one if no collectible username exists or none is active yet).
-func tgUsernames(username, collectibleUsername string, collectibleActive bool) []tg.Username {
+// username plus every admin-issued collectible username. Exactly one entry is
+// Active at a time -- whichever the owner last selected via
+// account.toggleUsername (defaulting to the editable one).
+func tgUsernames(username string, collectibles []domain.CollectibleUsername) []tg.Username {
 	var out []tg.Username
-	if username != "" {
-		out = append(out, tg.Username{Editable: true, Active: !collectibleActive || collectibleUsername == "", Username: username})
+	hasActiveCollectible := false
+	for _, cu := range collectibles {
+		if cu.Active {
+			hasActiveCollectible = true
+			break
+		}
 	}
-	if collectibleUsername != "" {
-		out = append(out, tg.Username{Editable: false, Active: collectibleActive, Username: collectibleUsername})
+	if username != "" {
+		out = append(out, tg.Username{Editable: true, Active: !hasActiveCollectible, Username: username})
+	}
+	for _, cu := range collectibles {
+		if cu.Username == "" {
+			continue
+		}
+		out = append(out, tg.Username{Editable: false, Active: cu.Active, Username: cu.Username})
 	}
 	return out
 }
 
 // tgActiveUsername returns whichever username should populate the top-level
-// (legacy, pre-multi-username) Username field: the collectible one if it's
-// the active one, otherwise the account's editable username.
-func tgActiveUsername(username, collectibleUsername string, collectibleActive bool) string {
-	if collectibleActive && collectibleUsername != "" {
-		return collectibleUsername
+// (legacy, pre-multi-username) Username field: the active collectible one if
+// any, otherwise the account's editable username.
+func tgActiveUsername(username string, collectibles []domain.CollectibleUsername) string {
+	for _, cu := range collectibles {
+		if cu.Active && cu.Username != "" {
+			return cu.Username
+		}
 	}
 	return username
 }

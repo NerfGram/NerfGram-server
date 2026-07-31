@@ -469,6 +469,7 @@ type Channel struct {
 	PhotoID       int64
 	PhotoDCID     int
 	PhotoStripped []byte
+	PhotoHasVideo bool
 }
 
 // MembersListAdminOnly 表示该频道的成员/订阅者列表仅管理员可查看。广播频道（非

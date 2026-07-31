@@ -226,6 +226,9 @@ func tgChatPhoto(ch domain.Channel) tg.ChatPhotoClass {
 	if len(ch.PhotoStripped) > 0 {
 		p.SetStrippedThumb(ch.PhotoStripped)
 	}
+	if ch.PhotoHasVideo {
+		p.SetHasVideo(true)
+	}
 	return p
 }
 

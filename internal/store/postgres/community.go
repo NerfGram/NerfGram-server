@@ -62,13 +62,13 @@ func (s *CommunityStore) appendCommunityServiceMessageTx(ctx context.Context, tx
 }
 
 const communityColumns = `id, access_hash, creator_user_id, title, about,
-default_banned_rights::text, photo_id, photo_dc_id, photo_stripped, date, deleted`
+default_banned_rights::text, photo_id, photo_dc_id, photo_stripped, photo_has_video, date, deleted`
 
 func scanCommunity(row rowScanner) (domain.Community, error) {
 	var c domain.Community
 	var rights string
 	if err := row.Scan(&c.ID, &c.AccessHash, &c.CreatorUserID, &c.Title, &c.About,
-		&rights, &c.PhotoID, &c.PhotoDCID, &c.PhotoStripped, &c.Date, &c.Deleted); err != nil {
+		&rights, &c.PhotoID, &c.PhotoDCID, &c.PhotoStripped, &c.PhotoHasVideo, &c.Date, &c.Deleted); err != nil {
 		return domain.Community{}, err
 	}
 	if err := json.Unmarshal([]byte(rights), &c.DefaultBannedRights); err != nil {
@@ -1182,14 +1182,16 @@ func (s *CommunityStore) SetCommunityPhoto(ctx context.Context, actorUserID, com
 		}
 		id, dc := int64(0), 0
 		var stripped []byte
+		photoHasVideo := false
 		if photo != nil {
 			id, dc = photo.ID, photo.DCID
 			stripped = domain.StrippedFromSizes(photo.Sizes)
+			photoHasVideo = domain.PhotoHasVideo(photo.Sizes)
 		}
-		if c.PhotoID == id && c.PhotoDCID == dc && string(c.PhotoStripped) == string(stripped) {
+		if c.PhotoID == id && c.PhotoDCID == dc && string(c.PhotoStripped) == string(stripped) && c.PhotoHasVideo == photoHasVideo {
 			return false, nil
 		}
-		_, e = tx.Exec(ctx, `UPDATE communities SET photo_id=$2,photo_dc_id=$3,photo_stripped=$4,updated_at=now() WHERE id=$1`, communityID, id, dc, stripped)
+		_, e = tx.Exec(ctx, `UPDATE communities SET photo_id=$2,photo_dc_id=$3,photo_stripped=$4,photo_has_video=$5,updated_at=now() WHERE id=$1`, communityID, id, dc, stripped, photoHasVideo)
 		return true, e
 	})
 	if err != nil {

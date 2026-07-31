@@ -1,5 +1,9 @@
-version: "3.9"
 name: telesrv
+
+# BuildKit is required for Dockerfile cache mounts (apk/go). Set in .env:
+#   DOCKER_BUILDKIT=1
+#   COMPOSE_DOCKER_CLI_BUILD=1
+# Persistent local BuildKit cache (cache_to/cache_from) lives under .docker-build-cache/.
 
 services:
   postgres:
@@ -52,7 +56,11 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        - GO_VERSION=1.26
+        GO_VERSION: "1.26"
+      cache_from:
+        - type=local,src=.docker-build-cache/telesrv
+      cache_to:
+        - type=local,dest=.docker-build-cache/telesrv,mode=max
     container_name: telesrv-server
     image: telesrv-server:local
     depends_on:
@@ -82,6 +90,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.admin
+      args:
+        GO_VERSION: "1.26"
+      cache_from:
+        - type=local,src=.docker-build-cache/telesrv-admin
+      cache_to:
+        - type=local,dest=.docker-build-cache/telesrv-admin,mode=max
     container_name: telesrv-admin
     image: telesrv-admin:local
     depends_on:

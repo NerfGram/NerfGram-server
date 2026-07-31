@@ -64,15 +64,15 @@ func replacePeerUsernameTx(ctx context.Context, tx pgx.Tx, peerType string, peer
 			return domain.ErrUsernameOccupied
 		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM peer_usernames WHERE peer_type = $1 AND peer_id = $2`, peerType, peerID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM peer_usernames WHERE peer_type = $1 AND peer_id = $2 AND is_editable`, peerType, peerID); err != nil {
 		return fmt.Errorf("delete peer username: %w", err)
 	}
 	if usernameLower == "" {
 		return nil
 	}
 	if _, err := tx.Exec(ctx, `
-INSERT INTO peer_usernames (username_lower, peer_type, peer_id)
-VALUES ($1, $2, $3)`, usernameLower, peerType, peerID); err != nil {
+INSERT INTO peer_usernames (username_lower, peer_type, peer_id, is_editable)
+VALUES ($1, $2, $3, true)`, usernameLower, peerType, peerID); err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrUsernameOccupied
 		}

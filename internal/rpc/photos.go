@@ -204,7 +204,7 @@ func parseProfilePhotoUpload(req profilePhotoUploadRequest) (profilePhotoUpload,
 	if hasFile && (hasVideo || hasMarkup) {
 		return profilePhotoUpload{}, 0, photoInvalidErr()
 	}
-	if hasVideoStartTs && !hasVideo {
+	if hasVideoStartTs && !hasVideo && !hasMarkup {
 		return profilePhotoUpload{}, 0, photoInvalidErr()
 	}
 	mediaFlags := 0
@@ -628,21 +628,16 @@ func (r *Router) resolveInputChatPhoto(ctx context.Context, userID int64, input 
 	case *tg.InputChatPhotoEmpty:
 		return nil, nil
 	case *tg.InputChatUploadedPhoto:
-		file, ok := in.GetFile()
-		if !ok {
-			return nil, photoInvalidErr()
-		}
 		if r.deps.Files == nil {
 			return nil, photoInvalidErr()
 		}
-		ref, ok := uploadedFileRef(userID, file)
-		if !ok {
-			return nil, fileReferenceInvalidErr()
-		}
-		// 频道/群头像用 avatar 尺寸（'a'/'c'），匹配 InputPeerPhotoFileLocation 下载路径。
-		photo, err := r.deps.Files.CreateAvatarFromUpload(ctx, ref)
+		upload, _, err := parseProfilePhotoUpload(in)
 		if err != nil {
-			return nil, photoUploadErr(err)
+			return nil, err
+		}
+		photo, err := r.createProfilePhoto(ctx, userID, upload)
+		if err != nil {
+			return nil, err
 		}
 		return &photo, nil
 	case *tg.InputChatPhoto:
@@ -676,4 +671,19 @@ func photoUploadErr(err error) error {
 	default:
 		return internalErr()
 	}
+}
+
+// enrichChatPhotoFull 在 channelFull/communityFull 中补全带 video_sizes 的 Photo。
+// Chat 列表用反范式的 ChatPhoto.has_video；完整 Photo 需从 media 存储加载。
+func (r *Router) enrichChatPhotoFull(ctx context.Context, photoID int64, hasVideo bool, fallback func() tg.PhotoClass) tg.PhotoClass {
+	if photoID == 0 {
+		return &tg.PhotoEmpty{}
+	}
+	if hasVideo && r.deps.Files != nil {
+		photo, found, err := r.deps.Files.GetPhoto(ctx, photoID)
+		if err == nil && found {
+			return tgPhoto(photo)
+		}
+	}
+	return fallback()
 }

@@ -27,19 +27,19 @@ type Service struct {
 	privacy              userprojection.PrivacyEvaluator
 	projector            *userprojection.Projector
 	collectibleUsernames CollectibleUsernameOwnerLookup
-	userFlags            UserFakeFlagLookup
+	userFlags            UserAccountFlagsLookup
 }
 
 // CollectibleUsernameOwnerLookup batch-resolves each owner's admin-issued
-// collectible username, so it can be attached to domain.User when loading.
+// collectible usernames, so they can be attached to domain.User when loading.
 type CollectibleUsernameOwnerLookup interface {
-	ByOwners(ctx context.Context, ownerUserIDs []int64) (map[int64]domain.CollectibleUsername, error)
+	ByOwners(ctx context.Context, ownerUserIDs []int64) (map[int64][]domain.CollectibleUsername, error)
 }
 
-// UserFakeFlagLookup batch-resolves the admin-set Fake badge for a set of
-// users.
-type UserFakeFlagLookup interface {
-	ByOwners(ctx context.Context, userIDs []int64) (map[int64]bool, error)
+// UserAccountFlagsLookup batch-resolves per-user account flags (fake badge,
+// main profile tab, etc.).
+type UserAccountFlagsLookup interface {
+	ByOwners(ctx context.Context, userIDs []int64) (map[int64]domain.UserAccountFlags, error)
 }
 
 type usernameAvailabilityStore interface {
@@ -66,8 +66,8 @@ func WithCollectibleUsernames(l CollectibleUsernameOwnerLookup) Option {
 	return func(s *Service) { s.collectibleUsernames = l }
 }
 
-// WithUserFlags injects the admin-set Fake-badge lookup.
-func WithUserFlags(l UserFakeFlagLookup) Option {
+// WithUserFlags injects per-user account flags (fake badge, profile tab, etc.).
+func WithUserFlags(l UserAccountFlagsLookup) Option {
 	return func(s *Service) { s.userFlags = l }
 }
 
@@ -519,6 +519,26 @@ func (s *Service) UpdatePersonalChannel(ctx context.Context, userID int64, chann
 	return s.projectOne(ctx, self.ID, u)
 }
 
+type userMainProfileTabSetter interface {
+	SetMainProfileTab(ctx context.Context, userID int64, tab string) error
+}
+
+// SetMainProfileTab stores the user's preferred main profile tab.
+func (s *Service) SetMainProfileTab(ctx context.Context, userID int64, tab string) (domain.User, error) {
+	setter, ok := s.userFlags.(userMainProfileTabSetter)
+	if !ok || setter == nil {
+		return domain.User{}, errors.New("main profile tab store unavailable")
+	}
+	if _, err := s.loadSelf(ctx, userID); err != nil {
+		return domain.User{}, err
+	}
+	if err := setter.SetMainProfileTab(ctx, userID, tab); err != nil {
+		return domain.User{}, err
+	}
+	s.dropCachedUsers(ctx, userID)
+	return s.Self(ctx, userID)
+}
+
 // UpdateColor updates the user's message accent or profile background color.
 func (s *Service) UpdateColor(ctx context.Context, userID int64, forProfile bool, color domain.PeerColor) (domain.User, error) {
 	self, err := s.loadSelf(ctx, userID)
@@ -641,19 +661,26 @@ func (s *Service) loadBaseUsersByIDs(ctx context.Context, userIDs []int64) ([]do
 		byOwner, err := s.collectibleUsernames.ByOwners(ctx, ids)
 		if err == nil && len(byOwner) > 0 {
 			for i := range out {
-				if cu, ok := byOwner[out[i].ID]; ok {
-					out[i].CollectibleUsername = cu.Username
-					out[i].CollectibleUsernameActive = cu.Active
+				if list, ok := byOwner[out[i].ID]; ok && len(list) > 0 {
+					out[i].CollectibleUsernames = append([]domain.CollectibleUsername(nil), list...)
+					for _, cu := range list {
+						if cu.Active {
+							out[i].CollectibleUsername = cu.Username
+							out[i].CollectibleUsernameActive = true
+							break
+						}
+					}
 				}
 			}
 		}
 	}
 	if s.userFlags != nil && len(out) > 0 {
-		fake, err := s.userFlags.ByOwners(ctx, ids)
-		if err == nil && len(fake) > 0 {
+		flags, err := s.userFlags.ByOwners(ctx, ids)
+		if err == nil && len(flags) > 0 {
 			for i := range out {
-				if out[i].ID != 0 && fake[out[i].ID] {
-					out[i].Fake = true
+				if f, ok := flags[out[i].ID]; ok {
+					out[i].Fake = f.Fake
+					out[i].MainProfileTab = f.MainProfileTab
 				}
 			}
 		}

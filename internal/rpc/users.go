@@ -342,6 +342,9 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 	// 个人频道（account.updatePersonalChannel）不在此落地：它按 viewer 实时解析，作为缓存后的
 	// overlay 处理（applyPersonalChannelToUserFull），避免烤进 per-(viewer,target) 投影缓存以及
 	// build/chats 两次解析同一频道。
+	if tab := tgProfileTabFromStorage(u.MainProfileTab); tab != nil {
+		full.SetMainTab(tab)
+	}
 	return full, nil
 }
 
