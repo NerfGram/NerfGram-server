@@ -82,7 +82,7 @@ func main() {
 	defer func() { _ = logger.Sync() }()
 
 	if err := run(logger); err != nil {
-		logger.Error("telesrv 退出", zap.Error(err))
+		logger.Error("telesrv exited", zap.Error(err))
 		_ = logger.Sync() // os.Exit 跳过 defer；缓冲写需显式 flush 错误日志
 		os.Exit(1)
 	}
@@ -133,7 +133,7 @@ func newBusinessAutomationOptions(cfg config.Config, online messageapp.BusinessA
 		opts = append(opts, messageapp.WithBusinessAutomationReplyProvider(messageapp.NewAIBusinessAutomationProvider(generator)))
 		logger.Info("Business automation reply provider", zap.String("provider", "ai"))
 	default:
-		logger.Warn("未知 Business automation AI provider，回退 quick reply 模板", zap.String("provider", cfg.BusinessAIProvider))
+		logger.Warn("unknown Business automation AI provider; falling back to quick reply templates", zap.String("provider", cfg.BusinessAIProvider))
 	}
 	return opts
 }
@@ -162,11 +162,11 @@ func newAIComposeOptions(cfg config.Config, limiter aiapp.RateLimiter, premium a
 			Thinking:        pc.Thinking,
 		})
 		if err != nil {
-			logger.Warn("AI compose provider 已跳过", zap.String("provider", pc.Name), zap.String("kind", pc.Kind), zap.Error(err))
+			logger.Warn("AI compose provider skipped", zap.String("provider", pc.Name), zap.String("kind", pc.Kind), zap.Error(err))
 			continue
 		}
 		providers = append(providers, provider)
-		logger.Info("AI compose provider 已启用", zap.String("provider", provider.Name()), zap.String("kind", pc.Kind))
+		logger.Info("AI compose provider enabled", zap.String("provider", provider.Name()), zap.String("kind", pc.Kind))
 	}
 	if len(providers) > 0 {
 		opts = append(opts, aiapp.WithProviders(providers...))
@@ -201,16 +201,16 @@ func newTranslationOptions(cfg config.Config, limiter translationapp.RateLimiter
 			OmitTemperature: pc.OmitTemperature, Thinking: pc.Thinking,
 		})
 		if err != nil {
-			logger.Warn("translation provider 已跳过", zap.String("provider", pc.Name), zap.Error(err))
+			logger.Warn("translation provider skipped", zap.String("provider", pc.Name), zap.Error(err))
 			continue
 		}
 		providers = append(providers, translationapp.NewAIProvider(provider))
-		logger.Info("translation provider 已启用", zap.String("provider", provider.Name()), zap.String("kind", pc.Kind))
+		logger.Info("translation provider enabled", zap.String("provider", provider.Name()), zap.String("kind", pc.Kind))
 	}
 	if len(providers) > 0 {
 		opts = append(opts, translationapp.WithProviders(providers...))
 	} else if cfg.TranslationEnabled {
-		logger.Warn("translation 已启用但没有远程 provider；messages.translateText 将返回 TRANSLATIONS_DISABLED")
+		logger.Warn("translation enabled but no remote provider; messages.translateText will return TRANSLATIONS_DISABLED")
 	}
 	return opts
 }
@@ -241,10 +241,10 @@ func startDebugServer(ctx context.Context, addr string, logger *zap.Logger) {
 
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
-		logger.Info("pprof 调试端点已启用", zap.String("addr", addr),
+		logger.Info("pprof debug endpoint enabled", zap.String("addr", addr),
 			zap.String("hint", "go tool pprof http://"+addr+"/debug/pprof/profile?seconds=30"))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Warn("pprof 端点退出", zap.Error(err))
+			logger.Warn("pprof endpoint exited", zap.Error(err))
 		}
 	}()
 	go func() {
@@ -304,7 +304,7 @@ func run(logger *zap.Logger) error {
 
 	// tg.Layer 由当前导入的 canonical schema 生成；纳入未来 Layer 后无需
 	// 在 telesrv 另维护一份常量。
-	logger.Info("telesrv 启动",
+	logger.Info("telesrv starting",
 		zap.String("listen", cfg.ListenAddr),
 		zap.Int("dc", cfg.DC),
 		zap.String("advertise", net.JoinHostPort(cfg.AdvertiseIP, portStr)),
@@ -332,7 +332,7 @@ func run(logger *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("postgres migrate: %w", err)
 	}
-	logger.Info("PostgreSQL schema 已迁移",
+	logger.Info("PostgreSQL schema migrated",
 		zap.Uint("schema_version", migrationStatus.Version),
 		zap.Bool("schema_dirty", migrationStatus.Dirty),
 		zap.Bool("schema_empty", migrationStatus.Empty),
@@ -351,7 +351,7 @@ func run(logger *zap.Logger) error {
 		return fmt.Errorf("connect redis: %w", err)
 	}
 	defer func() { _ = rdb.Close() }()
-	logger.Info("持久化依赖就绪", zap.String("redis", cfg.RedisAddr))
+	logger.Info("persistence dependencies ready", zap.String("redis", cfg.RedisAddr))
 
 	authKeyStore := postgres.NewAuthKeyStore(pool)
 	userStore := postgres.NewUserStore(pool)
@@ -402,7 +402,7 @@ func run(logger *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("init blob backend: %w", err)
 	}
-	logger.Info("blob backend 就绪",
+	logger.Info("blob backend ready",
 		zap.String("backend", "localfs"),
 		zap.String("dir", cfg.BlobDir),
 	)
@@ -417,19 +417,19 @@ func run(logger *zap.Logger) error {
 		externalMediaOption(cfg),
 		webPagePreviewOption(cfg),
 	)
-	if cfg.MapboxToken != "" {
-		logger.Info("地图缩略图代理已启用", zap.String("provider", "mapbox"), zap.String("cache_dir", cfg.MapTileCacheDir))
+		if cfg.MapboxToken != "" {
+		logger.Info("map tile thumbnail proxy enabled", zap.String("provider", "mapbox"), zap.String("cache_dir", cfg.MapTileCacheDir))
 	}
 	if cfg.ExternalMediaEnable {
-		logger.Info("外链媒体抓取已启用", zap.Int64("max_bytes", cfg.ExternalMediaMaxBytes), zap.Int("rate_per_min", cfg.ExternalMediaRatePerMin))
+		logger.Info("external media fetching enabled", zap.Int64("max_bytes", cfg.ExternalMediaMaxBytes), zap.Int("rate_per_min", cfg.ExternalMediaRatePerMin))
 	}
 	if cfg.WebPagePreviewEnable {
-		logger.Info("链接预览抓取已启用", zap.Int64("max_bytes", cfg.WebPagePreviewMaxBytes), zap.Int("rate_per_min", cfg.WebPagePreviewRatePerMin))
+		logger.Info("webpage preview fetching enabled", zap.Int64("max_bytes", cfg.WebPagePreviewMaxBytes), zap.Int("rate_per_min", cfg.WebPagePreviewRatePerMin))
 	}
 	if stats, err := filesService.SeedMedia(ctx, cfg.StickerSeedDir, cfg.StickerSeedMaxSets); err != nil {
 		return fmt.Errorf("seed media: %w", err)
 	} else if !stats.Skipped {
-		logger.Info("媒体种子导入完成",
+		logger.Info("media seed import completed",
 			zap.String("dir", cfg.StickerSeedDir),
 			zap.Int("reactions", stats.Reactions),
 			zap.Int("sticker_sets", stats.StickerSets),
@@ -441,7 +441,7 @@ func run(logger *zap.Logger) error {
 	if stats, err := filesService.SeedAppearance(ctx); err != nil {
 		return fmt.Errorf("seed appearance: %w", err)
 	} else if !stats.Skipped {
-		logger.Info("外观种子导入完成",
+		logger.Info("appearance seed import completed",
 			zap.String("source", "default-seed"),
 			zap.Int("wallpapers", stats.Wallpapers),
 			zap.Int("documents", stats.Documents),
@@ -451,12 +451,12 @@ func run(logger *zap.Logger) error {
 	if seeded, err := filesService.SeedOfficialSystemAvatar(ctx); err != nil {
 		return fmt.Errorf("seed official system avatar: %w", err)
 	} else if seeded {
-		logger.Info("官方系统账号头像种子导入完成", zap.Int64("photo_id", domain.OfficialSystemUserPhotoID))
+		logger.Info("official system account avatar seed import completed", zap.Int64("photo_id", domain.OfficialSystemUserPhotoID))
 	}
 	if stats, err := filesService.WarmCaches(ctx); err != nil {
-		logger.Warn("媒体资源缓存预热失败", zap.Error(err))
+		logger.Warn("media resources cache warmup failed", zap.Error(err))
 	} else if stats.StickerSets > 0 || stats.Documents > 0 || stats.Blobs > 0 {
-		logger.Info("媒体资源缓存预热完成",
+		logger.Info("media resources cache warmup completed",
 			zap.Int("sticker_sets", stats.StickerSets),
 			zap.Int("documents", stats.Documents),
 			zap.Int("blobs", stats.Blobs),
@@ -465,9 +465,9 @@ func run(logger *zap.Logger) error {
 	// 默认 emoji status 系统集：从 animated_emoji 精选合成（幂等，已 seed 的存量
 	// 库重启后自动补上）；缺失时 premium 用户的 status 选择器会是空的。
 	if count, created, err := filesService.EnsureDefaultEmojiStatusSet(ctx); err != nil {
-		logger.Warn("默认 emoji status 系统集合成失败", zap.Error(err))
+		logger.Warn("default emoji status synthesis failed", zap.Error(err))
 	} else if created {
-		logger.Info("默认 emoji status 系统集已合成", zap.Int("documents", count))
+		logger.Info("default emoji status set created", zap.Int("documents", count))
 	}
 	langPackStore := postgres.NewLangPackStore(pool)
 	passwordStore := postgres.NewPasswordStore(pool)
@@ -511,19 +511,19 @@ func run(logger *zap.Logger) error {
 		contacts.WithPrivacyEvaluator(privacyService),
 		contacts.WithReadModelVersions(readModelVersionStore),
 	)
-	if seeded, err := langPackService.SeedDirectory(ctx, cfg.LangPackSeedDir); err != nil {
+		if seeded, err := langPackService.SeedDirectory(ctx, cfg.LangPackSeedDir); err != nil {
 		return fmt.Errorf("seed langpack: %w", err)
 	} else if seeded > 0 {
-		logger.Info("语言包种子导入完成", zap.String("dir", cfg.LangPackSeedDir), zap.Int("strings", seeded))
+		logger.Info("language pack seed import completed", zap.String("dir", cfg.LangPackSeedDir), zap.Int("strings", seeded))
 	}
 	// 国家区号目录:把 catalog 固化的官方全量(~235 国)幂等 upsert 进 PG,覆盖迁移里仅
 	// seed 的 2 国(US/CN)默认值。否则 countries 表非空,ListCountries 返回那 2 行就会
 	// 绕过 catalog,登录页/号码格式只显示 2 国。upsert 失败仅告警不阻断启动(回退旧 2 行)。
 	if cs := catalog.Countries().Countries; len(cs) > 0 {
 		if err := helpStore.UpsertCountries(ctx, cs); err != nil {
-			logger.Warn("国家区号种子导入失败", zap.Error(err))
+			logger.Warn("country code seed import failed", zap.Error(err))
 		} else {
-			logger.Info("国家区号种子导入完成", zap.Int("countries", len(cs)))
+			logger.Info("country code seed import completed", zap.Int("countries", len(cs)))
 		}
 	}
 
@@ -564,7 +564,7 @@ func run(logger *zap.Logger) error {
 			return fmt.Errorf("configure OTP webhook: %w", err)
 		}
 		webhookSender = configured
-		logger.Info("OTP Webhook 投递已启用",
+		logger.Info("OTP webhook delivery enabled",
 			zap.Bool("phone", cfg.PhoneCodeDeliveryProvider == "webhook"),
 			zap.Bool("email", (cfg.LoginEmailEnable || cfg.EmailSignupEnable) && cfg.EmailCodeDeliveryProvider == "webhook"))
 	}
@@ -672,9 +672,9 @@ func run(logger *zap.Logger) error {
 	// 服务端重启恢复：SFU 状态全失，把全部活跃通话的参与者批量置 left（version++），
 	// 客户端经 checkGroupCall 发现自己 ssrc 消失后自动 rejoin。
 	if calls, err := groupCallsService.ResetAllParticipants(ctx, int(time.Now().Unix())); err != nil {
-		logger.Warn("重启清理群通话参与者失败", zap.Error(err))
+		logger.Warn("failed to cleanup group call participants on restart", zap.Error(err))
 	} else if len(calls) > 0 {
-		logger.Info("重启清理群通话参与者", zap.Int("calls", len(calls)))
+		logger.Info("cleaned up group call participants on restart", zap.Int("calls", len(calls)))
 	}
 	phoneService := phoneapp.NewService(phoneapp.Config{
 		RingTimeout:            cfg.CallRingTimeout,
@@ -769,7 +769,7 @@ func run(logger *zap.Logger) error {
 		auth.WithCodeMaxAttempts(cfg.AuthCodeMaxAttempts),
 		auth.WithPhoneCodeDelivery(phoneCodeSender, cfg.PhoneCodeLength),
 		auth.WithOTPDeliveryFailureObserver(func(_ context.Context, request otpdelivery.Request, err error) {
-			logger.Named("otp").Warn("附加 OTP provider 投递失败，777000 App-code 保持有效",
+					logger.Named("otp").Warn("additional OTP provider delivery failed, 777000 app-code remains valid",
 				zap.String("delivery_id", request.DeliveryID),
 				zap.String("purpose", string(request.Purpose)),
 				zap.String("channel", string(request.Channel)),
@@ -997,7 +997,7 @@ func run(logger *zap.Logger) error {
 		OutboundTrackedGlobalMaxBytes:   cfg.MTProtoOutboundTrackedGlobalMaxBytes,
 		OutboundWriteGlobalMaxBytes:     cfg.MTProtoOutboundWriteGlobalMaxBytes,
 		OnServing: func(_ net.Addr) {
-			logger.Info("telesrv 服务就绪",
+			logger.Info("telesrv service ready",
 				zap.String("listen", cfg.ListenAddr),
 				zap.String("advertise", net.JoinHostPort(cfg.AdvertiseIP, portStr)),
 				zap.Int("pid", os.Getpid()),

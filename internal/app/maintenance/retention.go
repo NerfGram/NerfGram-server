@@ -241,15 +241,16 @@ func (w *RetentionWorker) runOutboxPoisonOnce(ctx context.Context) {
 	}
 	outboxDeleted, err := w.outbox.DeleteFailed(ctx, w.outboxPoisonRetention, w.batch)
 	if err != nil {
-		w.logger.Error("清理 terminal failed dispatch_outbox 失败",
+		w.logger.Error("failed to cleanup terminal-failed dispatch_outbox",
 			zap.String("signal", "dispatch_outbox_poison_cleanup_failed"),
 			zap.Duration("quarantine", w.outboxPoisonRetention),
 			zap.Error(err),
 		)
 	} else if outboxDeleted > 0 {
-		// Error 级结构化信号刻意保留：发生 terminal failed 代表确定性编码、事件缺失
-		// 或其它不可自动重试故障。任务删除只解冻在线 lane，不会删除 durable event。
-		w.logger.Error("terminal failed dispatch_outbox 已结束隔离并释放用户 lane",
+		// Error level structured signal deliberately preserved: terminal-failed indicates a
+		// deterministic encoding/event-missing or other non-retriable error. Removing the task
+		// only unfreezes the online lane; it does not delete the durable event.
+		w.logger.Error("terminal-failed dispatch_outbox quarantine ended; user lane released",
 			zap.String("signal", "dispatch_outbox_poison_released"),
 			zap.Int("deleted", outboxDeleted),
 			zap.Duration("quarantine", w.outboxPoisonRetention),
@@ -261,26 +262,26 @@ func (w *RetentionWorker) runRetentionOnce(ctx context.Context) {
 	if w.authKeySessionLayers != nil {
 		deleted, err := w.authKeySessionLayers.DeleteExpiredSessionLayers(ctx, w.batch)
 		if err != nil {
-			w.logger.Warn("回收过期 auth-key session Layer 证据失败", zap.Error(err))
+			w.logger.Warn("failed to reclaim expired auth-key session layer evidence", zap.Error(err))
 		} else if deleted > 0 {
-			w.logger.Info("回收过期 auth-key session Layer 证据完成", zap.Int("deleted", deleted))
+			w.logger.Info("expired auth-key session layer evidence reclaimed", zap.Int("deleted", deleted))
 		}
 	}
 	if w.loginCodeDeliveries != nil {
 		deleted, err := w.loginCodeDeliveries.DeleteExpiredLoginCodeDeliveries(ctx, time.Now(), w.batch)
 		if err != nil {
-			w.logger.Warn("回收过期 login-code delivery 回执失败", zap.Error(err))
+			w.logger.Warn("failed to reclaim expired login-code delivery receipts", zap.Error(err))
 		} else if deleted > 0 {
-			w.logger.Info("回收过期 login-code delivery 回执完成", zap.Int("deleted", deleted))
+			w.logger.Info("expired login-code delivery receipts reclaimed", zap.Int("deleted", deleted))
 		}
 	}
 	if w.tempKeys != nil {
 		expiredBefore := time.Now().Add(-tempAuthKeyExpiryGrace).Unix()
 		tempDeleted, err := w.tempKeys.DeleteExpired(ctx, expiredBefore, w.batch)
 		if err != nil {
-			w.logger.Warn("回收过期 temp auth key 绑定失败", zap.Error(err))
+			w.logger.Warn("failed to reclaim expired temp auth key bindings", zap.Error(err))
 		} else if tempDeleted > 0 {
-			w.logger.Info("回收过期 temp auth key 绑定完成", zap.Int("deleted", tempDeleted))
+			w.logger.Info("expired temp auth key bindings reclaimed", zap.Int("deleted", tempDeleted))
 		}
 	}
 	if w.orphanAuthKeys != nil && w.orphanRetention > 0 {
@@ -295,39 +296,39 @@ func (w *RetentionWorker) runRetentionOnce(ctx context.Context) {
 		} else {
 			orphanDeleted, err := w.orphanAuthKeys.DeleteOrphaned(ctx, w.orphanRetention, w.batch, protected)
 			if err != nil {
-				w.logger.Warn("回收未授权 orphan auth key 失败", zap.Error(err))
+				w.logger.Warn("failed to reclaim unauthorized orphan auth keys", zap.Error(err))
 			} else if orphanDeleted > 0 {
-				w.logger.Info("回收未授权 orphan auth key 完成", zap.Int("deleted", orphanDeleted))
+				w.logger.Info("unauthorized orphan auth keys reclaimed", zap.Int("deleted", orphanDeleted))
 			}
 		}
 	}
 	if w.botAPIUpdates != nil {
 		botAPIDeleted, err := w.botAPIUpdates.DeleteDeliveredOrExpired(ctx, botAPIConfirmedGrace, w.botAPIRetention, w.batch)
 		if err != nil {
-			w.logger.Warn("回收 bot_api_updates 队列失败", zap.Error(err))
+			w.logger.Warn("failed to reclaim bot_api_updates queue", zap.Error(err))
 		} else if botAPIDeleted > 0 {
-			w.logger.Info("回收 bot_api_updates 队列完成", zap.Int("deleted", botAPIDeleted))
+			w.logger.Info("bot_api_updates queue reclaimed", zap.Int("deleted", botAPIDeleted))
 		}
 	}
 	if w.userUpdates != nil {
 		userDeleted, err := w.userUpdates.DeleteConfirmedPrefix(ctx, w.retention, w.batch)
 		if err != nil {
-			w.logger.Warn("回收已共同确认的 user_update_events 前缀失败", zap.Error(err))
+			w.logger.Warn("failed to reclaim confirmed user_update_events prefixes", zap.Error(err))
 		} else if userDeleted > 0 {
-			w.logger.Info("回收已共同确认的 user_update_events 前缀完成", zap.Int("deleted", userDeleted))
+			w.logger.Info("confirmed user_update_events prefixes reclaimed", zap.Int("deleted", userDeleted))
 		}
 	}
 	if w.channelUpdates != nil {
 		channelDeleted, err := w.channelUpdates.DeleteExpiredChannelUpdateEvents(ctx, w.retention, w.batch)
 		if err != nil {
-			// store 会逐频道隔离坏 gap 后继续本轮；deleted 可能非零，必须同时记录，
-			// 既不能把全局 pass 伪装成完全失败，也不能吞掉不变量错误。
-			w.logger.Warn("回收过期 channel_update_events 存在隔离频道",
+			// The store will isolate bad gaps per channel and continue this pass; deleted may be non-zero and must be recorded.
+			// Do not pretend a global pass is a full failure, nor swallow invariant errors.
+			w.logger.Warn("failed to reclaim expired channel_update_events; isolated channels present",
 				zap.Int("deleted", channelDeleted),
 				zap.Error(err),
 			)
 		} else if channelDeleted > 0 {
-			w.logger.Info("回收过期 channel_update_events 连续前缀完成", zap.Int("deleted", channelDeleted))
+			w.logger.Info("expired channel_update_events continuous prefixes reclaimed", zap.Int("deleted", channelDeleted))
 		}
 	}
 }
@@ -360,7 +361,7 @@ func (w *RetentionWorker) touchActiveAuthKeys(ctx context.Context, protected [][
 		return true
 	}
 	if err := w.activeAuthKeyHeartbeat.TouchActiveRawAuthKeys(ctx, protected); err != nil {
-		w.logger.Error("刷新 active raw auth key heartbeat 失败，本轮跳过 orphan GC",
+		w.logger.Error("refresh active raw auth key heartbeat failed; skipping orphan GC this run",
 			zap.String("signal", "auth_key_heartbeat_failed"),
 			zap.Int("active_keys", len(protected)),
 			zap.Error(err),

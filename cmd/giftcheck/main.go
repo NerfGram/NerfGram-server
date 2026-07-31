@@ -72,18 +72,18 @@ func (r obfuscatedResolver) CDN(ctx context.Context, dc int, _ dcs.List) (transp
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:2398", "telesrv MTProto 地址")
+	addr := flag.String("addr", "127.0.0.1:2398", "telesrv MTProto address")
 	dcID := flag.Int("dc", 2, "DC id")
-	rsaPath := flag.String("rsa", "data/server_rsa.pem", "server RSA key 路径")
+	rsaPath := flag.String("rsa", "data/server_rsa.pem", "server RSA key path")
 	apiID := flag.Int("api-id", 1, "api_id")
 	apiHash := flag.String("api-hash", "hash", "api_hash")
-	phone := flag.String("phone", "", "登录手机号")
+	phone := flag.String("phone", "", "login phone number")
 	code := flag.String("code", "12345", "开发登录码")
 	toID := flag.Int64("to", 0, "收礼用户 id（0=自动从 dialogs 找）")
 	toHash := flag.Int64("to-hash", 0, "收礼用户 access_hash")
 	flag.Parse()
 	if *phone == "" {
-		fmt.Fprintln(os.Stderr, "缺少 -phone")
+		fmt.Fprintln(os.Stderr, "missing -phone")
 		os.Exit(2)
 	}
 
@@ -91,7 +91,7 @@ func main() {
 	defer func() { _ = logger.Sync() }()
 	priv, err := mtprotoedge.LoadOrGenerateRSAKey(*rsaPath)
 	if err != nil {
-		logger.Fatal("加载 RSA key 失败", zap.Error(err))
+		logger.Fatal("failed to load RSA key", zap.Error(err))
 	}
 	host, portStr, _ := net.SplitHostPort(*addr)
 	port, _ := strconv.Atoi(portStr)
@@ -120,17 +120,17 @@ func main() {
 			return fmt.Errorf("signIn: %w", err)
 		}
 		self := authz.(*tg.AuthAuthorization).User.(*tg.User)
-		fmt.Printf("==== 登录: id=%d name=%q ====\n", self.ID, self.FirstName)
+		fmt.Printf("==== login: id=%d name=%q ====\n", self.ID, self.FirstName)
 
 		// 1. 目录。
 		gifts := giftCatalog(ctx, raw)
 		if len(gifts) == 0 {
-			return fmt.Errorf("礼物目录为空（animated_emoji 未 seed？）")
+			return fmt.Errorf("gift catalog empty (animated_emoji not seeded?)")
 		}
 		gift := gifts[0]
-		fmt.Printf("  目录 %d 个礼物；选第一个: id=%d stars=%d title=%q sticker=%T\n", len(gifts), gift.ID, gift.Stars, giftTitle(gift), gift.Sticker)
+		fmt.Printf("  catalog %d gifts; selecting first: id=%d stars=%d title=%q sticker=%T\n", len(gifts), gift.ID, gift.Stars, giftTitle(gift), gift.Sticker)
 
-		balBefore := starsBalance(ctx, raw, "扣费前")
+		balBefore := starsBalance(ctx, raw, "before charge")
 
 		// 2. 收礼用户（-to 指定 id 时从 dialogs 解析其 access_hash；否则取首个 user）。
 		var to *tg.InputPeerUser
@@ -140,9 +140,9 @@ func main() {
 			to = findRecipient(ctx, raw, self.ID, *toID)
 		}
 		if to == nil {
-			return fmt.Errorf("找不到收礼用户（用 -to/-to-hash 指定）")
+			return fmt.Errorf("recipient not found (specify with -to/-to-hash)")
 		}
-		fmt.Printf("  收礼用户: id=%d\n", to.UserID)
+		fmt.Printf("  recipient user: id=%d\n", to.UserID)
 
 		inv := &tg.InputInvoiceStarGift{Peer: to, GiftID: gift.ID}
 
@@ -153,12 +153,12 @@ func main() {
 		}
 		form, ok := formRes.(*tg.PaymentsPaymentFormStarGift)
 		if !ok {
-			fmt.Printf("  [FAIL] getPaymentForm 返回 %T，want *PaymentsPaymentFormStarGift（TDesktop 单分支 match）\n", formRes)
+			fmt.Printf("  [FAIL] getPaymentForm returned %T, want *PaymentsPaymentFormStarGift\n", formRes)
 			return nil
 		}
 		fmt.Printf("  getPaymentForm: paymentFormStarGift form_id=%d currency=%s prices=%d\n", form.FormID, form.Invoice.Currency, len(form.Invoice.Prices))
 		if form.Invoice.Currency != "XTR" || len(form.Invoice.Prices) == 0 {
-			fmt.Printf("  [FAIL] invoice 须 XTR + 非空 prices\n")
+			fmt.Printf("  [FAIL] invoice must be XTR with non-empty prices\n")
 			return nil
 		}
 
@@ -169,33 +169,33 @@ func main() {
 		}
 		pay, ok := payRes.(*tg.PaymentsPaymentResult)
 		if !ok {
-			fmt.Printf("  [FAIL] sendStarsForm 返回 %T，want *PaymentsPaymentResult（DrKLO 强转）\n", payRes)
+			fmt.Printf("  [FAIL] sendStarsForm returned %T, want *PaymentsPaymentResult\n", payRes)
 			return nil
 		}
 		inspectGiftUpdates(pay.Updates)
 
-		balAfter := starsBalance(ctx, raw, "扣费后")
-		fmt.Printf("==== 扣费: %d -> %d，差 %d（期望 -%d）====\n", balBefore, balAfter, balBefore-balAfter, gift.Stars)
+		balAfter := starsBalance(ctx, raw, "after charge")
+		fmt.Printf("==== charge: %d -> %d, diff %d (expected -%d) ====\n", balBefore, balAfter, balBefore-balAfter, gift.Stars)
 		if balBefore-balAfter == gift.Stars {
-			fmt.Println("==== ✅ PASS：star gift 扣费正确 ====")
+			fmt.Println("==== ✅ PASS: star gift charged correctly ====")
 		} else {
-			fmt.Println("==== ❌ FAIL：扣费金额不符 ====")
+			fmt.Println("==== ❌ FAIL: charged amount mismatch ====")
 		}
 		return nil
 	}); err != nil {
-		logger.Fatal("运行失败", zap.Error(err))
+		logger.Fatal("run failed", zap.Error(err))
 	}
 }
 
 func giftCatalog(ctx context.Context, raw *tg.Client) []*tg.StarGift {
 	res, err := raw.PaymentsGetStarGifts(ctx, 0)
 	if err != nil {
-		fmt.Printf("  getStarGifts 失败: %v\n", err)
+		fmt.Printf("  getStarGifts failed: %v\n", err)
 		return nil
 	}
 	full, ok := res.(*tg.PaymentsStarGifts)
 	if !ok {
-		fmt.Printf("  getStarGifts 返回 %T\n", res)
+		fmt.Printf("  getStarGifts returned %T\n", res)
 		return nil
 	}
 	out := make([]*tg.StarGift, 0, len(full.Gifts))
@@ -215,14 +215,14 @@ func giftTitle(g *tg.StarGift) string {
 func starsBalance(ctx context.Context, raw *tg.Client, label string) int64 {
 	status, err := raw.PaymentsGetStarsStatus(ctx, &tg.PaymentsGetStarsStatusRequest{Peer: &tg.InputPeerSelf{}})
 	if err != nil {
-		fmt.Printf("  [%s] getStarsStatus 失败: %v\n", label, err)
+		fmt.Printf("  [%s] getStarsStatus failed: %v\n", label, err)
 		return -1
 	}
 	var bal int64
 	if amt, ok := status.Balance.(*tg.StarsAmount); ok {
 		bal = amt.Amount
 	}
-	fmt.Printf("  [%s] 余额=%d stars\n", label, bal)
+	fmt.Printf("  [%s] balance=%d stars\n", label, bal)
 	return bal
 }
 
@@ -266,7 +266,7 @@ func inspectGiftUpdates(res tg.UpdatesClass) {
 	case *tg.UpdateShort:
 		ups = []tg.UpdateClass{v.Update}
 	default:
-		fmt.Printf("  [警告] paymentResult.updates 非 Updates 子类型: %T\n", res)
+		fmt.Printf("  [WARN] paymentResult.updates is not an Updates subtype: %T\n", res)
 		return
 	}
 	hasGiftMsg, hasBalance := false, false
@@ -290,5 +290,5 @@ func inspectGiftUpdates(res tg.UpdatesClass) {
 			}
 		}
 	}
-	fmt.Printf("  paymentResult: 含礼物服务消息=%v 含 updateStarsBalance=%v\n", hasGiftMsg, hasBalance)
+	fmt.Printf("  paymentResult: has gift service message=%v has updateStarsBalance=%v\n", hasGiftMsg, hasBalance)
 }

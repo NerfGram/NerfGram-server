@@ -175,7 +175,7 @@ func NewPion(cfg PionConfig) (Service, error) {
 		zap.Int("udp_port", cfg.UDPPort),
 		zap.String("advertise_ip", cfg.AdvertiseIP))
 	if cfg.AdvertiseIP == "127.0.0.1" {
-		s.log.Warn("TELESRV_SFU_ADVERTISE_IP 为 127.0.0.1：真机 ICE 将无法连接（纯媒体面静默失败），多设备联调必须设为宿主机 LAN IP")
+		s.log.Warn("TELESRV_SFU_ADVERTISE_IP is 127.0.0.1: real devices' ICE will not be reachable (media plane will silently fail); set to host LAN IP for multi-device testing")
 	}
 	return s, nil
 }

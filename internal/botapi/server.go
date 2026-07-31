@@ -105,9 +105,9 @@ func Start(ctx context.Context, addr string, bots BotsService, users UsersServic
 		return nil, err
 	}
 	go func() {
-		logger.Info("Bot API 网关已启用", zap.String("addr", addr))
+		logger.Info("Bot API gateway enabled", zap.String("addr", addr))
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Warn("Bot API 网关退出", zap.Error(err))
+			logger.Warn("Bot API gateway exited", zap.Error(err))
 		}
 	}()
 	if webhooks, ok := gateway.(GatewayWebhookControl); ok {

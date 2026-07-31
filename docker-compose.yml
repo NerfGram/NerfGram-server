@@ -1,21 +1,11 @@
-# telesrv 第一阶段三方依赖（开发用）。
-#
-#   启动：  docker compose up -d
-#   状态：  docker compose ps
-#   关停：  docker compose down          （保留数据卷）
-#   清空：  docker compose down -v        （连数据卷一起删，重置 schema/数据）
-#
-# server 端连接串见 internal/config/config.go 的默认值（localhost:5432 / localhost:6399）。
+version: "3.9"
 name: telesrv
 
 services:
   postgres:
     image: postgres:17-alpine
     container_name: telesrv-postgres
-    # 全库已去分区（普通表），max_locks_per_transaction 默认 64 已够；512 仅留余量，对内存近乎零开销。
-    # pg_stat_statements：聚合各 SQL 的累计/平均耗时与调用次数，用于定位 postgres 容器 CPU 热点
-    # （telesrv 是宿主进程，docker stats 里的 CPU 尖峰是本容器）。需 CREATE EXTENSION 后才有视图：
-    #   docker exec -i telesrv-postgres psql -U telesrv -d telesrv -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;"
+    # Keep some sane defaults for dev
     command:
       - "postgres"
       - "-c"
@@ -47,7 +37,7 @@ services:
     container_name: telesrv-redis
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6399:6379"   # 宿主 6379 常被其他项目占用，telesrv 对外用 6399（容器内仍 6379）
+      - "6399:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -57,6 +47,32 @@ services:
       retries: 10
     restart: unless-stopped
 
+  telesrv:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - GO_VERSION=1.26
+    container_name: telesrv-server
+    image: telesrv-server:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TELESRV_LISTEN: "0.0.0.0:2398"
+      TELESRV_POSTGRES_DSN: "postgres://telesrv:telesrv@postgres:5432/telesrv?sslmode=disable"
+      TELESRV_REDIS_ADDR: "redis:6379"
+      TELESRV_BLOB_DIR: "/app/data/blobs"
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "2398:2398"
+      - "2399:2399"
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:
+

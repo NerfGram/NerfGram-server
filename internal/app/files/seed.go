@@ -49,7 +49,7 @@ func (s *Service) SeedMedia(ctx context.Context, root string, maxRegularSets int
 		// 不存在 → 静默不导入贴纸/reaction」会被埋没（DB 已有旧数据时尤其隐蔽，表现为客户端反复
 		// 拉取未 seed 的集）。配置 TELESRV_STICKER_SEED_DIR 指向真实导出目录即可。
 		if s.log != nil {
-			s.log.Warn("sticker/reaction seed 目录不存在，跳过媒体种子导入（配置 TELESRV_STICKER_SEED_DIR）",
+			s.log.Warn("sticker/reaction seed directory does not exist; skipping media seed import (configure TELESRV_STICKER_SEED_DIR)",
 				zap.String("dir", root), zap.Error(err))
 		}
 		stats.Skipped = true
@@ -121,7 +121,7 @@ func (s *Service) logSeedPhase(phase string, started time.Time, before, after Se
 	if s.log == nil {
 		return
 	}
-	s.log.Info("媒体种子阶段完成",
+	s.log.Info("media seed phase completed",
 		zap.String("phase", phase),
 		zap.Duration("elapsed", time.Since(started)),
 		zap.Int("reactions", after.Reactions-before.Reactions),

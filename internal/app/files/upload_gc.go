@@ -58,10 +58,10 @@ func (w *UploadPartGCWorker) runOnce(ctx context.Context) {
 	}
 	deleted, err := w.files.DeleteExpiredUploadParts(ctx, time.Now().Add(-w.ttl), w.batch)
 	if err != nil {
-		w.logger.Warn("清理过期 upload_parts 失败", zap.Error(err))
+		w.logger.Warn("failed to cleanup expired upload_parts", zap.Error(err))
 		return
 	}
 	if deleted > 0 {
-		w.logger.Info("清理过期 upload_parts 完成", zap.Int64("deleted", deleted))
+		w.logger.Info("expired upload_parts cleanup completed", zap.Int64("deleted", deleted))
 	}
 }

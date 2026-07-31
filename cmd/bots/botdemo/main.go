@@ -112,38 +112,38 @@ type config struct {
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:2398", "telesrv MTProto 地址")
+	addr := flag.String("addr", "127.0.0.1:2398", "telesrv MTProto address")
 	dcID := flag.Int("dc", 2, "DC id")
-	token := flag.String("token", os.Getenv("TELESRV_BOT_TOKEN"), "bot token <bot_id>:<secret>（默认取 env TELESRV_BOT_TOKEN）")
-	rsaPath := flag.String("rsa", "data/server_rsa.pem", "server RSA 公钥路径")
+	token := flag.String("token", os.Getenv("TELESRV_BOT_TOKEN"), "bot token <bot_id>:<secret> (defaults to TELESRV_BOT_TOKEN env)")
+	rsaPath := flag.String("rsa", "data/server_rsa.pem", "server RSA public key path")
 	apiID := flag.Int("api-id", 1, "api_id")
 	apiHash := flag.String("api-hash", "hash", "api_hash")
 
-	chatID := flag.Int64("chat", 0, "目标超级群 channel id（非 0 即发到群）")
-	chatHash := flag.Int64("chat-hash", 0, "目标群 access_hash（telesrv 下可留 0）")
-	toID := flag.Int64("to", 0, "目标用户 id（-chat 为 0 时改为私聊该用户）")
-	toHash := flag.Int64("to-hash", 0, "目标用户 access_hash（telesrv 下可留 0）")
+	chatID := flag.Int64("chat", 0, "target supergroup channel id (non-zero sends to channel)")
+	chatHash := flag.Int64("chat-hash", 0, "target channel access_hash (0 allowed on telesrv)")
+	toID := flag.Int64("to", 0, "target user id (when -chat is 0 sends to user)")
+	toHash := flag.Int64("to-hash", 0, "target user access_hash (0 allowed on telesrv)")
 
-	interval := flag.Duration("interval", 15*time.Second, "定时发送间隔")
-	count := flag.Int("count", 0, "发送条数上限（0 = 一直发到 Ctrl+C）")
-	mode := flag.String("mode", "rotate", "发送内容：text | photo | caption | rotate")
-	text := flag.String("text", "telesrv bot demo · 定时主动消息", "文本内容（会自动追加 #序号+时间）")
-	caption := flag.String("caption", "telesrv bot demo · 图文消息", "图文说明（会自动追加 #序号+时间）")
-	imagePath := flag.String("image", "", "图片文件路径（留空则程序自动生成一张 PNG）")
+	interval := flag.Duration("interval", 15*time.Second, "send interval")
+	count := flag.Int("count", 0, "max messages to send (0 = until Ctrl+C)")
+	mode := flag.String("mode", "rotate", "send mode: text | photo | caption | rotate")
+	text := flag.String("text", "telesrv bot demo · scheduled message", "text content (auto appends #seq+time)")
+	caption := flag.String("caption", "telesrv bot demo · captioned message", "caption (auto appends #seq+time)")
+	imagePath := flag.String("image", "", "image file path (empty = generate PNG)")
 	flag.Parse()
 
 	if *token == "" {
-		fmt.Fprintln(os.Stderr, "缺少 -token（或设环境变量 TELESRV_BOT_TOKEN）")
+		fmt.Fprintln(os.Stderr, "missing -token (or set TELESRV_BOT_TOKEN env var)")
 		os.Exit(2)
 	}
 	if *chatID == 0 && *toID == 0 {
-		fmt.Fprintln(os.Stderr, "需指定目标：-chat <群id>（或 -to <用户id>）")
+		fmt.Fprintln(os.Stderr, "must specify target: -chat <channel id> (or -to <user id>)")
 		os.Exit(2)
 	}
 	switch *mode {
 	case "text", "photo", "caption", "rotate":
 	default:
-		fmt.Fprintf(os.Stderr, "未知 -mode=%q（text|photo|caption|rotate）\n", *mode)
+		fmt.Fprintf(os.Stderr, "unknown -mode=%q (text|photo|caption|rotate)\n", *mode)
 		os.Exit(2)
 	}
 
@@ -158,11 +158,11 @@ func main() {
 
 	priv, err := mtprotoedge.LoadOrGenerateRSAKey(*rsaPath)
 	if err != nil {
-		logger.Fatal("加载 RSA key 失败", zap.Error(err))
+		logger.Fatal("failed to load RSA key", zap.Error(err))
 	}
 	host, portStr, err := net.SplitHostPort(*addr)
 	if err != nil {
-		logger.Fatal("解析地址失败", zap.Error(err))
+		logger.Fatal("failed to parse address", zap.Error(err))
 	}
 	port, _ := strconv.Atoi(portStr)
 
@@ -184,21 +184,21 @@ func main() {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("==== bot 登录成功：@%s (id=%d) ====\n", self.Username, self.ID)
+		fmt.Printf("==== bot login successful: @%s (id=%d) ====\n", self.Username, self.ID)
 
 		// 2) 解析目标 peer。
 		peer, label, err := resolveTarget(ctx, api, cfg)
 		if err != nil {
 			return err
 		}
-		fmt.Printf(">> 目标：%s\n>> 间隔：%s，模式：%s，上限：%s\n", label, cfg.interval, cfg.mode, countLabel(cfg.count))
+		fmt.Printf(">> target: %s\n>> interval: %s, mode: %s, limit: %s\n", label, cfg.interval, cfg.mode, countLabel(cfg.count))
 
 		// 3) 定时主动发送。
 		return runLoop(ctx, api, uploader.NewUploader(api), peer, cfg, logger)
 	}); err != nil {
-		logger.Fatal("运行失败", zap.Error(err))
+		logger.Fatal("run failed", zap.Error(err))
 	}
-	fmt.Println("已退出")
+	fmt.Println("exited")
 }
 
 // loginBot 用 token 登录并返回 self 用户。
@@ -236,7 +236,7 @@ func resolveTarget(ctx context.Context, api *tg.Client, cfg config) (tg.InputPee
 			}
 		}
 		return &tg.InputPeerChannel{ChannelID: cfg.chatID, AccessHash: hash},
-			fmt.Sprintf("超级群 %q (id=%d)", title, cfg.chatID), nil
+			fmt.Sprintf("supergroup %q (id=%d)", title, cfg.chatID), nil
 	}
 
 	hash := cfg.toHash
@@ -249,7 +249,7 @@ func resolveTarget(ctx context.Context, api *tg.Client, cfg config) (tg.InputPee
 		}
 	}
 	return &tg.InputPeerUser{UserID: cfg.toID, AccessHash: hash},
-		fmt.Sprintf("用户 %q (id=%d)", name, cfg.toID), nil
+		fmt.Sprintf("user %q (id=%d)", name, cfg.toID), nil
 }
 
 // runLoop 是定时主动发送的核心：每 interval 发一条，按 mode 选内容；count>0 时发够即停。
@@ -268,25 +268,25 @@ func runLoop(ctx context.Context, api *tg.Client, up *uploader.Uploader, peer tg
 			if err := sendText(ctx, api, peer, msg); err != nil {
 				return err
 			}
-			fmt.Printf("[%d] 文本已发：%q\n", seq, msg)
+			fmt.Printf("[%d] text sent: %q\n", seq, msg)
 		case "photo":
 			if err := sendPhoto(ctx, api, up, peer, seq, "", cfg.imagePath); err != nil {
 				return err
 			}
-			fmt.Printf("[%d] 图片已发\n", seq)
+			fmt.Printf("[%d] photo sent\n", seq)
 		case "caption":
 			captionText := fmt.Sprintf("%s · #%d · %s", cfg.caption, seq, stamp)
 			if err := sendPhoto(ctx, api, up, peer, seq, captionText, cfg.imagePath); err != nil {
 				return err
 			}
-			fmt.Printf("[%d] 图文已发：%q\n", seq, captionText)
+			fmt.Printf("[%d] captioned photo sent: %q\n", seq, captionText)
 		}
 		return nil
 	}
 
 	// 立即发第一条（不必等满一个 interval），随后按 ticker 周期发。
 	if err := send(); err != nil {
-		logger.Warn("发送失败", zap.Error(err))
+		logger.Warn("send failed", zap.Error(err))
 	}
 	if cfg.count > 0 && seq >= cfg.count {
 		return nil
@@ -297,7 +297,7 @@ func runLoop(ctx context.Context, api *tg.Client, up *uploader.Uploader, peer tg
 			return nil
 		case <-ticker.C:
 			if err := send(); err != nil {
-				logger.Warn("发送失败", zap.Error(err))
+				logger.Warn("send failed", zap.Error(err))
 				continue
 			}
 			if cfg.count > 0 && seq >= cfg.count {
@@ -343,18 +343,18 @@ func sendPhoto(ctx context.Context, api *tg.Client, up *uploader.Uploader, peer 
 		file tg.InputFileClass
 		err  error
 	)
-	if imagePath != "" {
+		if imagePath != "" {
 		// uploader 会自动分片 upload.saveFilePart（大文件走 big-file 路径）。
-		file, err = up.FromPath(ctx, imagePath)
-		if err != nil {
-			return fmt.Errorf("上传图片文件 %q: %w", imagePath, err)
-		}
+			file, err = up.FromPath(ctx, imagePath)
+			if err != nil {
+				return fmt.Errorf("upload image file %q: %w", imagePath, err)
+			}
 	} else {
-		data := generatePNG(seq)
-		file, err = up.FromBytes(ctx, fmt.Sprintf("botdemo-%d.png", seq), data)
-		if err != nil {
-			return fmt.Errorf("上传生成图片: %w", err)
-		}
+			data := generatePNG(seq)
+			file, err = up.FromBytes(ctx, fmt.Sprintf("botdemo-%d.png", seq), data)
+			if err != nil {
+				return fmt.Errorf("upload generated image: %w", err)
+			}
 	}
 
 	rid, _ := randInt64()
@@ -460,7 +460,7 @@ func clamp(v int) uint8 {
 
 func countLabel(count int) string {
 	if count <= 0 {
-		return "无限"
+		return "unlimited"
 	}
 	return strconv.Itoa(count)
 }
