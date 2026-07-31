@@ -274,6 +274,7 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 			r.applyBusinessProfileToUserFull(ctx, &full, profile)
 		}
 	}
+	r.applyStarsRatingToUserFull(ctx, u.ID, &full)
 	if r.deps.Messages != nil {
 		// 置顶发现链路：userFull.pinned_msg_id 是该私聊（含 Saved
 		// Messages）当前最顶置顶；客户端凭此触发 filterPinned 搜索。
@@ -696,6 +697,26 @@ func (r *Router) userFromInput(ctx context.Context, currentUserID int64, id tg.I
 	default:
 		return domain.User{}, false, nil
 	}
+}
+
+func (r *Router) applyStarsRatingToUserFull(ctx context.Context, userID int64, full *tg.UserFull) {
+	if full == nil || userID == 0 || r.deps.Stars == nil {
+		return
+	}
+	spent, err := r.deps.Stars.TotalSpent(ctx, userID)
+	if err != nil || spent <= 0 {
+		return
+	}
+	rating := domain.StarsRatingForSpent(spent)
+	out := tg.StarsRating{
+		Level:             rating.Level,
+		CurrentLevelStars: rating.CurrentLevelStars,
+		Stars:             rating.Stars,
+	}
+	if rating.HasNextLevelStars {
+		out.SetNextLevelStars(rating.NextLevelStars)
+	}
+	full.SetStarsRating(out)
 }
 
 func (r *Router) validateInputUser(ctx context.Context, id tg.InputUserClass) error {

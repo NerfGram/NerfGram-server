@@ -7,7 +7,7 @@ import (
 
 func TestEncodeDecodeEmailPhoneRoundTrip(t *testing.T) {
 	for _, email := range []string{
-		"onysd@owpengram.local",
+		"onysd@fromgram.local",
 		"a@b.co",
 		"User.Name+Tag@Example.COM",
 		"very.long.email.address.for.testing.purposes@some-long-domain-name.example.com",

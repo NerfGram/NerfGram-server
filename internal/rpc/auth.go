@@ -114,7 +114,7 @@ const exportAuthTokenTTL = 5 * time.Minute
 
 // exportAuthSecret HMAC-signs auth.exportAuthorization tokens. It is
 // process-lifetime random (not persisted): every dc_id this server hands out
-// aliases the SAME physical process (see owpengram_servers single-server
+// aliases the SAME physical process (see fromgram_servers single-server
 // backend + memory "lenient DC key exchange"), so export and import always
 // happen against the same running instance within the token's short TTL —
 // a restart between the two would just make the client redo the export,

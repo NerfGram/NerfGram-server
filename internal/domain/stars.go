@@ -132,3 +132,41 @@ func DecodeStarsCursor(s string) (int64, bool) {
 	}
 	return id, true
 }
+
+// StarsRatingSnapshot is the profile star-rating projection derived from spent Stars.
+type StarsRatingSnapshot struct {
+	Level             int
+	CurrentLevelStars int64
+	Stars             int64
+	NextLevelStars    int64
+	HasNextLevelStars bool
+}
+
+var defaultStarsRatingThresholds = []int64{0, 1, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000}
+
+// StarsRatingForSpent maps cumulative Stars spent into the Telegram starsRating shape.
+func StarsRatingForSpent(spent int64) StarsRatingSnapshot {
+	if spent < 0 {
+		spent = 0
+	}
+	level := 0
+	current := int64(0)
+	for i, threshold := range defaultStarsRatingThresholds {
+		if spent < threshold {
+			return StarsRatingSnapshot{
+				Level:             level,
+				CurrentLevelStars: current,
+				Stars:             spent,
+				NextLevelStars:    threshold,
+				HasNextLevelStars: true,
+			}
+		}
+		level = i
+		current = threshold
+	}
+	return StarsRatingSnapshot{
+		Level:             len(defaultStarsRatingThresholds) - 1,
+		CurrentLevelStars: current,
+		Stars:             spent,
+	}
+}

@@ -194,6 +194,21 @@ LIMIT $2`
 	return page, nil
 }
 
+func (s *StarsStore) TotalSpent(ctx context.Context, userID int64) (int64, error) {
+	if userID == 0 {
+		return 0, nil
+	}
+	var spent int64
+	err := s.db.QueryRow(ctx, `
+SELECT COALESCE(SUM(-amount), 0)
+FROM stars_transactions
+WHERE user_id = $1 AND amount < 0`, userID).Scan(&spent)
+	if err != nil {
+		return 0, fmt.Errorf("sum stars spent: %w", err)
+	}
+	return spent, nil
+}
+
 // insertStarsTxn 在事务内写一条流水（amount 带符号）。
 func insertStarsTxn(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) error {
 	if _, err := tx.Exec(ctx, `

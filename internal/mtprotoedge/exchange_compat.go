@@ -350,7 +350,7 @@ func (s serverExchangeCompat) validatePQInnerDataDC(d mt.PQInnerDataClass) error
 			if !s.strictDC {
 				// Lenient by default (Options.StrictDC doc has the full
 				// rationale): telesrv is a single physical backend, and the
-				// OwpenGram client forks deliberately alias dc_id 1..5 to this
+				// FromGram client forks deliberately alias dc_id 1..5 to this
 				// one server, so a client-chosen dc_id that isn't our
 				// configured DC is expected, not an error. dc_id plays no
 				// role in key derivation, so accepting it doesn't weaken the

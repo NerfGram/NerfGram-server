@@ -11,7 +11,7 @@ const (
 	DefaultWebBaseURL    = "https://web.telesrv.net"
 	DefaultAppScheme     = "telesrv"
 	DefaultAppName       = "telesrv"
-	DefaultDownloadURL   = "https://owpengram.org"
+	DefaultDownloadURL   = "https://fromgram.org"
 )
 const MaxChatlistSlugBytes = 128
 

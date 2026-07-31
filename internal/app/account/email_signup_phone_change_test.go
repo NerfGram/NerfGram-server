@@ -17,7 +17,7 @@ func newEmailSignupPhoneChangeFixture(t *testing.T) (phoneChangeFixture, *captur
 	auths := memory.NewAuthorizationStore()
 	codes := memory.NewCodeStore()
 	events := memory.NewUpdateEventStore()
-	phone, ok := domain.EncodeEmailPhone("alice@owpengram.local")
+	phone, ok := domain.EncodeEmailPhone("alice@fromgram.local")
 	if !ok {
 		t.Fatalf("EncodeEmailPhone: ok=false")
 	}
@@ -43,7 +43,7 @@ func newEmailSignupPhoneChangeFixture(t *testing.T) (phoneChangeFixture, *captur
 
 func TestEmailSignupChangePhoneRoutesCodeToDecodedEmail(t *testing.T) {
 	f, sender := newEmailSignupPhoneChangeFixture(t)
-	newPhone, ok := domain.EncodeEmailPhone("newmail@owpengram.local")
+	newPhone, ok := domain.EncodeEmailPhone("newmail@fromgram.local")
 	if !ok {
 		t.Fatalf("EncodeEmailPhone: ok=false")
 	}
@@ -55,8 +55,8 @@ func TestEmailSignupChangePhoneRoutesCodeToDecodedEmail(t *testing.T) {
 	if delivery.Kind != domain.AuthCodeDeliveryEmail {
 		t.Fatalf("delivery.Kind = %v, want AuthCodeDeliveryEmail", delivery.Kind)
 	}
-	if sender.to != "newmail@owpengram.local" {
-		t.Fatalf("sender.to = %q, want newmail@owpengram.local", sender.to)
+	if sender.to != "newmail@fromgram.local" {
+		t.Fatalf("sender.to = %q, want newmail@fromgram.local", sender.to)
 	}
 	if len(sender.code) != 6 {
 		t.Fatalf("sender.code = %q, want 6 digits", sender.code)
@@ -66,7 +66,7 @@ func TestEmailSignupChangePhoneRoutesCodeToDecodedEmail(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("load code found=%v err=%v", found, err)
 	}
-	if rec.Channel != store.PhoneCodeChannelEmailLogin || rec.Email != "newmail@owpengram.local" {
+	if rec.Channel != store.PhoneCodeChannelEmailLogin || rec.Email != "newmail@fromgram.local" {
 		t.Fatalf("stored code = %+v", rec)
 	}
 
@@ -81,8 +81,8 @@ func TestEmailSignupChangePhoneRoutesCodeToDecodedEmail(t *testing.T) {
 	if result.User.Phone == newPhone || !domain.ValidPhone(result.User.Phone) || domain.IsEmailSignupPhone(result.User.Phone) {
 		t.Fatalf("result.User.Phone = %q, want a short all-digit 888 display number distinct from the wire value %q", result.User.Phone, newPhone)
 	}
-	if result.User.SignupEmail != "newmail@owpengram.local" {
-		t.Fatalf("result.User.SignupEmail = %q, want newmail@owpengram.local", result.User.SignupEmail)
+	if result.User.SignupEmail != "newmail@fromgram.local" {
+		t.Fatalf("result.User.SignupEmail = %q, want newmail@fromgram.local", result.User.SignupEmail)
 	}
 }
 

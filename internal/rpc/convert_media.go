@@ -650,6 +650,9 @@ func tgStickerSet(set domain.StickerSet) tg.StickerSet {
 	if set.ThumbDocumentID != 0 {
 		out.SetThumbDocumentID(set.ThumbDocumentID)
 	}
+	if set.Emojis {
+		out.ChannelEmojiStatus = true
+	}
 	return out
 }
 

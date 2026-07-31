@@ -6,6 +6,9 @@ import (
 	"strings"
 )
 
+//go:embed assets/logo.svg
+var brandLogoSVG []byte
+
 //go:embed assets/logo.png
 var brandLogoPNG []byte
 
@@ -32,7 +35,13 @@ var publicFonts = map[string][]byte{
 	"plus-jakarta-sans-800.woff2": fontJakarta800,
 }
 
-func (h *handler) brandLogo(w http.ResponseWriter, _ *http.Request) {
+func (h *handler) brandLogoSVG(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+	_, _ = w.Write(brandLogoSVG)
+}
+
+func (h *handler) brandLogoPNG(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
 	_, _ = w.Write(brandLogoPNG)

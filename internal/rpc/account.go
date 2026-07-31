@@ -345,11 +345,7 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 			Hash)
 	})
 	registerRPC[*tg.AccountGetChannelDefaultEmojiStatusesRequest](d, tlprofile.SemanticMethodAccountGetChannelDefaultEmojiStatuses, func(ctx context.Context, layerRequest *tg.AccountGetChannelDefaultEmojiStatusesRequest) (any, error) {
-		hash := layerRequest.
-			Hash
-		_ = hash
-
-		return &tg.AccountEmojiStatuses{Hash: 0, Statuses: []tg.EmojiStatusClass{}}, nil
+		return r.onAccountGetChannelDefaultEmojiStatuses(ctx, layerRequest.Hash)
 	})
 	registerRPC[*tg.AccountGetChannelRestrictedStatusEmojisRequest](d, tlprofile.SemanticMethodAccountGetChannelRestrictedStatusEmojis, func(ctx context.Context, layerRequest *tg.AccountGetChannelRestrictedStatusEmojisRequest) (any, error) {
 		hash := layerRequest.
@@ -1559,6 +1555,20 @@ func (r *Router) onAccountToggleUsername(ctx context.Context, req *tg.AccountTog
 	if r.deps.CollectibleUsernames == nil {
 		return false, usernameInvalidErr()
 	}
+	if req.Active && r.deps.Users != nil {
+		u, err := r.deps.Users.Self(ctx, userID)
+		if err != nil {
+			return false, internalErr()
+		}
+		if u.Username != "" && strings.EqualFold(req.Username, u.Username) {
+			if err := r.deps.CollectibleUsernames.DeactivateAllForOwner(ctx, userID); err != nil {
+				return false, err
+			}
+			r.invalidateRPCProjectionForUser(userID)
+			r.pushUsernameUpdate(ctx, u)
+			return true, nil
+		}
+	}
 	if err := r.deps.CollectibleUsernames.SetActive(ctx, req.Username, userID, req.Active); err != nil {
 		if errors.Is(err, domain.ErrCollectibleUsernameNotFound) {
 			return false, usernameInvalidErr()
@@ -1849,6 +1859,14 @@ func (r *Router) onAccountGetDefaultEmojiStatuses(ctx context.Context, hash int6
 	return &tg.AccountEmojiStatuses{Hash: catalogHash, Statuses: statuses}, nil
 }
 
+// onAccountGetChannelDefaultEmojiStatuses serves the channel emoji-status picker
+// defaults (account.getChannelDefaultEmojiStatuses). Uses the same seeded system
+// set as user defaults because inputStickerSetEmojiChannelDefaultStatuses maps
+// to the same catalog key on this server.
+func (r *Router) onAccountGetChannelDefaultEmojiStatuses(ctx context.Context, hash int64) (tg.AccountEmojiStatusesClass, error) {
+	return r.onAccountGetDefaultEmojiStatuses(ctx, hash)
+}
+
 // onAccountGetCollectibleEmojiStatuses returns the actor's active locally
 // owned unique gifts as complete emojiStatusCollectible values. The bounded
 // list order and hash are stable, so Android can safely reuse its cache.
@@ -1973,7 +1991,28 @@ func (r *Router) onAccountGetDefaultBackgroundEmojis(ctx context.Context, hash i
 }
 
 func defaultBackgroundEmojiDocumentIDs(ctx context.Context, files FilesService) ([]int64, error) {
-	return statusPackEmojiDocumentIDs(ctx, files, 0)
+	ids, err := statusPackEmojiDocumentIDs(ctx, files, 0)
+	if err != nil || len(ids) > 0 {
+		return ids, err
+	}
+	ids, err = profilePhotoEmojiDocumentIDsFromRef(ctx, files, domain.StickerSetRef{
+		Kind:      domain.StickerSetRefByShortName,
+		ShortName: "TelesrvDefaultStatuses",
+	}, 0)
+	if err != nil || len(ids) > 0 {
+		return ids, err
+	}
+	sets, err := files.ListStickerSets(ctx, domain.StickerSetKindEmoji)
+	if err != nil {
+		return nil, err
+	}
+	for _, set := range sets {
+		if set.Deleted || !set.TextColor || len(set.DocumentIDs) == 0 {
+			continue
+		}
+		return uniquePositiveDocumentIDs(set.DocumentIDs, 0), nil
+	}
+	return nil, nil
 }
 
 func statusPackEmojiDocumentIDs(ctx context.Context, files FilesService, limit int) ([]int64, error) {

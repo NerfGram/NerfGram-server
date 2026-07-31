@@ -33,11 +33,11 @@ func TestCatalogVerifiesSelectedDocument(t *testing.T) {
 	}
 	catalog := New(root)
 	items, err := catalog.List(context.Background())
-	if err != nil || len(items) != 1 || items[0].ID != 1 || items[0].Title != "OwpenGram Pin" {
+	if err != nil || len(items) != 1 || items[0].ID != 1 || items[0].Title != "FromGram Pin" {
 		t.Fatalf("items=%+v err=%v", items, err)
 	}
 	bundle, err := catalog.Bundle(context.Background(), 1, false)
-	if err != nil || string(bundle.BaseDocument.Data) != string(data) || bundle.Gift.Title != "OwpenGram Pin" {
+	if err != nil || string(bundle.BaseDocument.Data) != string(data) || bundle.Gift.Title != "FromGram Pin" {
 		t.Fatalf("bundle=%+v err=%v", bundle, err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "documents", "10.tgs"), []byte("tampered---"), 0o644); err != nil {

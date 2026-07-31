@@ -381,7 +381,7 @@ func TestKeyExchangeRejectsWrongNegativeTempDCWhenStrict(t *testing.T) {
 // TestKeyExchangeAcceptsMismatchedDCByDefault asserts that, in the default
 // lenient mode, neither permanent nor temp key exchange requires dc_id to
 // equal the server's configured DC. telesrv is always a single physical
-// backend; the OwpenGram client forks deliberately alias dc_id 1..5 to it
+// backend; the FromGram client forks deliberately alias dc_id 1..5 to it
 // (see Options.StrictDC doc), so a mismatched client-chosen dc_id must not be
 // rejected — doing so previously broke every account whose client picked a
 // starting dc_id other than the server's.

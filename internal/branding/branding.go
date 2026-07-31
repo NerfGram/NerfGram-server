@@ -12,17 +12,17 @@ import (
 )
 
 const (
-	ProductName      = "OwpenGram"
-	ProductUsername  = "owpengram"
-	DesktopAppName   = "OwpenGram Desktop"
-	AndroidAppName   = "OwpenGram Android"
-	IOSAppName       = "OwpenGram iOS"
-	MacOSAppName     = "OwpenGram macOS"
-	WebAAppName      = "OwpenGram Web A"
-	WebKAppName      = "OwpenGram Web K"
-	PremiumName      = "OwpenGram Premium"
-	StarsName        = "OwpenGram Stars"
-	DefaultPublicURL = "https://owpengram.org"
+	ProductName      = "FromGram"
+	ProductUsername  = "fromgram"
+	DesktopAppName   = "FromGram Desktop"
+	AndroidAppName   = "FromGram Android"
+	IOSAppName       = "FromGram iOS"
+	MacOSAppName     = "FromGram macOS"
+	WebAAppName      = "FromGram Web A"
+	WebKAppName      = "FromGram Web K"
+	PremiumName      = "FromGram Premium"
+	StarsName        = "FromGram Stars"
+	DefaultPublicURL = "https://fromgram.org"
 )
 
 // ClientAppName returns the branded display name for a stored client platform.
@@ -60,6 +60,8 @@ var (
 	officialHTTPHostRE = regexp.MustCompile(`(?i)https?://(?:[a-z0-9-]+\.)*(?:telegram\.(?:org|me|com|dog)|t\.me)([^a-z0-9]|$)`)
 	officialBareHostRE = regexp.MustCompile(`(?i)(?:(?:[a-z0-9-]+\.)*telegram\.(?:org|me|com|dog)|\bt\.me)([^a-z0-9]|$)`)
 	officialBrandRE    = regexp.MustCompile(`(?i)telegram|телеграм[\p{L}]*|تيليجرام|تلگرام|텔레그램|טלגרם`)
+	legacyBrandRE      = regexp.MustCompile(`(?i)fromgram`)
+	legacyHostRE       = regexp.MustCompile(`(?i)fromgram\.org`)
 	technicalIDRE      = regexp.MustCompile(`^[A-Za-z0-9-]+(?:[._][A-Za-z0-9-]+)+$`)
 )
 
@@ -73,6 +75,8 @@ func UserVisibleText(value, publicBaseURL string) string {
 	baseURL, publicHost := publicDestination(publicBaseURL)
 	value = officialHTTPHostRE.ReplaceAllString(value, baseURL+"${1}")
 	value = officialBareHostRE.ReplaceAllString(value, publicHost+"${1}")
+	value = legacyHostRE.ReplaceAllString(value, strings.TrimPrefix(DefaultPublicURL, "https://"))
+	value = legacyBrandRE.ReplaceAllString(value, ProductName)
 	// Some platform packs carry dotted or underscored runtime identifiers as
 	// values. They are not copy and changing them can break client navigation.
 	if technicalIDRE.MatchString(value) {

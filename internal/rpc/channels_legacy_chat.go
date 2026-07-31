@@ -35,9 +35,6 @@ func (r *Router) onMessagesCreateChat(ctx context.Context, req *tg.MessagesCreat
 		zap.Int("member_ids", len(memberIDs)),
 		zap.Int64s("member_user_ids", memberIDs),
 	)
-	if len(memberIDs) == 0 {
-		return nil, usersTooFewErr()
-	}
 	createRes, err := r.deps.Channels.CreateMegagroupFromCreateChat(ctx, userID, domain.CreateChannelRequest{
 		CreatorUserID: userID,
 		Title:         req.Title,

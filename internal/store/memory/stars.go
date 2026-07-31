@@ -128,6 +128,25 @@ func (s *StarsStore) ListTransactions(_ context.Context, userID int64, offset st
 	return page, nil
 }
 
+func (s *StarsStore) TotalSpent(_ context.Context, userID int64) (int64, error) {
+	if userID == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.states[userID]
+	if st == nil {
+		return 0, nil
+	}
+	var spent int64
+	for _, txn := range st.txns {
+		if txn.Amount < 0 {
+			spent += -txn.Amount
+		}
+	}
+	return spent, nil
+}
+
 func (s *StarsStore) appendTxn(st *starsState, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) {
 	s.nextID++
 	st.txns = append(st.txns, domain.StarsTransaction{

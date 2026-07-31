@@ -21,4 +21,6 @@ type StarsStore interface {
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) (domain.StarsBalance, error)
 	// ListTransactions 按 id DESC keyset 分页返回一页流水 + 当前余额。
 	ListTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.StarsTransactionPage, error)
+	// TotalSpent returns cumulative Stars debited by the user (absolute sum of negative amounts).
+	TotalSpent(ctx context.Context, userID int64) (int64, error)
 }

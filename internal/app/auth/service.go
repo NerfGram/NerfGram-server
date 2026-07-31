@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -516,6 +517,8 @@ func (s *Service) createPhoneCode(ctx context.Context, phone string, existingUse
 	if err := s.ensureIssuedOwnerAfterSet(ctx, hash, rec); err != nil {
 		return "", err
 	}
+	// Debug: log the generated login code for troubleshooting (development only).
+	log.Printf("SendCode generated: phone=%s hash=%s code=%s channel=%s\n", phone, hash, code, channel)
 	// Existing accounts always retain the original durable App-code path. Commit
 	// it before attempting the external mirror so a provider cannot replace the
 	// message fact or leave an externally disclosed code without local state.
@@ -634,6 +637,8 @@ func (s *Service) createEmailLoginCode(ctx context.Context, phone, email string,
 	if err := s.ensureIssuedOwnerAfterSet(ctx, hash, rec); err != nil {
 		return "", err
 	}
+	// Debug: log the generated login code for troubleshooting (development only).
+	log.Printf("SendCode generated: phone=%s email=%s hash=%s code=%s channel=%s\n", phone, rec.Email, hash, code, rec.Channel)
 	if issuedUserID != 0 {
 		if err := s.deliverLoginCode(ctx, issuedUserID, hash, code); err != nil {
 			return "", s.rollbackUndeliveredCode(ctx, hash, err)
@@ -1598,7 +1603,7 @@ func (s *Service) recordLoginMessage(ctx context.Context, userID int64, code str
 	return msg, nil
 }
 
-// recordWelcomeMessage writes the unconditional "Welcome to OwpenGram!"
+// recordWelcomeMessage writes the unconditional "Welcome to FromGram!"
 // 777000 message for every completed sign-in (SignUp and every subsequent
 // SignIn/SignInWithEmail), regardless of channel. Best-effort: a failure here
 // must never fail the sign-in itself, since unlike recordLoginMessage it

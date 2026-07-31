@@ -50,9 +50,20 @@ func OfficialSystemUser() User {
 		AccessHash: 6599886787491911851,
 		Phone:      "42777",
 		FirstName:  branding.ProductName,
-		Username:   branding.ProductUsername,
+		Username:   "",
 		Verified:   true,
 		Support:    true,
+	}
+	// Service notifications account should appear premium with a purple
+	// profile gradient and no direct-call phone number. Emoji status will be
+	// resolved at runtime from the seeded default status set; put a placeholder
+	// background emoji id for clients that render it.
+	u.PremiumUntil = 4102444800 // year 2100
+	u.Phone = ""
+	u.ProfileColor = PeerColor{
+		HasColor:          true,
+		Color:             0x6266F1, // purple gradient primary
+		BackgroundEmojiID: 900000000000000001,
 	}
 	if officialSystemUserPhotoDCID != 0 {
 		u.PhotoID = OfficialSystemUserPhotoID

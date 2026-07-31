@@ -145,6 +145,16 @@ RETURNING `+collectibleUsernameColumns,
 	return out, nil
 }
 
+// DeactivateAllForOwner clears the active flag on every collectible username
+// owned by ownerUserID so the account's editable username becomes active again.
+func (s *CollectibleUsernameStore) DeactivateAllForOwner(ctx context.Context, ownerUserID int64) error {
+	if ownerUserID <= 0 {
+		return errors.New("owner_user_id is required")
+	}
+	_, err := s.db.Exec(ctx, `UPDATE public.collectible_usernames SET active = false, updated_at = now() WHERE owner_user_id = $1 AND active`, ownerUserID)
+	return err
+}
+
 // SetActive switches whether a collectible username is the owner's currently
 // active/shown username (vs. their original editable one). Only one
 // collectible username per owner can be active at a time (enforced by a

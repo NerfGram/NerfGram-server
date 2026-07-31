@@ -204,6 +204,9 @@ func (s *UserStore) UpdateProfile(ctx context.Context, userID int64, firstName, 
 }
 
 func (s *UserStore) UpdateUsername(ctx context.Context, userID int64, username string) (domain.User, error) {
+	if domain.IsSystemUserID(userID) {
+		return domain.User{}, domain.ErrUsernameInvalid
+	}
 	username = strings.TrimSpace(strings.TrimPrefix(username, "@"))
 	usernameLower := strings.ToLower(username)
 	beginner, ok := s.db.(txBeginner)

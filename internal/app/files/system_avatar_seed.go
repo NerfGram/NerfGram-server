@@ -9,7 +9,7 @@ import (
 	"telesrv/internal/domain"
 )
 
-//go:embed seedassets/owpengram_system_avatar.png
+//go:embed seedassets/fromgram_system_avatar.png
 var officialSystemAvatarPNG []byte
 
 // SeedOfficialSystemAvatar idempotently seeds the built-in official system
@@ -24,14 +24,14 @@ var officialSystemAvatarPNG []byte
 // Returns true if it actually wrote a new photo.
 func (s *Service) SeedOfficialSystemAvatar(ctx context.Context) (bool, error) {
 	photoID := domain.OfficialSystemUserPhotoID
+	sizes, err := s.putAvatarStaticSizes(ctx, photoID, officialSystemAvatarPNG, photoSizeSpecsForAvatar(officialSystemAvatarPNG))
+	if err != nil {
+		return false, err
+	}
 	wrote := false
-	if _, found, err := s.media.GetPhoto(ctx, photoID); err != nil {
+	if existing, found, err := s.media.GetPhoto(ctx, photoID); err != nil {
 		return false, err
 	} else if !found {
-		sizes, err := s.putPhotoStaticSizes(ctx, photoID, officialSystemAvatarPNG, photoSizeSpecsForAvatar(officialSystemAvatarPNG))
-		if err != nil {
-			return false, err
-		}
 		photo := domain.Photo{
 			ID:            photoID,
 			AccessHash:    domain.OfficialSystemUserPhotoAccessHash,
@@ -41,6 +41,13 @@ func (s *Service) SeedOfficialSystemAvatar(ctx context.Context) (bool, error) {
 			Sizes:         sizes,
 		}
 		if err := s.media.PutPhoto(ctx, photo); err != nil {
+			return false, err
+		}
+		wrote = true
+	} else {
+		existing.Sizes = sizes
+		existing.Date = int(time.Now().Unix())
+		if err := s.media.PutPhoto(ctx, existing); err != nil {
 			return false, err
 		}
 		wrote = true

@@ -84,7 +84,7 @@ func TestCreateCatalogRevisionPreservesHistoricalRevision(t *testing.T) {
 		t.Fatalf("current=%+v found=%v", current, found)
 	}
 	historical, found, _ := svc.GiftRevisionByID(ctx, first.Gift.RevisionID)
-	if !found || historical.Stars != 50 || historical.Title != "OwpenGram Pin" {
+	if !found || historical.Stars != 50 || historical.Title != "FromGram Pin" {
 		t.Fatalf("historical=%+v found=%v", historical, found)
 	}
 	if _, err := svc.SetCatalogEnabled(ctx, first.Gift.ID+999, false); !errors.Is(err, domain.ErrStarGiftNotFound) {

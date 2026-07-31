@@ -174,7 +174,8 @@ func newHandler(cfg Config, logger *zap.Logger) (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.healthz)
-	mux.HandleFunc("GET /_public/assets/logo.png", h.brandLogo)
+	mux.HandleFunc("GET /_public/assets/logo.svg", h.brandLogoSVG)
+	mux.HandleFunc("GET /_public/assets/logo.png", h.brandLogoPNG)
 	mux.HandleFunc("GET /_public/assets/fonts/{file}", h.brandFont)
 	mux.HandleFunc("GET /_public/avatar/{username}/{photoID}", h.publicAvatar)
 	mux.HandleFunc("GET /_public/invite-avatar/{hash}/{photoID}", h.publicInviteAvatar)
@@ -1465,6 +1466,7 @@ var usernameLandingTemplate = template.Must(template.New("username-landing").Par
   <meta name="description" content="{{.Description}}">
   <meta name="robots" content="index,follow,max-image-preview:large">
   <link rel="canonical" href="{{.CanonicalURL}}">
+  <link rel="icon" type="image/svg+xml" href="/_public/assets/logo.svg">
   <link rel="icon" type="image/png" href="/_public/assets/logo.png">
   <meta property="og:type" content="profile">
   <meta property="og:site_name" content="{{.AppName}}">
@@ -1485,7 +1487,7 @@ var usernameLandingTemplate = template.Must(template.New("username-landing").Par
 <body>` + publicBgOrbsMarkup + `
   <header>
     <a class="brand" href="{{.HomeURL}}" aria-label="{{.AppName}} home">
-      <img src="/_public/assets/logo.png" alt="{{.AppName}}">
+      <img src="/_public/assets/logo.svg" alt="{{.AppName}}">
       <span>{{.AppName}}</span>
     </a>
     <a class="btn btn-ghost" href="{{.DownloadURL}}">Download</a>
@@ -1528,13 +1530,14 @@ var usernameNotFoundTemplate = template.Must(template.New("username-not-found").
   <meta name="theme-color" content="#2563eb">
   <meta name="robots" content="noindex,nofollow">
   <title>Nothing found - {{.AppName}}</title>
+  <link rel="icon" type="image/svg+xml" href="/_public/assets/logo.svg">
   <link rel="icon" type="image/png" href="/_public/assets/logo.png">
   <style>` + publicPageStyleSheet + `</style>
 </head>
 <body>` + publicBgOrbsMarkup + `
   <header>
     <a class="brand" href="{{.HomeURL}}" aria-label="{{.AppName}} home">
-      <img src="/_public/assets/logo.png" alt="{{.AppName}}">
+      <img src="/_public/assets/logo.svg" alt="{{.AppName}}">
       <span>{{.AppName}}</span>
     </a>
     <a class="btn btn-ghost" href="{{.DownloadURL}}">Download</a>
@@ -1558,6 +1561,7 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
   <meta name="theme-color" content="#2563eb">
   <title>{{.Title}} - {{.AppName}}</title>
   <link rel="canonical" href="{{.CanonicalURL}}">
+  <link rel="icon" type="image/svg+xml" href="/_public/assets/logo.svg">
   <link rel="icon" type="image/png" href="/_public/assets/logo.png">
   <meta property="og:title" content="{{.Title}}">
   <meta property="og:description" content="{{.Description}}">
@@ -1570,7 +1574,7 @@ var landingTemplate = template.Must(template.New("landing").Parse(`<!doctype htm
 <body>` + publicBgOrbsMarkup + `
   <header>
     <a class="brand" href="{{.CanonicalURL}}" aria-label="{{.AppName}}">
-      <img src="/_public/assets/logo.png" alt="{{.AppName}}">
+      <img src="/_public/assets/logo.svg" alt="{{.AppName}}">
       <span>{{.AppName}}</span>
     </a>
     <a class="btn btn-ghost" href="{{.DownloadURL}}">Download</a>

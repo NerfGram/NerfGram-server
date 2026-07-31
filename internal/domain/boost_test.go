@@ -9,17 +9,17 @@ func TestPremiumBoostStatusDefaultPolicyIsBoundedLinear(t *testing.T) {
 	peer := Peer{Type: PeerTypeChannel, ID: 100}
 
 	empty := PremiumBoostStatusForCount(peer, 0, nil)
-	if empty.Level != 0 || empty.CurrentLevelBoosts != 0 || empty.Boosts != 0 || empty.NextLevelBoosts != 1 || !empty.HasNextLevelBoosts {
-		t.Fatalf("empty status = %+v, want level 0 next 1", empty)
+	if empty.Level != MaxDefaultPremiumBoostLevel || empty.CurrentLevelBoosts != MaxDefaultPremiumBoostLevel || empty.Boosts != DefaultChannelBoostCount || empty.HasNextLevelBoosts {
+		t.Fatalf("empty status = %+v, want level %d boosts %d", empty, MaxDefaultPremiumBoostLevel, DefaultChannelBoostCount)
 	}
 
 	one := PremiumBoostStatusForCount(peer, 1, nil)
-	if one.Level != 1 || one.CurrentLevelBoosts != 1 || one.Boosts != 1 || one.NextLevelBoosts != 2 || !one.HasNextLevelBoosts {
-		t.Fatalf("one boost status = %+v, want level 1 next 2", one)
+	if one.Level != MaxDefaultPremiumBoostLevel || one.CurrentLevelBoosts != MaxDefaultPremiumBoostLevel || one.Boosts != DefaultChannelBoostCount+1 || one.HasNextLevelBoosts {
+		t.Fatalf("one boost status = %+v, want capped max level with %d boosts", one, DefaultChannelBoostCount+1)
 	}
 
 	max := PremiumBoostStatusForCount(peer, MaxDefaultPremiumBoostLevel, nil)
-	if max.Level != MaxDefaultPremiumBoostLevel || max.CurrentLevelBoosts != MaxDefaultPremiumBoostLevel || max.HasNextLevelBoosts {
+	if max.Level != MaxDefaultPremiumBoostLevel || max.CurrentLevelBoosts != MaxDefaultPremiumBoostLevel || max.Boosts != DefaultChannelBoostCount+MaxDefaultPremiumBoostLevel || max.HasNextLevelBoosts {
 		t.Fatalf("max status = %+v, want capped max level without next", max)
 	}
 

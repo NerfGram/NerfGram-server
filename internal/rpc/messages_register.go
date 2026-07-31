@@ -303,11 +303,7 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 		return tdesktop.EmojiGroups(hash), nil
 	})
 	registerRPC[*tg.MessagesGetEmojiStatusGroupsRequest](d, tlprofile.SemanticMethodMessagesGetEmojiStatusGroups, func(ctx context.Context, layerRequest *tg.MessagesGetEmojiStatusGroupsRequest) (any, error) {
-		hash := layerRequest.
-			Hash
-		_ = hash
-
-		return tdesktop.EmojiStatusGroups(), nil
+		return r.onMessagesGetEmojiStatusGroups(ctx, layerRequest.Hash)
 	})
 	registerRPC[*tg.MessagesGetEmojiStickerGroupsRequest](d, tlprofile.SemanticMethodMessagesGetEmojiStickerGroups, func(ctx context.Context, layerRequest *tg.MessagesGetEmojiStickerGroupsRequest) (any, error) {
 		return r.onMessagesGetEmojiStickerGroups(ctx, layerRequest.

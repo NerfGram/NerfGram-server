@@ -33,7 +33,7 @@ type Config struct {
 	// StrictDCCheck turns on exact DC-ID validation for the permanent-key
 	// exchange (default off = lenient). See mtprotoedge.Options.StrictDC doc
 	// for the full rationale: telesrv is always a single physical backend,
-	// but the OwpenGram client forks intentionally alias dc_id 1..5 to it,
+	// but the FromGram client forks intentionally alias dc_id 1..5 to it,
 	// so a mismatched client-chosen dc_id is expected, not an attack — strict
 	// mode exists only for a hypothetical future real multi-DC deployment.
 	StrictDCCheck bool
@@ -545,7 +545,7 @@ func Load() (Config, error) {
 		SMTPUsername:                  envOr("TELESRV_SMTP_USERNAME", ""),
 		SMTPPassword:                  envOr("TELESRV_SMTP_PASSWORD", ""),
 		SMTPFrom:                      envOr("TELESRV_SMTP_FROM", ""),
-		SMTPFromName:                  envOr("TELESRV_SMTP_FROM_NAME", "OwpenGram"),
+		SMTPFromName:                  envOr("TELESRV_SMTP_FROM_NAME", "FromGram"),
 		SMTPTLSMode:                   strings.ToLower(strings.TrimSpace(envOr("TELESRV_SMTP_TLS", "starttls"))),
 		SMTPTimeout:                   envDurationOr("TELESRV_SMTP_TIMEOUT", 10*time.Second),
 		LangPackSeedDir:               envOr("TELESRV_LANGPACK_SEED_DIR", "data/langpack"),

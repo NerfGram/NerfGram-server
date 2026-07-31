@@ -1086,14 +1086,14 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("premium.getBoostsStatus: %v", err)
 	}
-	if boostStatus.Level != 0 || boostStatus.CurrentLevelBoosts != 0 || boostStatus.Boosts != 0 {
-		t.Fatalf("premium.getBoostsStatus = level %d current %d boosts %d, want empty real state", boostStatus.Level, boostStatus.CurrentLevelBoosts, boostStatus.Boosts)
+	if boostStatus.Level != domain.MaxDefaultPremiumBoostLevel || boostStatus.CurrentLevelBoosts != domain.MaxDefaultPremiumBoostLevel || boostStatus.Boosts != domain.DefaultChannelBoostCount {
+		t.Fatalf("premium.getBoostsStatus = level %d current %d boosts %d, want default %d boosts at level %d", boostStatus.Level, boostStatus.CurrentLevelBoosts, boostStatus.Boosts, domain.DefaultChannelBoostCount, domain.MaxDefaultPremiumBoostLevel)
 	}
 	if boostStatus.BoostURL == "" {
 		t.Fatalf("premium.getBoostsStatus missing boost_url")
 	}
-	if next, ok := boostStatus.GetNextLevelBoosts(); !ok || next <= boostStatus.CurrentLevelBoosts {
-		t.Fatalf("premium.getBoostsStatus real NextLevelBoosts set=%v val=%d, want > CurrentLevelBoosts %d", ok, next, boostStatus.CurrentLevelBoosts)
+	if next, ok := boostStatus.GetNextLevelBoosts(); ok {
+		t.Fatalf("premium.getBoostsStatus NextLevelBoosts set=%v, want unset at max level", next)
 	}
 	boostStatusTDesktop, err := r.onPremiumGetBoostsStatus(WithClientInfo(ownerCtx, ClientInfo{
 		Type:       ClientTypeTDesktop,

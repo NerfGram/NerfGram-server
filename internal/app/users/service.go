@@ -661,14 +661,21 @@ func (s *Service) loadBaseUsersByIDs(ctx context.Context, userIDs []int64) ([]do
 		byOwner, err := s.collectibleUsernames.ByOwners(ctx, ids)
 		if err == nil && len(byOwner) > 0 {
 			for i := range out {
-				if list, ok := byOwner[out[i].ID]; ok && len(list) > 0 {
-					out[i].CollectibleUsernames = append([]domain.CollectibleUsername(nil), list...)
-					for _, cu := range list {
-						if cu.Active {
-							out[i].CollectibleUsername = cu.Username
-							out[i].CollectibleUsernameActive = true
-							break
-						}
+				list := byOwner[out[i].ID]
+				if len(list) == 0 {
+					out[i].CollectibleUsernames = nil
+					out[i].CollectibleUsername = ""
+					out[i].CollectibleUsernameActive = false
+					continue
+				}
+				out[i].CollectibleUsernames = append([]domain.CollectibleUsername(nil), list...)
+				out[i].CollectibleUsername = ""
+				out[i].CollectibleUsernameActive = false
+				for _, cu := range list {
+					if cu.Active {
+						out[i].CollectibleUsername = cu.Username
+						out[i].CollectibleUsernameActive = true
+						break
 					}
 				}
 			}

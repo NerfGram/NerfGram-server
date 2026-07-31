@@ -247,6 +247,7 @@ type UsersService interface {
 type CollectibleUsernameService interface {
 	Get(ctx context.Context, username string) (domain.CollectibleUsername, bool, error)
 	SetActive(ctx context.Context, username string, ownerUserID int64, active bool) error
+	DeactivateAllForOwner(ctx context.Context, ownerUserID int64) error
 }
 
 // BatchViewerUsersResolver 是 UsersService 的可选能力：跨多个 viewer 一次性投影同一组 user
@@ -1002,6 +1003,7 @@ type StarsService interface {
 	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 	ListTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.StarsTransactionPage, error)
+	TotalSpent(ctx context.Context, userID int64) (int64, error)
 }
 
 // SecretChatService 抽象私聊端对端加密（Secret Chat）握手状态机（app/secretchat）。

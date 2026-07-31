@@ -651,7 +651,7 @@ func TestSignUpWritesOfficialLoginMessage(t *testing.T) {
 	// phone channel's login-code message, created after it — so it becomes
 	// the dialog's new top message (ListByUser surfaces the top message per
 	// dialog, not full history).
-	if len(list.Messages) != 1 || !strings.Contains(list.Messages[0].Body, "Welcome to OwpenGram") {
+	if len(list.Messages) != 1 || !strings.Contains(list.Messages[0].Body, "Welcome to FromGram") {
 		t.Fatalf("messages = %+v, want welcome message as new dialog top message", list.Messages)
 	}
 	if list.Dialogs[0].TopMessage != list.Messages[0].ID || list.Dialogs[0].UnreadCount != 2 {

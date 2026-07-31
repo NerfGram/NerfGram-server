@@ -91,3 +91,8 @@ func (s *Service) ListTransactions(ctx context.Context, userID int64, offset str
 	}
 	return s.store.ListTransactions(ctx, userID, offset, limit)
 }
+
+// TotalSpent returns cumulative Stars debited by the user.
+func (s *Service) TotalSpent(ctx context.Context, userID int64) (int64, error) {
+	return s.store.TotalSpent(ctx, userID)
+}

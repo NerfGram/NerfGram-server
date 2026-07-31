@@ -20,7 +20,7 @@ func TestEmailSignupSendCodeRoutesFreshSignupToEmail(t *testing.T) {
 		WithLoginEmail(LoginEmailOptions{Sender: sender}),
 		WithEmailSignup(true))
 
-	phone, ok := domain.EncodeEmailPhone("newuser@owpengram.local")
+	phone, ok := domain.EncodeEmailPhone("newuser@fromgram.local")
 	if !ok {
 		t.Fatalf("EncodeEmailPhone: ok=false")
 	}
@@ -29,8 +29,8 @@ func TestEmailSignupSendCodeRoutesFreshSignupToEmail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendCode: %v", err)
 	}
-	if sender.to != "newuser@owpengram.local" {
-		t.Fatalf("sender.to = %q, want newuser@owpengram.local", sender.to)
+	if sender.to != "newuser@fromgram.local" {
+		t.Fatalf("sender.to = %q, want newuser@fromgram.local", sender.to)
 	}
 	delivery, found, err := svc.CodeDelivery(ctx, hash)
 	if err != nil || !found {
@@ -62,8 +62,8 @@ func TestEmailSignupSendCodeRoutesFreshSignupToEmail(t *testing.T) {
 	if created.Phone == phone || !domain.ValidPhone(created.Phone) || domain.IsEmailSignupPhone(created.Phone) {
 		t.Fatalf("created.Phone = %q, want a short all-digit 888 display number distinct from the wire value %q", created.Phone, phone)
 	}
-	if created.SignupEmail != "newuser@owpengram.local" {
-		t.Fatalf("created.SignupEmail = %q, want newuser@owpengram.local", created.SignupEmail)
+	if created.SignupEmail != "newuser@fromgram.local" {
+		t.Fatalf("created.SignupEmail = %q, want newuser@fromgram.local", created.SignupEmail)
 	}
 }
 
@@ -81,7 +81,7 @@ func TestEmailSignupSignUpSucceedsWithLoginEmailRequireSetupAlsoOn(t *testing.T)
 		WithLoginEmail(LoginEmailOptions{Sender: sender, RequireSetup: true, Enabled: true}),
 		WithEmailSignup(true))
 
-	phone, ok := domain.EncodeEmailPhone("requiresetup@owpengram.local")
+	phone, ok := domain.EncodeEmailPhone("requiresetup@fromgram.local")
 	if !ok {
 		t.Fatalf("EncodeEmailPhone: ok=false")
 	}
@@ -100,8 +100,8 @@ func TestEmailSignupSignUpSucceedsWithLoginEmailRequireSetupAlsoOn(t *testing.T)
 	if created.Phone == phone || !domain.ValidPhone(created.Phone) || domain.IsEmailSignupPhone(created.Phone) {
 		t.Fatalf("created.Phone = %q, want a short all-digit 888 display number distinct from the wire value %q", created.Phone, phone)
 	}
-	if created.SignupEmail != "requiresetup@owpengram.local" {
-		t.Fatalf("created.SignupEmail = %q, want requiresetup@owpengram.local", created.SignupEmail)
+	if created.SignupEmail != "requiresetup@fromgram.local" {
+		t.Fatalf("created.SignupEmail = %q, want requiresetup@fromgram.local", created.SignupEmail)
 	}
 }
 
@@ -187,7 +187,7 @@ func TestEmailSignupSignUpPopulatesLoginEmail(t *testing.T) {
 		WithLoginEmail(LoginEmailOptions{Store: accountSvc, Sender: sender}),
 		WithEmailSignup(true))
 
-	phone, ok := domain.EncodeEmailPhone("loginemail@owpengram.local")
+	phone, ok := domain.EncodeEmailPhone("loginemail@fromgram.local")
 	if !ok {
 		t.Fatalf("EncodeEmailPhone: ok=false")
 	}
@@ -203,10 +203,10 @@ func TestEmailSignupSignUpPopulatesLoginEmail(t *testing.T) {
 		t.Fatalf("SignUp: %v", err)
 	}
 
-	if email, found, err := accountSvc.LoginEmail(ctx, u.ID); err != nil || !found || email != "loginemail@owpengram.local" {
-		t.Fatalf("LoginEmail(%d) = %q found=%v err=%v, want loginemail@owpengram.local", u.ID, email, found, err)
+	if email, found, err := accountSvc.LoginEmail(ctx, u.ID); err != nil || !found || email != "loginemail@fromgram.local" {
+		t.Fatalf("LoginEmail(%d) = %q found=%v err=%v, want loginemail@fromgram.local", u.ID, email, found, err)
 	}
-	if email, found, err := accountSvc.LoginEmailByPhone(ctx, u.Phone); err != nil || !found || email != "loginemail@owpengram.local" {
+	if email, found, err := accountSvc.LoginEmailByPhone(ctx, u.Phone); err != nil || !found || email != "loginemail@fromgram.local" {
 		t.Fatalf("LoginEmailByPhone(%q) = %q found=%v err=%v", u.Phone, email, found, err)
 	}
 }

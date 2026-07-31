@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"strings"
 	"time"
 
 	"github.com/iamxvbaba/td/tg"
@@ -229,22 +230,35 @@ func tgUserStatus(status domain.UserStatus) tg.UserStatusClass {
 // Active at a time -- whichever the owner last selected via
 // account.toggleUsername (defaulting to the editable one).
 func tgUsernames(username string, collectibles []domain.CollectibleUsername) []tg.Username {
-	var out []tg.Username
-	hasActiveCollectible := false
+	activeCollectible := ""
 	for _, cu := range collectibles {
-		if cu.Active {
-			hasActiveCollectible = true
+		if cu.Active && cu.Username != "" {
+			activeCollectible = cu.Username
 			break
 		}
 	}
+	editableActive := username != "" && activeCollectible == ""
+
+	seen := make(map[string]struct{}, 1+len(collectibles))
+	var out []tg.Username
 	if username != "" {
-		out = append(out, tg.Username{Editable: true, Active: !hasActiveCollectible, Username: username})
+		out = append(out, tg.Username{Editable: true, Active: editableActive, Username: username})
+		seen[strings.ToLower(username)] = struct{}{}
 	}
 	for _, cu := range collectibles {
 		if cu.Username == "" {
 			continue
 		}
-		out = append(out, tg.Username{Editable: false, Active: cu.Active, Username: cu.Username})
+		lower := strings.ToLower(cu.Username)
+		if _, dup := seen[lower]; dup {
+			continue
+		}
+		seen[lower] = struct{}{}
+		out = append(out, tg.Username{
+			Editable: false,
+			Active:   cu.Active,
+			Username: cu.Username,
+		})
 	}
 	return out
 }

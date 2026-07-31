@@ -107,8 +107,20 @@ func (r *Router) onMessagesGetStickerSet(ctx context.Context, req *tg.MessagesGe
 			}
 			return tgMessagesStickerSet(fallbackSet, fallbackDocs), nil
 		}
+		if fallbackSet, fallbackDocs, fallbackFound, fallbackErr := r.resolveGenericAnimationsStickerSet(ctx, ref); fallbackErr != nil {
+			return nil, internalErr()
+		} else if fallbackFound {
+			return tgMessagesStickerSet(fallbackSet, fallbackDocs), nil
+		}
 		// 未 seed 的系统集 / 未知短名：回退兼容 stub，避免破坏客户端。
 		return tdesktop.StickerSet(req), nil
+	}
+	if len(docs) == 0 {
+		if fallbackSet, fallbackDocs, fallbackFound, fallbackErr := r.resolveGenericAnimationsStickerSet(ctx, ref); fallbackErr != nil {
+			return nil, internalErr()
+		} else if fallbackFound {
+			return tgMessagesStickerSet(fallbackSet, fallbackDocs), nil
+		}
 	}
 	set, err = r.stickerSetWithViewerInstallState(ctx, set)
 	if err != nil {
@@ -189,28 +201,46 @@ func (r *Router) onMessagesGetEmojiStickers(ctx context.Context, hash int64) (tg
 }
 
 func (r *Router) onMessagesGetEmojiStickerGroups(ctx context.Context, hash int) (tg.MessagesEmojiGroupsClass, error) {
+	return r.emojiGroupsForInstalledPacks(ctx, hash, false)
+}
+
+func (r *Router) onMessagesGetEmojiStatusGroups(ctx context.Context, hash int) (tg.MessagesEmojiGroupsClass, error) {
+	return r.emojiGroupsForInstalledPacks(ctx, hash, true)
+}
+
+func (r *Router) emojiGroupsForInstalledPacks(ctx context.Context, hash int, statusGroups bool) (tg.MessagesEmojiGroupsClass, error) {
 	empty := func() tg.MessagesEmojiGroupsClass {
 		return &tg.MessagesEmojiGroups{Hash: 0, Groups: []tg.EmojiGroupClass{}}
 	}
 	if r.deps.Files == nil {
 		return empty(), nil
 	}
-	sets := r.stickerCatalogSets(ctx, domain.StickerSetKindEmoji)
-	visible := make([]domain.StickerSet, 0, len(sets))
-	for _, set := range sets {
+	var visible []domain.StickerSet
+	if sets, handled, err := r.installedStickerSetsForViewer(ctx, domain.StickerSetKindEmoji); err != nil {
+		return nil, err
+	} else if handled && len(sets) > 0 {
+		visible = sets
+	} else {
+		visible = installedGlobalStickerSets(r.stickerCatalogSets(ctx, domain.StickerSetKindEmoji))
+	}
+	filtered := make([]domain.StickerSet, 0, len(visible))
+	for _, set := range visible {
 		if set.ID == 0 || set.Archived {
 			continue
 		}
-		visible = append(visible, set)
+		if statusGroups && !set.Emojis {
+			continue
+		}
+		filtered = append(filtered, set)
 	}
-	if len(visible) == 0 {
+	if len(filtered) == 0 {
 		return empty(), nil
 	}
-	catalogHash := emojiStickerGroupsHash(visible)
+	catalogHash := emojiStickerGroupsHash(filtered)
 	if hash != 0 && hash == catalogHash {
 		return &tg.MessagesEmojiGroupsNotModified{}, nil
 	}
-	iconEmojiID := emojiStickerGroupIconID(visible)
+	iconEmojiID := emojiStickerGroupIconID(filtered)
 	if iconEmojiID == 0 {
 		return empty(), nil
 	}
@@ -223,6 +253,55 @@ func (r *Router) onMessagesGetEmojiStickerGroups(ctx context.Context, hash int) 
 			},
 		},
 	}, nil
+}
+
+func isGenericAnimationsStickerSetRef(ref domain.StickerSetRef) bool {
+	switch ref.Kind {
+	case domain.StickerSetRefBySystem:
+		return ref.SystemKey == "emoji_generic_animations"
+	case domain.StickerSetRefByShortName:
+		return ref.ShortName == "EmojiGenericAnimations"
+	default:
+		return false
+	}
+}
+
+func (r *Router) resolveGenericAnimationsStickerSet(ctx context.Context, ref domain.StickerSetRef) (domain.StickerSet, []domain.Document, bool, error) {
+	if !isGenericAnimationsStickerSetRef(ref) {
+		return domain.StickerSet{}, nil, false, nil
+	}
+	for _, candidate := range placeholderStickerSetCandidates() {
+		set, docs, found, err := r.deps.Files.ResolveStickerSet(ctx, candidate)
+		if err != nil {
+			return domain.StickerSet{}, nil, false, err
+		}
+		if found && len(docs) > 0 {
+			return set, docs, true, nil
+		}
+	}
+	for _, kind := range []domain.StickerSetKind{domain.StickerSetKindSystem, domain.StickerSetKindEmoji} {
+		sets, err := r.deps.Files.ListStickerSets(ctx, kind)
+		if err != nil {
+			return domain.StickerSet{}, nil, false, err
+		}
+		for _, candidate := range sets {
+			if len(candidate.DocumentIDs) == 0 {
+				continue
+			}
+			set, docs, found, err := r.deps.Files.ResolveStickerSet(ctx, domain.StickerSetRef{
+				Kind:       domain.StickerSetRefByID,
+				ID:         candidate.ID,
+				AccessHash: candidate.AccessHash,
+			})
+			if err != nil {
+				return domain.StickerSet{}, nil, false, err
+			}
+			if found && len(docs) > 0 {
+				return set, docs, true, nil
+			}
+		}
+	}
+	return domain.StickerSet{}, nil, false, nil
 }
 
 func (r *Router) onMessagesGetMaskStickers(ctx context.Context, hash int64) (tg.MessagesAllStickersClass, error) {

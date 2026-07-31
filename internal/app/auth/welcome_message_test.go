@@ -19,7 +19,7 @@ func TestEmailSignupSignUpWritesWelcomeMessageMentioningEmail(t *testing.T) {
 		WithLoginEmail(LoginEmailOptions{Sender: sender}),
 		WithEmailSignup(true))
 
-	phone, ok := domain.EncodeEmailPhone("welcome@owpengram.local")
+	phone, ok := domain.EncodeEmailPhone("welcome@fromgram.local")
 	if !ok {
 		t.Fatalf("EncodeEmailPhone: ok=false")
 	}
@@ -42,7 +42,7 @@ func TestEmailSignupSignUpWritesWelcomeMessageMentioningEmail(t *testing.T) {
 	if len(list.Messages) != 1 {
 		t.Fatalf("messages = %+v, want exactly the welcome message (email channel skips the code-echo message)", list.Messages)
 	}
-	if !strings.Contains(list.Messages[0].Body, "Welcome to OwpenGram") || !strings.Contains(list.Messages[0].Body, "via email") {
+	if !strings.Contains(list.Messages[0].Body, "Welcome to FromGram") || !strings.Contains(list.Messages[0].Body, "via email") {
 		t.Fatalf("welcome message body = %q, want greeting mentioning email", list.Messages[0].Body)
 	}
 }
@@ -88,7 +88,7 @@ func TestSignInWritesWelcomeMessageOnEveryLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListByUser: %v", err)
 	}
-	if len(list.Messages) != 1 || !strings.Contains(list.Messages[0].Body, "Welcome to OwpenGram") {
+	if len(list.Messages) != 1 || !strings.Contains(list.Messages[0].Body, "Welcome to FromGram") {
 		t.Fatalf("messages = %+v, want the second sign-in's fresh welcome message as new top message", list.Messages)
 	}
 	// SignUp's welcome + login-code message, plus SendCode's re-delivered code
@@ -147,7 +147,7 @@ func TestTwoFactorSignInDefersWelcomeMessageUntilPasswordCompletes(t *testing.T)
 	if err != nil {
 		t.Fatalf("ListByUser pending: %v", err)
 	}
-	if strings.Contains(pending.Messages[0].Body, "Welcome to OwpenGram") {
+	if strings.Contains(pending.Messages[0].Body, "Welcome to FromGram") {
 		t.Fatalf("welcome message fired before password check completed: %+v", pending.Messages[0])
 	}
 
@@ -159,7 +159,7 @@ func TestTwoFactorSignInDefersWelcomeMessageUntilPasswordCompletes(t *testing.T)
 	if err != nil {
 		t.Fatalf("ListByUser done: %v", err)
 	}
-	if len(done.Messages) != 1 || !strings.Contains(done.Messages[0].Body, "Welcome to OwpenGram") {
+	if len(done.Messages) != 1 || !strings.Contains(done.Messages[0].Body, "Welcome to FromGram") {
 		t.Fatalf("messages after CompletePasswordSignIn = %+v, want fresh welcome message", done.Messages)
 	}
 	if done.Dialogs[0].UnreadCount <= unreadAfterSignUp {

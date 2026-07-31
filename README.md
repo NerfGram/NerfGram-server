@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="media/readme/owpengram_splash.png" alt="OwpenGram" width="440">
+  <img src="media/readme/fromgram_splash.svg" alt="FromGram" width="440">
 </p>
 
 # 🚀 OwpenGram Server

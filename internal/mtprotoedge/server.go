@@ -303,9 +303,9 @@ type Options struct {
 	DC int
 	// StrictDC turns on exact DC-ID validation for the permanent-key exchange
 	// (default off = lenient). telesrv is always a single physical backend —
-	// there is no real multi-DC federation behind it — but the OwpenGram
+	// there is no real multi-DC federation behind it — but the FromGram
 	// client forks intentionally run in "single-server backend" mode, where
-	// dc_id 1..5 all alias to this one server (see owpengram_servers.cpp /
+	// dc_id 1..5 all alias to this one server (see fromgram_servers.cpp /
 	// ApplyServerToDcOptions in the desktop client) so that any old data
 	// referencing a specific dc_id still resolves correctly. When tdesktop
 	// adds a new local account it picks its own starting dc_id (its usual

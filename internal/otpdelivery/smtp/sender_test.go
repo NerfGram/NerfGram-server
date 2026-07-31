@@ -35,11 +35,11 @@ func TestHumanTTLRoundsNetworkSkew(t *testing.T) {
 // internal "telesrv" fallback — the subject/body previously always said
 // "Your telesrv login code" regardless of Config.AppName.
 func TestEmailContentUsesConfiguredAppName(t *testing.T) {
-	subject, body := emailContent("OwpenGram", "12345", 5*time.Minute)
-	if subject != "Your OwpenGram login code" {
-		t.Fatalf("subject = %q, want %q", subject, "Your OwpenGram login code")
+	subject, body := emailContent("FromGram", "12345", 5*time.Minute)
+	if subject != "Your FromGram login code" {
+		t.Fatalf("subject = %q, want %q", subject, "Your FromGram login code")
 	}
-	if !strings.Contains(body, "Your OwpenGram login code is 12345.") {
+	if !strings.Contains(body, "Your FromGram login code is 12345.") {
 		t.Fatalf("body missing branded code line: %q", body)
 	}
 	if strings.Contains(subject, "telesrv") || strings.Contains(body, "telesrv") {

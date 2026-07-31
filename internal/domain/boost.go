@@ -7,6 +7,9 @@ import (
 )
 
 const (
+	// DefaultChannelBoostCount is the baseline boost count every channel starts
+	// with. These boosts never expire (not stored in channel_boost_slots).
+	DefaultChannelBoostCount = 100
 	// DefaultPremiumBoostSlotID is the single base boost slot every active premium
 	// user owns in the current small-scale implementation.
 	DefaultPremiumBoostSlotID = 1
@@ -193,6 +196,7 @@ func linearPremiumBoostThresholds(maxLevel int) []int {
 
 // PremiumBoostStatusForCount returns the bounded default level projection.
 func PremiumBoostStatusForCount(peer Peer, boosts int, my []PremiumBoostSlot) PremiumBoostStatus {
+	boosts += DefaultChannelBoostCount
 	return PremiumBoostStatusForPolicy(peer, boosts, my, defaultPremiumBoostLevelPolicy)
 }
 
