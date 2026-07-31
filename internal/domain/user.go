@@ -103,6 +103,17 @@ type User struct {
 	LastName    string
 	About       string
 	Username    string
+	// CollectibleUsername is an additional, admin-issued Fragment-style
+	// username for this account (never the same as Username -- it's a
+	// second, non-editable entry, matching real Telegram's usernames[]
+	// list). Empty when no collectible username has been issued.
+	// CollectibleUsernameActive says which of the two is currently the
+	// active/shown one; the owner controls this via account.toggleUsername.
+	CollectibleUsername       string
+	CollectibleUsernameActive bool
+	// Fake marks the account with the client-visible "Fake" warning badge
+	// (e.g. for scam accounts), set by an admin.
+	Fake        bool
 	CountryCode string
 	Verified    bool
 	Support     bool

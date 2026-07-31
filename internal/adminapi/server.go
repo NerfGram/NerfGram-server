@@ -29,8 +29,9 @@ type Service interface {
 	GrantPremium(ctx context.Context, req admin.GrantPremiumRequest) (admin.CommandResult, error)
 	GrantStars(ctx context.Context, req admin.GrantStarsRequest) (admin.CommandResult, error)
 	GrantStarGift(ctx context.Context, req admin.GrantStarGiftRequest) (admin.CommandResult, error)
-	SetCollectibleUsername(ctx context.Context, req admin.SetCollectibleUsernameRequest) (admin.CommandResult, error)
+	IssueCollectibleUsername(ctx context.Context, req admin.IssueCollectibleUsernameRequest) (admin.CommandResult, error)
 	RemoveCollectibleUsername(ctx context.Context, req admin.RemoveCollectibleUsernameRequest) (admin.CommandResult, error)
+	SetFake(ctx context.Context, req admin.SetFakeRequest) (admin.CommandResult, error)
 	SetVerified(ctx context.Context, req admin.SetVerifiedRequest) (admin.CommandResult, error)
 	SetChannelVerified(ctx context.Context, req admin.SetChannelVerifiedRequest) (admin.CommandResult, error)
 	RevokeSessions(ctx context.Context, req admin.RevokeSessionsRequest) (admin.CommandResult, error)
@@ -98,8 +99,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/accounts/grant-premium", s.authenticated(s.handleGrantPremium))
 	mux.HandleFunc("POST /v1/accounts/grant-stars", s.authenticated(s.handleGrantStars))
 	mux.HandleFunc("POST /v1/accounts/grant-star-gift", s.authenticated(s.handleGrantStarGift))
-	mux.HandleFunc("POST /v1/usernames/set-collectible", s.authenticated(s.handleSetCollectibleUsername))
+	mux.HandleFunc("POST /v1/usernames/issue-collectible", s.authenticated(s.handleIssueCollectibleUsername))
 	mux.HandleFunc("POST /v1/usernames/remove-collectible", s.authenticated(s.handleRemoveCollectibleUsername))
+	mux.HandleFunc("POST /v1/accounts/set-fake", s.authenticated(s.handleSetFake))
 	mux.HandleFunc("POST /v1/accounts/set-verified", s.authenticated(s.handleSetVerified))
 	mux.HandleFunc("POST /v1/accounts/revoke-sessions", s.authenticated(s.handleRevokeSessions))
 	mux.HandleFunc("POST /v1/channels/set-verified", s.authenticated(s.handleSetChannelVerified))
@@ -169,16 +171,17 @@ func (s *Server) handleGrantStarGift(w http.ResponseWriter, r *http.Request) {
 	writeCommandResult(w, result, err)
 }
 
-// handleSetCollectibleUsername marks a username as a Fragment-style
-// collectible/NFT username with a display price. currency/amount and
-// crypto_currency/crypto_amount are purely informational (e.g. currency
-// "YUT", amount 1000) -- nothing is charged.
-func (s *Server) handleSetCollectibleUsername(w http.ResponseWriter, r *http.Request) {
-	var req admin.SetCollectibleUsernameRequest
+// handleIssueCollectibleUsername issues a brand-new, additional
+// Fragment-style collectible/NFT username to a recipient -- their existing
+// username is untouched. currency/amount and crypto_currency/crypto_amount
+// are purely informational (e.g. currency "YUT", amount 1000) -- nothing is
+// charged.
+func (s *Server) handleIssueCollectibleUsername(w http.ResponseWriter, r *http.Request) {
+	var req admin.IssueCollectibleUsernameRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	result, err := s.svc.SetCollectibleUsername(r.Context(), req)
+	result, err := s.svc.IssueCollectibleUsername(r.Context(), req)
 	writeCommandResult(w, result, err)
 }
 
@@ -188,6 +191,15 @@ func (s *Server) handleRemoveCollectibleUsername(w http.ResponseWriter, r *http.
 		return
 	}
 	result, err := s.svc.RemoveCollectibleUsername(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleSetFake(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetFakeRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetFake(r.Context(), req)
 	writeCommandResult(w, result, err)
 }
 

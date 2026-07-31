@@ -14,8 +14,17 @@ var ErrCollectibleUsernameNotFound = errors.New("collectible username not found"
 // are informational display fields set by an admin -- not a real payment
 // rail, and Currency is free text (not restricted to ISO 4217), so a
 // self-hosted server can use its own label (e.g. "YUT").
+//
+// A collectible username is issued as a brand-new, additional username for
+// its owner (OwnerUserID) -- it never replaces or relabels an existing
+// username. Active tracks whether it's the one currently shown/used for
+// that account; the owner can switch via account.toggleUsername, same as
+// real Telegram lets you switch between your editable username and any
+// fragment-purchased one.
 type CollectibleUsername struct {
 	Username       string
+	OwnerUserID    int64
+	Active         bool
 	PurchaseDate   int64
 	Currency       string
 	Amount         int64

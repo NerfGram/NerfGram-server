@@ -17,15 +17,16 @@ func tgSelfUser(u domain.User) *tg.User {
 		AccessHash:    u.AccessHash,
 		FirstName:     u.FirstName,
 		LastName:      u.LastName,
-		Username:      u.Username,
+		Username:      tgActiveUsername(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
 		Phone:         u.Phone,
 		Self:          true,
 		Verified:      u.Verified,
+		Fake:          u.Fake,
 		Support:       u.Support,
 		Contact:       u.Contact,
 		MutualContact: u.Mutual,
 		CloseFriend:   u.CloseFriend,
-		Usernames:     tgUsernames(u.Username),
+		Usernames:     tgUsernames(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
 	}
 	applyTgUserBotFields(out, u)
 	applyTgUserPremiumFields(out, u)
@@ -48,14 +49,15 @@ func tgUser(u domain.User) *tg.User {
 		AccessHash:    u.AccessHash,
 		FirstName:     u.FirstName,
 		LastName:      u.LastName,
-		Username:      u.Username,
+		Username:      tgActiveUsername(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
 		Phone:         u.Phone,
 		Verified:      u.Verified,
+		Fake:          u.Fake,
 		Support:       u.Support,
 		Contact:       u.Contact,
 		MutualContact: u.Mutual,
 		CloseFriend:   u.CloseFriend,
-		Usernames:     tgUsernames(u.Username),
+		Usernames:     tgUsernames(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
 	}
 	applyTgUserBotFields(out, u)
 	applyTgUserPremiumFields(out, u)
@@ -212,11 +214,30 @@ func tgUserStatus(status domain.UserStatus) tg.UserStatusClass {
 	return &tg.UserStatusRecently{}
 }
 
-func tgUsernames(username string) []tg.Username {
-	if username == "" {
-		return nil
+// tgUsernames builds the usernames[] vector: the account's own editable
+// username plus, if one has been issued, its admin-issued collectible
+// username. Exactly one of the two is Active at a time -- whichever the
+// owner last selected via account.toggleUsername (defaulting to the
+// editable one if no collectible username exists or none is active yet).
+func tgUsernames(username, collectibleUsername string, collectibleActive bool) []tg.Username {
+	var out []tg.Username
+	if username != "" {
+		out = append(out, tg.Username{Editable: true, Active: !collectibleActive || collectibleUsername == "", Username: username})
 	}
-	return []tg.Username{{Editable: true, Active: true, Username: username}}
+	if collectibleUsername != "" {
+		out = append(out, tg.Username{Editable: false, Active: collectibleActive, Username: collectibleUsername})
+	}
+	return out
+}
+
+// tgActiveUsername returns whichever username should populate the top-level
+// (legacy, pre-multi-username) Username field: the collectible one if it's
+// the active one, otherwise the account's editable username.
+func tgActiveUsername(username, collectibleUsername string, collectibleActive bool) string {
+	if collectibleActive && collectibleUsername != "" {
+		return collectibleUsername
+	}
+	return username
 }
 
 func tgContacts(list domain.ContactList) tg.ContactsContactsClass {

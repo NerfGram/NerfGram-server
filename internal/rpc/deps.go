@@ -242,9 +242,11 @@ type UsersService interface {
 }
 
 // CollectibleUsernameService serves admin-assigned Fragment-style collectible
-// username metadata (backs fragment.getCollectibleInfo).
+// username metadata (backs fragment.getCollectibleInfo) and lets the owner
+// switch which of their usernames is active (backs account.toggleUsername).
 type CollectibleUsernameService interface {
 	Get(ctx context.Context, username string) (domain.CollectibleUsername, bool, error)
+	SetActive(ctx context.Context, username string, ownerUserID int64, active bool) error
 }
 
 // BatchViewerUsersResolver 是 UsersService 的可选能力：跨多个 viewer 一次性投影同一组 user

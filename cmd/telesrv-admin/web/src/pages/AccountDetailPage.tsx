@@ -20,6 +20,8 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
   const [giftPriceLabel, setGiftPriceLabel] = useState("");
   const [collectibleCurrency, setCollectibleCurrency] = useState("");
   const [collectibleAmount, setCollectibleAmount] = useState("");
+  const [newCollectibleUsername, setNewCollectibleUsername] = useState("");
+  const [issueActive, setIssueActive] = useState(false);
   const [freezeUntil, setFreezeUntil] = useState(() => toDateTimeLocal(new Date(Date.now() + 7 * 86400_000)));
   const [freezeAppealURL, setFreezeAppealURL] = useState("");
 
@@ -218,6 +220,16 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
                 onDone={load}
               />
               <label className="duration-field">
+                <span>{t("account.newCollectibleUsername")}</span>
+                <input
+                  aria-label={t("account.newCollectibleUsernameAria")}
+                  value={newCollectibleUsername}
+                  onChange={(event) => setNewCollectibleUsername(event.target.value)}
+                  type="text"
+                  placeholder="cooldrop"
+                />
+              </label>
+              <label className="duration-field">
                 <span>{t("account.collectibleCurrency")}</span>
                 <input
                   aria-label={t("account.collectibleCurrencyAria")}
@@ -238,15 +250,26 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
                   placeholder="1000"
                 />
               </label>
+              <label className="duration-field">
+                <span>{t("account.collectibleActive")}</span>
+                <input
+                  aria-label={t("account.collectibleActiveAria")}
+                  checked={issueActive}
+                  onChange={(event) => setIssueActive(event.target.checked)}
+                  type="checkbox"
+                />
+              </label>
               <ActionButton
-                label={t("account.setCollectibleUsername")}
+                label={t("account.issueCollectibleUsername")}
                 icon={<Star size={15} />}
                 tone="warn"
-                path="/api/actions/set-collectible-username"
+                path="/api/actions/issue-collectible-username"
                 payload={() => ({
-                  username: account.Username,
+                  user_id: account.ID,
+                  new_username: newCollectibleUsername,
                   currency: collectibleCurrency,
                   amount: toInt(collectibleAmount),
+                  active: issueActive,
                 })}
                 onDone={load}
               />
@@ -255,7 +278,25 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
                 icon={<Star size={15} />}
                 tone="danger"
                 path="/api/actions/remove-collectible-username"
-                payload={() => ({ username: account.Username })}
+                payload={() => ({ username: newCollectibleUsername })}
+                onDone={load}
+              />
+              <label className="duration-field">
+                <span>{t("account.fake")}</span>
+                <input
+                  aria-label={t("account.fakeAria")}
+                  checked={!!detail.Fake}
+                  onChange={() => {}}
+                  type="checkbox"
+                  disabled
+                />
+              </label>
+              <ActionButton
+                label={detail.Fake ? t("account.clearFake") : t("account.setFake")}
+                icon={<Star size={15} />}
+                tone={detail.Fake ? "danger" : "warn"}
+                path="/api/actions/set-fake"
+                payload={() => ({ user_id: account.ID, fake: !detail.Fake })}
                 onDone={load}
               />
               <ActionButton

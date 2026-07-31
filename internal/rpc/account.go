@@ -58,6 +58,9 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 		return r.onAccountUpdateUsername(ctx, layerRequest.
 			Username)
 	})
+	registerRPC[*tg.AccountToggleUsernameRequest](d, tlprofile.SemanticMethodAccountToggleUsername, func(ctx context.Context, layerRequest *tg.AccountToggleUsernameRequest) (any, error) {
+		return r.onAccountToggleUsername(ctx, layerRequest)
+	})
 	registerRPC[*tg.AccountUpdateBirthdayRequest](d, tlprofile.SemanticMethodAccountUpdateBirthday, func(ctx context.Context, layerRequest *tg.AccountUpdateBirthdayRequest) (any, error) {
 		return r.onAccountUpdateBirthday(ctx, layerRequest)
 	})
@@ -1540,6 +1543,34 @@ func (r *Router) onAccountUpdateUsername(ctx context.Context, username string) (
 	return r.tgSelfUser(u), nil
 }
 
+// onAccountToggleUsername lets a user switch which of their usernames is
+// active: their original editable one, or an admin-issued collectible
+// username. Only the caller's own collectible username can be toggled --
+// this never lets a user activate someone else's or a plain username that
+// was never issued as collectible (that's just account.updateUsername).
+func (r *Router) onAccountToggleUsername(ctx context.Context, req *tg.AccountToggleUsernameRequest) (bool, error) {
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return false, internalErr()
+	}
+	if r.deps.CollectibleUsernames == nil {
+		return false, usernameInvalidErr()
+	}
+	if err := r.deps.CollectibleUsernames.SetActive(ctx, req.Username, userID, req.Active); err != nil {
+		if errors.Is(err, domain.ErrCollectibleUsernameNotFound) {
+			return false, usernameInvalidErr()
+		}
+		return false, err
+	}
+	r.invalidateRPCProjectionForUser(userID)
+	if r.deps.Users != nil {
+		if u, err := r.deps.Users.Self(ctx, userID); err == nil {
+			r.pushUsernameUpdate(ctx, u)
+		}
+	}
+	return true, nil
+}
+
 // onAccountUpdateBirthday 持久化资料页生日（account.updateBirthday）。birthday 缺省即清除；
 // 月/日/年非法返回 BIRTHDAY_INVALID。生日落在 userFull（按隐私 PrivacyKeyBirthday 对外裁剪）。
 // 写入后推 updateUser 信号给本人其它在线 session，促使已加载 full profile 的客户端重拉。
@@ -1859,7 +1890,7 @@ func (r *Router) pushUsernameUpdate(ctx context.Context, u domain.User) {
 			UserID:    u.ID,
 			FirstName: u.FirstName,
 			LastName:  u.LastName,
-			Usernames: tgUsernames(u.Username),
+			Usernames: tgUsernames(u.Username, u.CollectibleUsername, u.CollectibleUsernameActive),
 		}},
 		Users: []tg.UserClass{r.tgSelfUser(u)},
 		Date:  int(r.clock.Now().Unix()),

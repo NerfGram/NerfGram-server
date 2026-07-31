@@ -67,8 +67,9 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/grant-premium", s.requireAuthAPI(http.HandlerFunc(s.handleGrantPremiumAPI)))
 	mux.Handle("POST /api/actions/grant-stars", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarsAPI)))
 	mux.Handle("POST /api/actions/grant-star-gift", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarGiftAPI)))
-	mux.Handle("POST /api/actions/set-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleSetCollectibleUsernameAPI)))
+	mux.Handle("POST /api/actions/issue-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleIssueCollectibleUsernameAPI)))
 	mux.Handle("POST /api/actions/remove-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleRemoveCollectibleUsernameAPI)))
+	mux.Handle("POST /api/actions/set-fake", s.requireAuthAPI(http.HandlerFunc(s.handleSetFakeAPI)))
 	mux.Handle("POST /api/actions/set-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetVerifiedAPI)))
 	mux.Handle("POST /api/actions/set-channel-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelVerifiedAPI)))
 	mux.Handle("POST /api/actions/revoke-sessions", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeSessionsAPI)))
@@ -613,33 +614,41 @@ func (s *server) handleGrantStarGiftAPI(w http.ResponseWriter, r *http.Request) 
 	writeCommandResultAPI(w, result, err)
 }
 
-type setCollectibleUsernameAPIRequest struct {
+type issueCollectibleUsernameAPIRequest struct {
 	CommandID      string `json:"command_id"`
 	Reason         string `json:"reason"`
 	Confirm        bool   `json:"confirm"`
+	UserID         int64  `json:"user_id"`
 	Username       string `json:"username"`
+	Phone          string `json:"phone"`
+	NewUsername    string `json:"new_username"`
 	Currency       string `json:"currency"`
 	Amount         int64  `json:"amount"`
 	CryptoCurrency string `json:"crypto_currency"`
 	CryptoAmount   int64  `json:"crypto_amount"`
 	URL            string `json:"url"`
+	Active         bool   `json:"active"`
 }
 
-func (s *server) handleSetCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
-	var body setCollectibleUsernameAPIRequest
+func (s *server) handleIssueCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
+	var body issueCollectibleUsernameAPIRequest
 	if !decodeAction(w, r, &body) {
 		return
 	}
-	req := admin.SetCollectibleUsernameRequest{
-		CommandMeta:    s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-collectible-username"),
+	req := admin.IssueCollectibleUsernameRequest{
+		CommandMeta:    s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "issue-collectible-username"),
+		UserID:         body.UserID,
 		Username:       body.Username,
+		Phone:          body.Phone,
+		NewUsername:    body.NewUsername,
 		Currency:       body.Currency,
 		Amount:         body.Amount,
 		CryptoCurrency: body.CryptoCurrency,
 		CryptoAmount:   body.CryptoAmount,
 		URL:            body.URL,
+		Active:         body.Active,
 	}
-	result, err := s.callAdminAPI(r.Context(), "/v1/usernames/set-collectible", req)
+	result, err := s.callAdminAPI(r.Context(), "/v1/usernames/issue-collectible", req)
 	writeCommandResultAPI(w, result, err)
 }
 
@@ -660,6 +669,28 @@ func (s *server) handleRemoveCollectibleUsernameAPI(w http.ResponseWriter, r *ht
 		Username:    body.Username,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/usernames/remove-collectible", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setFakeAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	UserID    int64  `json:"user_id"`
+	Fake      bool   `json:"fake"`
+}
+
+func (s *server) handleSetFakeAPI(w http.ResponseWriter, r *http.Request) {
+	var body setFakeAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetFakeRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-fake"),
+		UserID:      body.UserID,
+		Fake:        body.Fake,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-fake", req)
 	writeCommandResultAPI(w, result, err)
 }
 

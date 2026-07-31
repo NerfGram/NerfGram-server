@@ -20,12 +20,26 @@ type ProfilePhotoProvider = userprojection.ProfilePhotoProvider
 
 // Service 提供用户查询。
 type Service struct {
-	users     store.UserStore
-	cache     store.UserCache
-	contacts  store.ContactStore
-	photos    ProfilePhotoProvider
-	privacy   userprojection.PrivacyEvaluator
-	projector *userprojection.Projector
+	users                store.UserStore
+	cache                store.UserCache
+	contacts             store.ContactStore
+	photos               ProfilePhotoProvider
+	privacy              userprojection.PrivacyEvaluator
+	projector            *userprojection.Projector
+	collectibleUsernames CollectibleUsernameOwnerLookup
+	userFlags            UserFakeFlagLookup
+}
+
+// CollectibleUsernameOwnerLookup batch-resolves each owner's admin-issued
+// collectible username, so it can be attached to domain.User when loading.
+type CollectibleUsernameOwnerLookup interface {
+	ByOwners(ctx context.Context, ownerUserIDs []int64) (map[int64]domain.CollectibleUsername, error)
+}
+
+// UserFakeFlagLookup batch-resolves the admin-set Fake badge for a set of
+// users.
+type UserFakeFlagLookup interface {
+	ByOwners(ctx context.Context, userIDs []int64) (map[int64]bool, error)
 }
 
 type usernameAvailabilityStore interface {
@@ -43,6 +57,18 @@ func WithPhotoProvider(p ProfilePhotoProvider) Option {
 // WithBaseUserCache injects a viewer-independent user base cache.
 func WithBaseUserCache(c store.UserCache) Option {
 	return func(s *Service) { s.cache = c }
+}
+
+// WithCollectibleUsernames injects the admin-issued collectible username
+// lookup, so loaded users get their CollectibleUsername/-Active fields
+// populated. Nil (the default) means no server has issued any.
+func WithCollectibleUsernames(l CollectibleUsernameOwnerLookup) Option {
+	return func(s *Service) { s.collectibleUsernames = l }
+}
+
+// WithUserFlags injects the admin-set Fake-badge lookup.
+func WithUserFlags(l UserFakeFlagLookup) Option {
+	return func(s *Service) { s.userFlags = l }
 }
 
 // WithContactStore enables viewer-specific contact name/phone projection.
@@ -605,6 +631,31 @@ func (s *Service) loadBaseUsersByIDs(ctx context.Context, userIDs []int64) ([]do
 	for _, id := range ids {
 		if u, ok := loaded[id]; ok {
 			out = append(out, u)
+		}
+	}
+	// Always freshly attached (never cached alongside the base user): a
+	// collectible username can be issued/toggled independently of the base
+	// user record, and out is rebuilt from `loaded` (cache or DB) on every
+	// call regardless, so this can't go stale the way a cached field could.
+	if s.collectibleUsernames != nil && len(out) > 0 {
+		byOwner, err := s.collectibleUsernames.ByOwners(ctx, ids)
+		if err == nil && len(byOwner) > 0 {
+			for i := range out {
+				if cu, ok := byOwner[out[i].ID]; ok {
+					out[i].CollectibleUsername = cu.Username
+					out[i].CollectibleUsernameActive = cu.Active
+				}
+			}
+		}
+	}
+	if s.userFlags != nil && len(out) > 0 {
+		fake, err := s.userFlags.ByOwners(ctx, ids)
+		if err == nil && len(fake) > 0 {
+			for i := range out {
+				if out[i].ID != 0 && fake[out[i].ID] {
+					out[i].Fake = true
+				}
+			}
 		}
 	}
 	return out, nil

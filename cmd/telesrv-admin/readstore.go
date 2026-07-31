@@ -57,6 +57,7 @@ type AccountDetail struct {
 	Bot            bool
 	StarsBalance   int64
 	StarsGranted   bool
+	Fake           bool
 	Restriction    RestrictionRow
 	HasRestriction bool
 	Authorizations []AuthorizationRow
@@ -421,15 +422,18 @@ SELECT u.id, u.phone, u.username, u.first_name, u.last_name, u.created_at, u.upd
 	COALESCE(r.frozen, false), COALESCE(r.reason, ''),
 	COALESCE(EXTRACT(EPOCH FROM u.premium_expires_at), 0)::bigint,
 	COALESCE(sb.balance, 0)::bigint, COALESCE(sb.granted, false),
-	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username
+	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username,
+	COALESCE(uf.fake, false)
 FROM users u
 LEFT JOIN account_restrictions r ON r.user_id = u.id
 LEFT JOIN stars_balances sb ON sb.user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id
+LEFT JOIN user_flags uf ON uf.user_id = u.id
 WHERE u.id = $1`, userID).Scan(
 		&out.Account.ID, &out.Account.Phone, &out.Account.Username, &out.Account.FirstName, &out.Account.LastName,
 		&out.Account.CreatedAt, &out.Account.UpdatedAt, &out.About, &out.LastSeenAt, &out.Verified, &out.Support, &out.Bot,
 		&out.Account.Frozen, &out.Account.Reason, &out.Account.PremiumUntil, &out.StarsBalance, &out.StarsGranted, &out.Account.Username,
+		&out.Fake,
 	)
 	if err != nil {
 		return out, fmt.Errorf("get account: %w", err)

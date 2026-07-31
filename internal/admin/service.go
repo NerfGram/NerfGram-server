@@ -26,6 +26,7 @@ const (
 	ActionSetCollectibleUsername    = "username.set_collectible"
 	ActionRemoveCollectibleUsername = "username.remove_collectible"
 	ActionSetVerified               = "account.set_verified"
+	ActionSetFake                   = "account.set_fake"
 	ActionSetChannelVerified        = "channel.set_verified"
 	ActionRevokeSessions            = "account.revoke_sessions"
 	ActionDeletePrivateMessages     = "messages.delete_private_messages"
@@ -120,8 +121,14 @@ type GiftsService interface {
 // CollectibleUsernamesStore lets admins mark a username as a Fragment-style
 // collectible/NFT username with a display price+currency.
 type CollectibleUsernamesStore interface {
-	Set(ctx context.Context, cu domain.CollectibleUsername, createdBy string) (domain.CollectibleUsername, error)
+	Issue(ctx context.Context, cu domain.CollectibleUsername, createdBy string) (domain.CollectibleUsername, error)
 	Delete(ctx context.Context, username string) error
+}
+
+// UserFlagsStore lets admins set the client-visible "Fake" warning badge on
+// an account.
+type UserFlagsStore interface {
+	SetFake(ctx context.Context, userID int64, fake bool) error
 }
 
 type OfficialGiftsSource interface {
@@ -143,6 +150,7 @@ type Dependencies struct {
 	Messages             MessagesService
 	Gifts                GiftsService
 	CollectibleUsernames CollectibleUsernamesStore
+	UserFlags            UserFlagsStore
 	OfficialGifts        OfficialGiftsSource
 	Now                  func() time.Time
 }
@@ -161,6 +169,7 @@ type Service struct {
 	messages             MessagesService
 	gifts                GiftsService
 	collectibleUsernames CollectibleUsernamesStore
+	userFlags            UserFlagsStore
 	officialGifts        OfficialGiftsSource
 	now                  func() time.Time
 }
@@ -209,6 +218,9 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	}
 	if deps.CollectibleUsernames != nil {
 		s.collectibleUsernames = deps.CollectibleUsernames
+	}
+	if deps.UserFlags != nil {
+		s.userFlags = deps.UserFlags
 	}
 	if deps.OfficialGifts != nil {
 		s.officialGifts = deps.OfficialGifts
@@ -747,49 +759,62 @@ func (s *Service) GrantStarGift(ctx context.Context, req GrantStarGiftRequest) (
 	})
 }
 
-// SetCollectibleUsernameRequest marks a username as a Fragment-style
-// collectible/NFT username with a display price. Currency/Amount and
-// CryptoCurrency/CryptoAmount are purely informational display fields (e.g.
-// Currency="YUT", Amount=1000) -- nothing is actually charged; this only
-// changes what fragment.getCollectibleInfo reports to clients.
-type SetCollectibleUsernameRequest struct {
+// IssueCollectibleUsernameRequest issues a brand-new, additional
+// Fragment-style collectible/NFT username to a recipient identified by
+// UserID, Username, or Phone (checked in that priority order) -- the
+// recipient's existing username is untouched; NewUsername becomes a second
+// username they can switch to. Currency/Amount and CryptoCurrency/
+// CryptoAmount are purely informational display fields (e.g. Currency="YUT",
+// Amount=1000) -- nothing is actually charged; this only changes what
+// fragment.getCollectibleInfo reports to clients.
+type IssueCollectibleUsernameRequest struct {
 	CommandMeta
-	Username       string `json:"username"`
+	UserID         int64  `json:"user_id,omitempty"`
+	Username       string `json:"username,omitempty"`
+	Phone          string `json:"phone,omitempty"`
+	NewUsername    string `json:"new_username"`
 	Currency       string `json:"currency,omitempty"`
 	Amount         int64  `json:"amount,omitempty"`
 	CryptoCurrency string `json:"crypto_currency,omitempty"`
 	CryptoAmount   int64  `json:"crypto_amount,omitempty"`
 	URL            string `json:"url,omitempty"`
 	PurchaseDate   int64  `json:"purchase_date,omitempty"`
+	// Active sets the new username as the recipient's active one
+	// immediately, instead of leaving it as an inactive extra they must
+	// switch to themselves via account.toggleUsername.
+	Active bool `json:"active,omitempty"`
 }
 
-func (s *Service) SetCollectibleUsername(ctx context.Context, req SetCollectibleUsernameRequest) (CommandResult, error) {
-	username := strings.TrimSpace(strings.TrimPrefix(req.Username, "@"))
-	if username == "" {
-		return CommandResult{}, fmt.Errorf("username is required")
+func (s *Service) IssueCollectibleUsername(ctx context.Context, req IssueCollectibleUsernameRequest) (CommandResult, error) {
+	newUsername := strings.TrimSpace(strings.TrimPrefix(req.NewUsername, "@"))
+	if newUsername == "" {
+		return CommandResult{}, fmt.Errorf("new_username is required")
 	}
 	if s == nil || s.collectibleUsernames == nil {
 		return CommandResult{}, fmt.Errorf("admin collectible-username dependency is not configured")
 	}
-	var targetUserID int64
-	if s.users != nil {
-		if owner, found, err := s.users.AdminUserByUsername(ctx, username); err == nil && found {
-			targetUserID = owner.ID
-		}
+	recipient, err := s.resolveAdminRecipient(ctx, req.UserID, req.Username, req.Phone)
+	if err != nil {
+		return CommandResult{}, err
 	}
-	return s.runCommand(ctx, req.CommandMeta, ActionSetCollectibleUsername, targetUserID, domain.Peer{}, req, func() (CommandResult, error) {
+	return s.runCommand(ctx, req.CommandMeta, ActionSetCollectibleUsername, recipient.ID, domain.Peer{}, req, func() (CommandResult, error) {
 		details := map[string]any{
-			"username":        username,
-			"currency":        req.Currency,
-			"amount":          req.Amount,
-			"crypto_currency": req.CryptoCurrency,
-			"crypto_amount":   req.CryptoAmount,
+			"recipient_user_id":  recipient.ID,
+			"recipient_username": recipient.Username,
+			"new_username":       newUsername,
+			"currency":           req.Currency,
+			"amount":             req.Amount,
+			"crypto_currency":    req.CryptoCurrency,
+			"crypto_amount":      req.CryptoAmount,
+			"active":             req.Active,
 		}
 		if req.DryRun {
 			return CommandResult{Message: "dry-run completed", Details: details}, nil
 		}
-		saved, err := s.collectibleUsernames.Set(ctx, domain.CollectibleUsername{
-			Username:       username,
+		saved, err := s.collectibleUsernames.Issue(ctx, domain.CollectibleUsername{
+			Username:       newUsername,
+			OwnerUserID:    recipient.ID,
+			Active:         req.Active,
 			PurchaseDate:   req.PurchaseDate,
 			Currency:       req.Currency,
 			Amount:         req.Amount,
@@ -801,7 +826,7 @@ func (s *Service) SetCollectibleUsername(ctx context.Context, req SetCollectible
 			return CommandResult{}, err
 		}
 		details["purchase_date"] = saved.PurchaseDate
-		return CommandResult{Message: "username marked collectible", Details: details}, nil
+		return CommandResult{Message: "collectible username issued", Details: details}, nil
 	})
 }
 
@@ -827,6 +852,42 @@ func (s *Service) RemoveCollectibleUsername(ctx context.Context, req RemoveColle
 			return CommandResult{}, err
 		}
 		return CommandResult{Message: "collectible status removed", Details: details}, nil
+	})
+}
+
+type SetFakeRequest struct {
+	CommandMeta
+	UserID int64 `json:"user_id"`
+	Fake   bool  `json:"fake"`
+}
+
+func (s *Service) SetFake(ctx context.Context, req SetFakeRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.users == nil || s.userFlags == nil {
+		return CommandResult{}, fmt.Errorf("admin user-flags dependency is not configured")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetFake, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		details := map[string]any{
+			"previous_fake": u.Fake,
+			"new_fake":      req.Fake,
+			"would_change":  u.Fake != req.Fake,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "dry-run completed", Details: details}, nil
+		}
+		if err := s.userFlags.SetFake(ctx, req.UserID, req.Fake); err != nil {
+			return CommandResult{}, err
+		}
+		return CommandResult{Message: "fake flag updated", Details: details}, nil
 	})
 }
 
