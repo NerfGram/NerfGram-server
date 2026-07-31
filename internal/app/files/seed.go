@@ -359,6 +359,7 @@ func (s *Service) importStickerSetDir(ctx context.Context, setDir, systemKey str
 		Animated:        true, // 导出资源均为 .tgs 动画贴纸
 		Emojis:          sj.Emojis,
 		Masks:           sj.Masks,
+		TextColor:       sj.TextColor,
 		Archived:        sj.Archived,
 		Installed:       seedStickerSetInstalled(kind),
 		ThumbDocumentID: derefInt64(sj.ThumbDocumentID),
@@ -1096,6 +1097,7 @@ type seedStickerSetJSON struct {
 	Official        bool                  `json:"official"`
 	Masks           bool                  `json:"masks"`
 	Emojis          bool                  `json:"emojis"`
+	TextColor       bool                  `json:"text_color"`
 	Thumbs          []seedThumbJSON       `json:"thumbs"`
 	ThumbDCID       int                   `json:"thumb_dc_id"`
 	ThumbVersion    int                   `json:"thumb_version"`

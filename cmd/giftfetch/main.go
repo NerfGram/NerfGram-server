@@ -375,6 +375,9 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 		return err
 	}
 	for _, dm := range documentResults {
+		if strings.TrimSpace(dm.ValidationError) != "" || dm.File.Size <= 0 {
+			continue
+		}
 		manifest.TotalBytes += dm.File.Size
 		for _, thumb := range dm.Thumbs {
 			manifest.TotalBytes += thumb.Size
@@ -382,6 +385,7 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 		manifest.MissingThumbCount += len(dm.MissingThumbs)
 		manifest.Documents = append(manifest.Documents, dm)
 	}
+	pruneManifest(&manifest)
 
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
@@ -392,6 +396,53 @@ func fetchCatalog(ctx context.Context, api *tg.Client, outDir string, maxDocByte
 	}
 	fmt.Printf("[complete] gifts=%d attribute_sets=%d attributes=%d documents=%d missing_thumbs=%d bytes=%d manifest=%s\n", len(manifest.Gifts), len(manifest.UpgradeAttributeSets), manifest.UpgradeAttributeCount, len(manifest.Documents), manifest.MissingThumbCount, manifest.TotalBytes, filepath.Join(outDir, "manifest.json"))
 	return nil
+}
+
+func pruneManifest(manifest *catalogManifest) {
+	valid := make(map[int64]struct{}, len(manifest.Documents))
+	for _, doc := range manifest.Documents {
+		if doc.ID > 0 {
+			valid[doc.ID] = struct{}{}
+		}
+	}
+	gifts := make([]giftManifest, 0, len(manifest.Gifts))
+	for _, gift := range manifest.Gifts {
+		if gift.Kind != "regular" || gift.ID <= 0 || len(gift.DocumentIDs) != 1 {
+			continue
+		}
+		if _, ok := valid[gift.DocumentIDs[0]]; !ok {
+			continue
+		}
+		gifts = append(gifts, gift)
+	}
+	manifest.Gifts = gifts
+	manifest.GiftCount = len(gifts)
+
+	sets := make([]upgradeAttributeSetManifest, 0, len(manifest.UpgradeAttributeSets))
+	for _, set := range manifest.UpgradeAttributeSets {
+		ok := true
+		for _, model := range set.Models {
+			if _, found := valid[model.DocumentID]; !found {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		for _, pattern := range set.Patterns {
+			if _, found := valid[pattern.DocumentID]; !found {
+				ok = false
+				break
+			}
+		}
+		if !ok {
+			continue
+		}
+		sets = append(sets, set)
+	}
+	manifest.UpgradeAttributeSets = sets
+	manifest.UpgradeAttributeSetCount = len(sets)
 }
 
 func collectUpgradeableGiftIDs(classes []tg.StarGiftClass) []int64 {
@@ -612,11 +663,36 @@ func fetchDocument(ctx context.Context, api *tg.Client, dl *downloader.Downloade
 		return documentManifest{}, err
 	}
 	if !reused {
-		fmt.Printf("[network fetch] document=%d resource=document expected_size=%d part_size=%d\n", doc.ID, doc.Size, downloadPartSize(doc.Size))
-		data, err = download(ctx, api, dl, doc, "", doc.Size, maxBytes)
-		if err != nil {
-			return documentManifest{}, fmt.Errorf("download document %d: %w", doc.ID, err)
-		}
+        fmt.Printf("[network fetch] document=%d resource=document expected_size=%d part_size=%d\n", doc.ID, doc.Size, downloadPartSize(doc.Size))
+        data, err = download(ctx, api, dl, doc, "", doc.Size, maxBytes)
+        if err != nil {
+            // Some upstream documents may be rejected by Telegram with LIMIT_INVALID.
+            // Treat those as non-fatal: record a manifest entry with a validation error
+            // and continue so the overall snapshot can complete.
+            if strings.Contains(err.Error(), "LIMIT_INVALID") {
+                fmt.Printf("[download skipped-limit] document=%d error=%v\n", doc.ID, err)
+                // write a placeholder file artifact (path expected under documents/<id>.<ext>)
+                relPlaceholder := filepath.Join("documents", fmt.Sprintf("%d%s", doc.ID, ext))
+                dm := documentManifest{
+                    ID:           doc.ID,
+                    Date:         doc.Date,
+                    DCID:         doc.DCID,
+                    MimeType:     doc.MimeType,
+                    ExpectedSize: doc.Size,
+                    FileName:     fileName,
+                    StickerAlt:   stickerAlt,
+                    Purposes:     []string{},
+                    File: fileArtifact{
+                        Kind: "document",
+                        Path: relPlaceholder,
+                        Size: 0,
+                    },
+                    ValidationError: fmt.Sprintf("download skipped: %v", err),
+                }
+                return dm, nil
+            }
+            return documentManifest{}, fmt.Errorf("download document %d: %w", doc.ID, err)
+        }
 	}
 	if int64(len(data)) != doc.Size {
 		return documentManifest{}, fmt.Errorf("document %d size mismatch: got %d want %d", doc.ID, len(data), doc.Size)
@@ -718,14 +794,20 @@ func fetchThumbs(ctx context.Context, api *tg.Client, dl *downloader.Downloader,
 		default:
 			continue
 		}
-		if err != nil {
-			if downloadAttempted && missingThumbAllowed(allowedMissingThumbs, doc.ID, "photo", thumbType) {
-				missing = append(missing, missingThumb{Kind: "photo", Type: thumbType, ExpectedSize: expectedSize, Error: err.Error()})
-				fmt.Printf("[missing thumb] document=%d kind=photo type=%s expected_size=%d error=%v\n", doc.ID, thumbType, expectedSize, err)
-				continue
-			}
-			return nil, nil, fmt.Errorf("download document %d photo thumb %q: %w", doc.ID, thumbType, err)
-		}
+        if err != nil {
+            // Treat Telegram LIMIT_INVALID as non-fatal for thumbs: record as missing and continue.
+            if strings.Contains(err.Error(), "LIMIT_INVALID") {
+                missing = append(missing, missingThumb{Kind: "photo", Type: thumbType, ExpectedSize: expectedSize, Error: err.Error()})
+                fmt.Printf("[missing thumb skipped-limit] document=%d kind=photo type=%s expected_size=%d error=%v\n", doc.ID, thumbType, expectedSize, err)
+                continue
+            }
+            if downloadAttempted && missingThumbAllowed(allowedMissingThumbs, doc.ID, "photo", thumbType) {
+                missing = append(missing, missingThumb{Kind: "photo", Type: thumbType, ExpectedSize: expectedSize, Error: err.Error()})
+                fmt.Printf("[missing thumb] document=%d kind=photo type=%s expected_size=%d error=%v\n", doc.ID, thumbType, expectedSize, err)
+                continue
+            }
+            return nil, nil, fmt.Errorf("download document %d photo thumb %q: %w", doc.ID, thumbType, err)
+        }
 		if len(data) == 0 {
 			continue
 		}
@@ -757,14 +839,20 @@ func fetchThumbs(ctx context.Context, api *tg.Client, dl *downloader.Downloader,
 			fmt.Printf("[network fetch] document=%d resource=video-thumb type=%s expected_size=%d part_size=%d\n", doc.ID, value.Type, value.Size, downloadPartSize(int64(value.Size)))
 			data, err = download(ctx, api, dl, doc, value.Type, int64(value.Size), maxBytes)
 		}
-		if err != nil {
-			if downloadAttempted && missingThumbAllowed(allowedMissingThumbs, doc.ID, "video", value.Type) {
-				missing = append(missing, missingThumb{Kind: "video", Type: value.Type, ExpectedSize: int64(value.Size), Error: err.Error()})
-				fmt.Printf("[missing thumb] document=%d kind=video type=%s expected_size=%d error=%v\n", doc.ID, value.Type, value.Size, err)
-				continue
-			}
-			return nil, nil, fmt.Errorf("download document %d video thumb %q: %w", doc.ID, value.Type, err)
-		}
+        if err != nil {
+            // Treat Telegram LIMIT_INVALID as non-fatal for thumbs: record as missing and continue.
+            if strings.Contains(err.Error(), "LIMIT_INVALID") {
+                missing = append(missing, missingThumb{Kind: "video", Type: value.Type, ExpectedSize: int64(value.Size), Error: err.Error()})
+                fmt.Printf("[missing thumb skipped-limit] document=%d kind=video type=%s expected_size=%d error=%v\n", doc.ID, value.Type, value.Size, err)
+                continue
+            }
+            if downloadAttempted && missingThumbAllowed(allowedMissingThumbs, doc.ID, "video", value.Type) {
+                missing = append(missing, missingThumb{Kind: "video", Type: value.Type, ExpectedSize: int64(value.Size), Error: err.Error()})
+                fmt.Printf("[missing thumb] document=%d kind=video type=%s expected_size=%d error=%v\n", doc.ID, value.Type, value.Size, err)
+                continue
+            }
+            return nil, nil, fmt.Errorf("download document %d video thumb %q: %w", doc.ID, value.Type, err)
+        }
 		artifact, err := writeArtifact(root, rel, "video", value.Type, data)
 		if err != nil {
 			return nil, nil, err

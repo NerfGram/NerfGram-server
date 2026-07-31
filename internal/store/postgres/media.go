@@ -668,6 +668,7 @@ func (s *MediaStore) PutStickerSet(ctx context.Context, set domain.StickerSet) e
 		Videos:          set.Videos,
 		Emojis:          set.Emojis,
 		Masks:           set.Masks,
+		TextColor:       set.TextColor,
 		Installed:       set.Installed,
 		Archived:        set.Archived,
 		InstalledDate:   int32(set.InstalledDate),

@@ -161,7 +161,7 @@ func mapAttrs(in []tg.DocumentAttributeClass) []attrJSON {
 
 func main() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: SESSION=/tmp/appearance.session stickerfetch <out_dir> <spec> [spec...]\n  spec: short:<name> | emoji_default_statuses | emoji_channel_default_statuses | emoji_default_topic_icons | premium_gifts | ton_gifts | effects")
+		fmt.Fprintln(os.Stderr, "usage: SESSION=/tmp/appearance.session stickerfetch <out_dir> <spec> [spec...]\n  spec: short:<name> | emoji_default_statuses | emoji_channel_default_statuses | emoji_default_topic_icons | premium_gifts | ton_gifts | effects | reactions")
 		os.Exit(2)
 	}
 	out := os.Args[1]
@@ -181,9 +181,12 @@ func main() {
 		dl := downloader.NewDownloader()
 		for _, spec := range specs {
 			var err error
-			if spec == "effects" {
+			switch spec {
+			case "effects":
 				err = fetchEffects(ctx, api, dl, out)
-			} else {
+			case "reactions":
+				err = fetchReactions(ctx, api, dl, out)
+			default:
 				err = fetchSet(ctx, api, dl, out, spec)
 			}
 			if err != nil {
@@ -420,4 +423,131 @@ func fetchEffects(ctx context.Context, api *tg.Client, dl *downloader.Downloader
 	}
 	fmt.Printf("[effects] effects=%d documents=%d\n", len(out.Result.Effects), len(out.Result.Documents))
 	return nil
+}
+
+// ---- available reactions (messages.getAvailableReactions) ----
+
+type reactionJSON struct {
+	Reaction          string        `json:"reaction"`
+	Title             string        `json:"title"`
+	Inactive          bool          `json:"inactive,omitempty"`
+	Premium           bool          `json:"premium,omitempty"`
+	StaticIcon        *documentJSON `json:"static_icon,omitempty"`
+	AppearAnimation   *documentJSON `json:"appear_animation,omitempty"`
+	SelectAnimation   *documentJSON `json:"select_animation,omitempty"`
+	ActivateAnimation *documentJSON `json:"activate_animation,omitempty"`
+	EffectAnimation   *documentJSON `json:"effect_animation,omitempty"`
+	AroundAnimation   *documentJSON `json:"around_animation,omitempty"`
+	CenterIcon        *documentJSON `json:"center_icon,omitempty"`
+}
+
+func fetchReactions(ctx context.Context, api *tg.Client, dl *downloader.Downloader, outRoot string) error {
+	res, err := api.MessagesGetAvailableReactions(ctx, 0)
+	if err != nil {
+		return fmt.Errorf("getAvailableReactions: %w", err)
+	}
+	full, ok := res.(*tg.MessagesAvailableReactions)
+	if !ok {
+		return fmt.Errorf("got %T, want messagesAvailableReactions", res)
+	}
+	dir := filepath.Join(outRoot, "telegram_reactions_export")
+	reactionsDir := filepath.Join(dir, "reactions")
+	globalDir := filepath.Join(dir, "global_json")
+	if err := os.MkdirAll(reactionsDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		return err
+	}
+
+	downloaded := map[int64]documentJSON{}
+	ensureDoc := func(doc tg.DocumentClass) (*documentJSON, error) {
+		d, ok := doc.(*tg.Document)
+		if !ok || d == nil || d.ID == 0 {
+			return nil, nil
+		}
+		if existing, ok := downloaded[d.ID]; ok {
+			copy := existing
+			return &copy, nil
+		}
+		path := filepath.Join(reactionsDir, fmt.Sprintf("%d%s", d.ID, docExt(d)))
+		if !completeExistingFile(path, d.Size) {
+			loc := &tg.InputDocumentFileLocation{ID: d.ID, AccessHash: d.AccessHash, FileReference: d.FileReference}
+			if err := downloadToFile(ctx, dl, api, loc, reactionsDir, path); err != nil {
+				return nil, fmt.Errorf("download reaction doc %d: %w", d.ID, err)
+			}
+		}
+		dj := documentJSON{
+			ID:            d.ID,
+			AccessHash:    d.AccessHash,
+			FileReference: hex.EncodeToString(d.FileReference),
+			Date:          time.Unix(int64(d.Date), 0).UTC().Format(time.RFC3339),
+			MimeType:      d.MimeType,
+			Size:          d.Size,
+			DCID:          d.DCID,
+			Attributes:    mapAttrs(d.Attributes),
+		}
+		downloaded[d.ID] = dj
+		copy := dj
+		return &copy, nil
+	}
+
+	reactions := make([]reactionJSON, 0, len(full.Reactions))
+	for _, r := range full.Reactions {
+		rj := reactionJSON{
+			Reaction: r.Reaction,
+			Title:    r.Title,
+			Inactive: r.Inactive,
+			Premium:  r.Premium,
+		}
+		var err error
+		if rj.StaticIcon, err = ensureDoc(r.StaticIcon); err != nil {
+			return err
+		}
+		if rj.AppearAnimation, err = ensureDoc(r.AppearAnimation); err != nil {
+			return err
+		}
+		if rj.SelectAnimation, err = ensureDoc(r.SelectAnimation); err != nil {
+			return err
+		}
+		if rj.ActivateAnimation, err = ensureDoc(r.ActivateAnimation); err != nil {
+			return err
+		}
+		if rj.EffectAnimation, err = ensureDoc(r.EffectAnimation); err != nil {
+			return err
+		}
+		if around, ok := r.GetAroundAnimation(); ok {
+			if rj.AroundAnimation, err = ensureDoc(around); err != nil {
+				return err
+			}
+		}
+		if center, ok := r.GetCenterIcon(); ok {
+			if rj.CenterIcon, err = ensureDoc(center); err != nil {
+				return err
+			}
+		}
+		reactions = append(reactions, rj)
+	}
+
+	payload := map[string]any{"result": map[string]any{"reactions": reactions}}
+	b, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "available_reactions_raw.json"), append(b, '\n'), 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("[reactions] reactions=%d documents=%d\n", len(reactions), len(downloaded))
+	return nil
+}
+
+func docExt(doc *tg.Document) string {
+	switch doc.MimeType {
+	case "video/webm":
+		return ".webm"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".tgs"
+	}
 }

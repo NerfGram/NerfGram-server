@@ -176,7 +176,7 @@ WHERE id = sqlc.arg(id)::bigint;
 -- name: PutStickerSet :exec
 INSERT INTO sticker_sets (
   id, access_hash, short_name, title, count, hash, set_kind,
-  official, animated, videos, emojis, masks, installed, archived, installed_date,
+  official, animated, videos, emojis, masks, text_color, installed, archived, installed_date,
   thumb_document_id, thumbs, thumb_dc_id, thumb_version, document_ids, packs, sort_order, system_key
 ) VALUES (
   sqlc.arg(id)::bigint,
@@ -191,6 +191,7 @@ INSERT INTO sticker_sets (
   sqlc.arg(videos)::boolean,
   sqlc.arg(emojis)::boolean,
   sqlc.arg(masks)::boolean,
+  sqlc.arg(text_color)::boolean,
   sqlc.arg(installed)::boolean,
   sqlc.arg(archived)::boolean,
   sqlc.arg(installed_date)::int,
@@ -215,6 +216,7 @@ ON CONFLICT (id) DO UPDATE SET
   videos = EXCLUDED.videos,
   emojis = EXCLUDED.emojis,
   masks = EXCLUDED.masks,
+  text_color = EXCLUDED.text_color,
   installed = EXCLUDED.installed,
   archived = EXCLUDED.archived,
   installed_date = EXCLUDED.installed_date,

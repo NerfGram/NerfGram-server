@@ -325,6 +325,10 @@ type StarGiftUpgradeRequest struct {
 	Date                int
 	OriginAuthKeyID     [8]byte
 	OriginSessionID     int64
+	// Force* fields are dev/admin overrides; zero means random issuance.
+	ForceModelAttributeID    int64
+	ForcePatternAttributeID  int64
+	ForceBackdropAttributeID int64
 }
 
 type StarGiftPurchaseRequest struct {

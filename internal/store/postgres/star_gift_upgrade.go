@@ -144,15 +144,15 @@ WHERE collectible_revision_id=$1 AND crafted
 			if err != nil {
 				return err
 			}
-			modelID, err := chooseCollectibleAttribute(ctx, tx, "star_gift_collectible_models", revision.ID)
+			modelID, err := resolveCollectibleAttribute(ctx, tx, "star_gift_collectible_models", revision.ID, req.ForceModelAttributeID)
 			if err != nil {
 				return err
 			}
-			patternID, err := chooseCollectibleAttribute(ctx, tx, "star_gift_collectible_patterns", revision.ID)
+			patternID, err := resolveCollectibleAttribute(ctx, tx, "star_gift_collectible_patterns", revision.ID, req.ForcePatternAttributeID)
 			if err != nil {
 				return err
 			}
-			backdropID, err := chooseCollectibleAttribute(ctx, tx, "star_gift_collectible_backdrops", revision.ID)
+			backdropID, err := resolveCollectibleAttribute(ctx, tx, "star_gift_collectible_backdrops", revision.ID, req.ForceBackdropAttributeID)
 			if err != nil {
 				return err
 			}
@@ -534,6 +534,21 @@ func debitStarGiftUpgrade(ctx context.Context, tx pgx.Tx, userID, amount int64, 
 		return domain.StarsBalance{}, err
 	}
 	return result, nil
+}
+
+func resolveCollectibleAttribute(ctx context.Context, tx pgx.Tx, table string, revisionID, forcedID int64) (int64, error) {
+	if forcedID > 0 {
+		var ok bool
+		if err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT EXISTS(
+SELECT 1 FROM %s WHERE id=$1 AND collectible_revision_id=$2)`, table), forcedID, revisionID).Scan(&ok); err != nil {
+			return 0, fmt.Errorf("verify forced collectible attribute: %w", err)
+		}
+		if !ok {
+			return 0, domain.ErrStarGiftCollectibleInvalid
+		}
+		return forcedID, nil
+	}
+	return chooseCollectibleAttribute(ctx, tx, table, revisionID)
 }
 
 func chooseCollectibleAttribute(ctx context.Context, tx pgx.Tx, table string, revisionID int64) (int64, error) {

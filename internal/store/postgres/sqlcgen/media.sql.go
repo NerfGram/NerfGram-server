@@ -1136,7 +1136,7 @@ const putStickerSet = `-- name: PutStickerSet :exec
 
 INSERT INTO sticker_sets (
   id, access_hash, short_name, title, count, hash, set_kind,
-  official, animated, videos, emojis, masks, installed, archived, installed_date,
+  official, animated, videos, emojis, masks, text_color, installed, archived, installed_date,
   thumb_document_id, thumbs, thumb_dc_id, thumb_version, document_ids, packs, sort_order, system_key
 ) VALUES (
   $1::bigint,
@@ -1153,15 +1153,16 @@ INSERT INTO sticker_sets (
   $12::boolean,
   $13::boolean,
   $14::boolean,
-  $15::int,
-  $16::bigint,
-  $17::jsonb,
-  $18::int,
+  $15::boolean,
+  $16::int,
+  $17::bigint,
+  $18::jsonb,
   $19::int,
-  $20::jsonb,
+  $20::int,
   $21::jsonb,
-  $22::int,
-  $23::text
+  $22::jsonb,
+  $23::int,
+  $24::text
 )
 ON CONFLICT (id) DO UPDATE SET
   access_hash = EXCLUDED.access_hash,
@@ -1175,6 +1176,7 @@ ON CONFLICT (id) DO UPDATE SET
   videos = EXCLUDED.videos,
   emojis = EXCLUDED.emojis,
   masks = EXCLUDED.masks,
+  text_color = EXCLUDED.text_color,
   installed = EXCLUDED.installed,
   archived = EXCLUDED.archived,
   installed_date = EXCLUDED.installed_date,
@@ -1201,6 +1203,7 @@ type PutStickerSetParams struct {
 	Videos          bool
 	Emojis          bool
 	Masks           bool
+	TextColor       bool
 	Installed       bool
 	Archived        bool
 	InstalledDate   int32
@@ -1229,6 +1232,7 @@ func (q *Queries) PutStickerSet(ctx context.Context, arg PutStickerSetParams) er
 		arg.Videos,
 		arg.Emojis,
 		arg.Masks,
+		arg.TextColor,
 		arg.Installed,
 		arg.Archived,
 		arg.InstalledDate,
