@@ -28,6 +28,7 @@ type Service struct {
 	projector            *userprojection.Projector
 	collectibleUsernames CollectibleUsernameOwnerLookup
 	userFlags            UserFakeFlagLookup
+	userVerifications    UserVerificationLookup
 }
 
 // CollectibleUsernameOwnerLookup batch-resolves each owner's admin-issued
@@ -40,6 +41,12 @@ type CollectibleUsernameOwnerLookup interface {
 // users.
 type UserFakeFlagLookup interface {
 	ByOwners(ctx context.Context, userIDs []int64) (map[int64]bool, error)
+}
+
+// UserVerificationLookup batch-resolves the admin-issued "Verified by <org>"
+// badge for a set of users.
+type UserVerificationLookup interface {
+	ByOwners(ctx context.Context, userIDs []int64) (map[int64]domain.UserVerification, error)
 }
 
 type usernameAvailabilityStore interface {
@@ -69,6 +76,11 @@ func WithCollectibleUsernames(l CollectibleUsernameOwnerLookup) Option {
 // WithUserFlags injects the admin-set Fake-badge lookup.
 func WithUserFlags(l UserFakeFlagLookup) Option {
 	return func(s *Service) { s.userFlags = l }
+}
+
+// WithUserVerifications injects the admin-issued verification-badge lookup.
+func WithUserVerifications(l UserVerificationLookup) Option {
+	return func(s *Service) { s.userVerifications = l }
 }
 
 // WithContactStore enables viewer-specific contact name/phone projection.
@@ -654,6 +666,18 @@ func (s *Service) loadBaseUsersByIDs(ctx context.Context, userIDs []int64) ([]do
 			for i := range out {
 				if out[i].ID != 0 && fake[out[i].ID] {
 					out[i].Fake = true
+				}
+			}
+		}
+	}
+	if s.userVerifications != nil && len(out) > 0 {
+		verifications, err := s.userVerifications.ByOwners(ctx, ids)
+		if err == nil && len(verifications) > 0 {
+			for i := range out {
+				if v, ok := verifications[out[i].ID]; ok {
+					out[i].VerificationBotID = v.BotID
+					out[i].VerificationIcon = v.Icon
+					out[i].VerificationDescription = v.Description
 				}
 			}
 		}

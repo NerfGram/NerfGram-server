@@ -27,6 +27,8 @@ const (
 	ActionRemoveCollectibleUsername = "username.remove_collectible"
 	ActionSetVerified               = "account.set_verified"
 	ActionSetFake                   = "account.set_fake"
+	ActionSetVerification           = "account.set_verification"
+	ActionRemoveVerification        = "account.remove_verification"
 	ActionSetChannelVerified        = "channel.set_verified"
 	ActionRevokeSessions            = "account.revoke_sessions"
 	ActionDeletePrivateMessages     = "messages.delete_private_messages"
@@ -131,6 +133,13 @@ type UserFlagsStore interface {
 	SetFake(ctx context.Context, userID int64, fake bool) error
 }
 
+// UserVerificationsStore lets admins issue/revoke the "Verified by <org>"
+// badge (distinct from the plain Verified flag).
+type UserVerificationsStore interface {
+	Set(ctx context.Context, v domain.UserVerification, createdBy string) error
+	Remove(ctx context.Context, userID int64) error
+}
+
 type OfficialGiftsSource interface {
 	List(ctx context.Context) ([]officialgifts.GiftSummary, error)
 	Bundle(ctx context.Context, giftID int64, includeCollectible bool) (officialgifts.Bundle, error)
@@ -151,6 +160,7 @@ type Dependencies struct {
 	Gifts                GiftsService
 	CollectibleUsernames CollectibleUsernamesStore
 	UserFlags            UserFlagsStore
+	UserVerifications    UserVerificationsStore
 	OfficialGifts        OfficialGiftsSource
 	Now                  func() time.Time
 }
@@ -170,6 +180,7 @@ type Service struct {
 	gifts                GiftsService
 	collectibleUsernames CollectibleUsernamesStore
 	userFlags            UserFlagsStore
+	userVerifications    UserVerificationsStore
 	officialGifts        OfficialGiftsSource
 	now                  func() time.Time
 }
@@ -221,6 +232,9 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	}
 	if deps.UserFlags != nil {
 		s.userFlags = deps.UserFlags
+	}
+	if deps.UserVerifications != nil {
+		s.userVerifications = deps.UserVerifications
 	}
 	if deps.OfficialGifts != nil {
 		s.officialGifts = deps.OfficialGifts
@@ -888,6 +902,83 @@ func (s *Service) SetFake(ctx context.Context, req SetFakeRequest) (CommandResul
 			return CommandResult{}, err
 		}
 		return CommandResult{Message: "fake flag updated", Details: details}, nil
+	})
+}
+
+// SetVerificationRequest issues a "Verified by <org>" badge on a user,
+// distinct from the plain blue-checkmark Verified flag. BotID identifies
+// the (any) bot the badge is attributed to; real Telegram requires the
+// caller to own that bot, but here an admin can assign it directly. Icon is
+// a custom-emoji document ID shown next to the description; Description
+// defaults to a generic "Verified by organization ..." line if left empty.
+type SetVerificationRequest struct {
+	CommandMeta
+	UserID      int64  `json:"user_id"`
+	BotID       int64  `json:"bot_id"`
+	Icon        int64  `json:"icon,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+func (s *Service) SetVerification(ctx context.Context, req SetVerificationRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if req.BotID <= 0 {
+		return CommandResult{}, fmt.Errorf("bot_id is required")
+	}
+	if s == nil || s.users == nil || s.userVerifications == nil {
+		return CommandResult{}, fmt.Errorf("admin user-verification dependency is not configured")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetVerification, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		details := map[string]any{
+			"user_id":     u.ID,
+			"bot_id":      req.BotID,
+			"icon":        req.Icon,
+			"description": req.Description,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "dry-run completed", Details: details}, nil
+		}
+		if err := s.userVerifications.Set(ctx, domain.UserVerification{
+			UserID:      req.UserID,
+			BotID:       req.BotID,
+			Icon:        req.Icon,
+			Description: req.Description,
+		}, strings.TrimSpace(req.CommandMeta.Actor)); err != nil {
+			return CommandResult{}, err
+		}
+		return CommandResult{Message: "verification badge issued", Details: details}, nil
+	})
+}
+
+type RemoveVerificationRequest struct {
+	CommandMeta
+	UserID int64 `json:"user_id"`
+}
+
+func (s *Service) RemoveVerification(ctx context.Context, req RemoveVerificationRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.userVerifications == nil {
+		return CommandResult{}, fmt.Errorf("admin user-verification dependency is not configured")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionRemoveVerification, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"user_id": req.UserID}
+		if req.DryRun {
+			return CommandResult{Message: "dry-run completed", Details: details}, nil
+		}
+		if err := s.userVerifications.Remove(ctx, req.UserID); err != nil {
+			return CommandResult{}, err
+		}
+		return CommandResult{Message: "verification badge removed", Details: details}, nil
 	})
 }
 

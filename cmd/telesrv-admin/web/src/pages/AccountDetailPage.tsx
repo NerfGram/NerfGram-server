@@ -22,6 +22,9 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
   const [collectibleAmount, setCollectibleAmount] = useState("");
   const [newCollectibleUsername, setNewCollectibleUsername] = useState("");
   const [issueActive, setIssueActive] = useState(false);
+  const [verificationBotId, setVerificationBotId] = useState("");
+  const [verificationIcon, setVerificationIcon] = useState("");
+  const [verificationDescription, setVerificationDescription] = useState("");
   const [freezeUntil, setFreezeUntil] = useState(() => toDateTimeLocal(new Date(Date.now() + 7 * 86400_000)));
   const [freezeAppealURL, setFreezeAppealURL] = useState("");
 
@@ -297,6 +300,55 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
                 tone={detail.Fake ? "danger" : "warn"}
                 path="/api/actions/set-fake"
                 payload={() => ({ user_id: account.ID, fake: !detail.Fake })}
+                onDone={load}
+              />
+              <label className="duration-field">
+                <span>{t("account.verificationBotId")}</span>
+                <input
+                  aria-label={t("account.verificationBotIdAria")}
+                  value={verificationBotId}
+                  onChange={(event) => setVerificationBotId(event.target.value)}
+                  type="number"
+                />
+              </label>
+              <label className="duration-field">
+                <span>{t("account.verificationIcon")}</span>
+                <input
+                  aria-label={t("account.verificationIconAria")}
+                  value={verificationIcon}
+                  onChange={(event) => setVerificationIcon(event.target.value)}
+                  type="number"
+                />
+              </label>
+              <label className="duration-field">
+                <span>{t("account.verificationDescription")}</span>
+                <input
+                  aria-label={t("account.verificationDescriptionAria")}
+                  value={verificationDescription}
+                  onChange={(event) => setVerificationDescription(event.target.value)}
+                  type="text"
+                  placeholder="Verified by organization ..."
+                />
+              </label>
+              <ActionButton
+                label={t("account.setVerification")}
+                icon={<Star size={15} />}
+                tone="warn"
+                path="/api/actions/set-verification"
+                payload={() => ({
+                  user_id: account.ID,
+                  bot_id: toInt(verificationBotId),
+                  icon: toInt(verificationIcon),
+                  description: verificationDescription,
+                })}
+                onDone={load}
+              />
+              <ActionButton
+                label={t("account.removeVerification")}
+                icon={<Star size={15} />}
+                tone="danger"
+                path="/api/actions/remove-verification"
+                payload={() => ({ user_id: account.ID })}
                 onDone={load}
               />
               <ActionButton

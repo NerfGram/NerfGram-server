@@ -32,3 +32,15 @@ type CollectibleUsername struct {
 	CryptoAmount   int64
 	URL            string
 }
+
+// UserVerification is an admin-issued "Verified by <org>" badge
+// (tg.UserFull.bot_verification), distinct from the plain blue-checkmark
+// Verified flag on the base User object. Real Telegram requires this to be
+// set by an owned bot; here an admin assigns BotID/Icon/Description
+// directly for a user.
+type UserVerification struct {
+	UserID      int64
+	BotID       int64
+	Icon        int64
+	Description string
+}

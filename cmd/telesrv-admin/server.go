@@ -70,6 +70,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/issue-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleIssueCollectibleUsernameAPI)))
 	mux.Handle("POST /api/actions/remove-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleRemoveCollectibleUsernameAPI)))
 	mux.Handle("POST /api/actions/set-fake", s.requireAuthAPI(http.HandlerFunc(s.handleSetFakeAPI)))
+	mux.Handle("POST /api/actions/set-verification", s.requireAuthAPI(http.HandlerFunc(s.handleSetVerificationAPI)))
+	mux.Handle("POST /api/actions/remove-verification", s.requireAuthAPI(http.HandlerFunc(s.handleRemoveVerificationAPI)))
 	mux.Handle("POST /api/actions/set-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetVerifiedAPI)))
 	mux.Handle("POST /api/actions/set-channel-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelVerifiedAPI)))
 	mux.Handle("POST /api/actions/revoke-sessions", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeSessionsAPI)))
@@ -691,6 +693,52 @@ func (s *server) handleSetFakeAPI(w http.ResponseWriter, r *http.Request) {
 		Fake:        body.Fake,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-fake", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setVerificationAPIRequest struct {
+	CommandID   string `json:"command_id"`
+	Reason      string `json:"reason"`
+	Confirm     bool   `json:"confirm"`
+	UserID      int64  `json:"user_id"`
+	BotID       int64  `json:"bot_id"`
+	Icon        int64  `json:"icon"`
+	Description string `json:"description"`
+}
+
+func (s *server) handleSetVerificationAPI(w http.ResponseWriter, r *http.Request) {
+	var body setVerificationAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetVerificationRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-verification"),
+		UserID:      body.UserID,
+		BotID:       body.BotID,
+		Icon:        body.Icon,
+		Description: body.Description,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-verification", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type removeVerificationAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	UserID    int64  `json:"user_id"`
+}
+
+func (s *server) handleRemoveVerificationAPI(w http.ResponseWriter, r *http.Request) {
+	var body removeVerificationAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.RemoveVerificationRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "remove-verification"),
+		UserID:      body.UserID,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/remove-verification", req)
 	writeCommandResultAPI(w, result, err)
 }
 

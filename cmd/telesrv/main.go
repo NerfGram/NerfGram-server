@@ -480,12 +480,14 @@ func run(logger *zap.Logger) error {
 	activeSessions := mtprotoedge.NewSessionManager(logger.Named("mtprotoedge").Named("sessions"))
 	collectibleUsernameStore := postgres.NewCollectibleUsernameStore(pool)
 	userFlagsStore := postgres.NewUserFlagsStore(pool)
+	userVerificationStore := postgres.NewUserVerificationStore(pool)
 	adminService := adminapp.NewService(adminapp.Dependencies{
 		Commands:             adminStore,
 		Restrictions:         adminStore,
 		OfficialGifts:        officialgifts.New(cfg.OfficialGiftsDir),
 		CollectibleUsernames: collectibleUsernameStore,
 		UserFlags:            userFlagsStore,
+		UserVerifications:    userVerificationStore,
 	})
 	go maintenance.NewRetentionWorker(dispatchOutboxStore, tempAuthKeyStore, logger.Named("maintenance").Named("retention"),
 		cfg.UpdateEventRetention,
@@ -717,7 +719,7 @@ func run(logger *zap.Logger) error {
 		passkeyapp.WithAllowedOrigins(cfg.PasskeyAllowedOrigins))
 	// 自定义云主题(Create a New Theme):主题目录与每用户已安装列表均持久化到 postgres。
 	themeService := themesapp.NewService(postgres.NewThemeStore(pool))
-	usersService := users.NewService(userStore, users.WithBaseUserCache(userCache), users.WithContactStore(contactStore), users.WithPhotoProvider(cachedPhotos), users.WithPrivacyEvaluator(privacyService), users.WithCollectibleUsernames(collectibleUsernameStore), users.WithUserFlags(userFlagsStore))
+	usersService := users.NewService(userStore, users.WithBaseUserCache(userCache), users.WithContactStore(contactStore), users.WithPhotoProvider(cachedPhotos), users.WithPrivacyEvaluator(privacyService), users.WithCollectibleUsernames(collectibleUsernameStore), users.WithUserFlags(userFlagsStore), users.WithUserVerifications(userVerificationStore))
 	aiComposeService := aiapp.NewService(aiComposeStore, newAIComposeOptions(cfg, rateLimiter, usersService.PremiumActive, logger)...)
 	botsService.SetAIChatGenerator(aiComposeService)
 	dialogsService := dialogs.NewService(dialogStore, channelStore).Configure(

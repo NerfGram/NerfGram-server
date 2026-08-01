@@ -226,6 +226,13 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 	if u.Bot {
 		full.SetBotInfo(r.tgBotInfo(ctx, u))
 	}
+	if u.VerificationBotID != 0 {
+		full.SetBotVerification(tg.BotVerification{
+			BotID:       u.VerificationBotID,
+			Icon:        u.VerificationIcon,
+			Description: u.VerificationDescription,
+		})
+	}
 	if r.deps.Dialogs != nil && u.ID != currentUserID {
 		list, err := r.deps.Dialogs.GetPeerDialogs(ctx, currentUserID, []domain.Peer{{Type: domain.PeerTypeUser, ID: u.ID}})
 		if err != nil {

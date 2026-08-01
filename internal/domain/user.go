@@ -113,13 +113,19 @@ type User struct {
 	CollectibleUsernameActive bool
 	// Fake marks the account with the client-visible "Fake" warning badge
 	// (e.g. for scam accounts), set by an admin.
-	Fake        bool
-	CountryCode string
-	Verified    bool
-	Support     bool
-	Contact     bool
-	Mutual      bool
-	CloseFriend bool
+	Fake bool
+	// VerificationBotID/-Icon/-Description back the admin-issued "Verified
+	// by <org>" badge (tg.UserFull.bot_verification), distinct from
+	// Verified above. VerificationBotID == 0 means none is set.
+	VerificationBotID       int64
+	VerificationIcon        int64
+	VerificationDescription string
+	CountryCode             string
+	Verified                bool
+	Support                 bool
+	Contact                 bool
+	Mutual                  bool
+	CloseFriend             bool
 	// Bot 标识 bot 账号；置位时 BotInfoVersion 必须 ≥1（TDesktop 只认
 	// user TL 是否携带 bot_info_version 字段，且与 bot flag 共用 bit14）。
 	Bot            bool

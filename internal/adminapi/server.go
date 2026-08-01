@@ -32,6 +32,8 @@ type Service interface {
 	IssueCollectibleUsername(ctx context.Context, req admin.IssueCollectibleUsernameRequest) (admin.CommandResult, error)
 	RemoveCollectibleUsername(ctx context.Context, req admin.RemoveCollectibleUsernameRequest) (admin.CommandResult, error)
 	SetFake(ctx context.Context, req admin.SetFakeRequest) (admin.CommandResult, error)
+	SetVerification(ctx context.Context, req admin.SetVerificationRequest) (admin.CommandResult, error)
+	RemoveVerification(ctx context.Context, req admin.RemoveVerificationRequest) (admin.CommandResult, error)
 	SetVerified(ctx context.Context, req admin.SetVerifiedRequest) (admin.CommandResult, error)
 	SetChannelVerified(ctx context.Context, req admin.SetChannelVerifiedRequest) (admin.CommandResult, error)
 	RevokeSessions(ctx context.Context, req admin.RevokeSessionsRequest) (admin.CommandResult, error)
@@ -102,6 +104,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /v1/usernames/issue-collectible", s.authenticated(s.handleIssueCollectibleUsername))
 	mux.HandleFunc("POST /v1/usernames/remove-collectible", s.authenticated(s.handleRemoveCollectibleUsername))
 	mux.HandleFunc("POST /v1/accounts/set-fake", s.authenticated(s.handleSetFake))
+	mux.HandleFunc("POST /v1/accounts/set-verification", s.authenticated(s.handleSetVerification))
+	mux.HandleFunc("POST /v1/accounts/remove-verification", s.authenticated(s.handleRemoveVerification))
 	mux.HandleFunc("POST /v1/accounts/set-verified", s.authenticated(s.handleSetVerified))
 	mux.HandleFunc("POST /v1/accounts/revoke-sessions", s.authenticated(s.handleRevokeSessions))
 	mux.HandleFunc("POST /v1/channels/set-verified", s.authenticated(s.handleSetChannelVerified))
@@ -200,6 +204,24 @@ func (s *Server) handleSetFake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := s.svc.SetFake(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleSetVerification(w http.ResponseWriter, r *http.Request) {
+	var req admin.SetVerificationRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.SetVerification(r.Context(), req)
+	writeCommandResult(w, result, err)
+}
+
+func (s *Server) handleRemoveVerification(w http.ResponseWriter, r *http.Request) {
+	var req admin.RemoveVerificationRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	result, err := s.svc.RemoveVerification(r.Context(), req)
 	writeCommandResult(w, result, err)
 }
 
