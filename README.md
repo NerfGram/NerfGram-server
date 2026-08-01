@@ -1,84 +1,84 @@
 # FluxGram Server
 
-Форк [owpengram/owpengram-server](https://github.com/owpengram/owpengram-server) —
-self-hosted сервер, совместимый с протоколом Telegram (MTProto, layer 225).
-Внутри проект называется `telesrv`, что видно в путях (`cmd/telesrv`,
-`TELESRV_*` переменные окружения) и в самой базе данных.
+A fork of [owpengram/owpengram-server](https://github.com/owpengram/owpengram-server) —
+a self-hosted server compatible with the Telegram protocol (MTProto, layer 225).
+Internally the project is called `telesrv`, which shows up in paths
+(`cmd/telesrv`, `TELESRV_*` environment variables) and in the database itself.
 
-Работает с оригинальными Android/Desktop-клиентами Telegram (и их форками
+Works with the original Telegram Android/Desktop clients (and their forks
 [owpengram-android-client](https://github.com/owpengram/owpengram-android-client),
 [owpengram-desktop-client](https://github.com/owpengram/owpengram-desktop-client))
-без единой правки на стороне клиентов — все фичи ниже используют штатные
-методы протокола, которые в клиентах уже реализованы, просто раньше не были
-реализованы на сервере.
+with zero client-side changes — every feature below uses standard protocol
+methods the clients already implement; they just weren't implemented on the
+server before.
 
-## Быстрый старт
+## Quick start
 
-### 1. Зависимости
+### 1. Dependencies
 ```bash
 sudo apt update && sudo apt install -y git golang-go docker.io docker-compose-plugin screen
 ```
-Нужен **Go 1.25+** (`go version`). Если в `apt` версия старее — ставь через
-`sudo snap install go --classic` или с go.dev/dl.
+Requires **Go 1.25+** (`go version`). If `apt` has an older version, install
+via `sudo snap install go --classic` or from go.dev/dl.
 
-### 2. Клонирование и конфиг
+### 2. Clone and configure
 ```bash
-git clone https://github.com/kernelfoxx/FluxGram-server.git
-cd FluxGram-server
+git clone https://github.com/kernelfoxx/ResendGram-server.git
+cd ResendGram-server
 cp .env.example .env
 ```
 
-Обязательно поменяй в `.env`:
-- **`TELESRV_DEV_AUTH_CODE`** — на длинную случайную строку. Дефолтный
-  `12345` публично известен (он в этом же `.env.example`) — это дырка для
-  входа в чужие аккаунты, если оставить как есть.
-- **`TELESRV_ADMIN_API_TOKEN`**, **`TELESRV_ADMIN_UI_PASSWORD`** (или
-  `TELESRV_ADMIN_UI_TOKEN`), **`TELESRV_ADMIN_SESSION_KEY`** — секреты для
-  админки, тоже не оставлять пустыми/дефолтными.
-- По возможности — `TELESRV_PHONE_CODE_DELIVERY_PROVIDER=webhook` с реальной
-  SMS-доставкой вместо `development`-режима.
+Make sure to change in `.env`:
+- **`TELESRV_DEV_AUTH_CODE`** — to a long random string. The default `12345`
+  is publicly known (it's right there in `.env.example`) — leaving it as-is
+  is an open door into any account.
+- **`TELESRV_ADMIN_API_TOKEN`**, **`TELESRV_ADMIN_UI_PASSWORD`** (or
+  `TELESRV_ADMIN_UI_TOKEN`), **`TELESRV_ADMIN_SESSION_KEY`** — admin secrets,
+  don't leave these empty/default either.
+- Where possible, `TELESRV_PHONE_CODE_DELIVERY_PROVIDER=webhook` with a real
+  SMS provider instead of `development` mode.
 
 ### 3. Postgres + Redis
 ```bash
 cd deploy && docker compose up -d && cd ..
 ```
 
-### 4. Сборка
+### 4. Build
 ```bash
-go build ./...                          # проверка, что всё собирается
+go build ./...                          # sanity check that everything compiles
 go build -o bin/gramsrv ./cmd/telesrv
 go build -o bin/telesrv-admin ./cmd/telesrv-admin
 ```
-Миграции БД накатываются **автоматически** при старте `gramsrv` — руками
-ничего катать не надо.
+Database migrations run **automatically** on `gramsrv` startup — nothing to
+apply by hand.
 
-### 5. Запуск
+### 5. Run
 
-Это **два независимых процесса**, оба нужны одновременно, оба читают один и
-тот же `.env`:
+These are **two independent processes**, both required at the same time,
+both reading the same `.env`:
 
-| Бинарник | Что делает | Без него |
+| Binary | What it does | Without it |
 |---|---|---|
-| `bin/gramsrv` | Сам сервер: MTProto-протокол, вся бизнес-логика, то, к чему подключаются клиенты | Не работает вообще ничего — ни клиенты, ни админка |
-| `bin/telesrv-admin` | Веб-панель админки — ходит в `gramsrv` по admin API (по токену) | Сервер для юзеров работает нормально, просто нет веб-UI для админских действий (можно через `curl` напрямую в `/v1/...`) |
+| `bin/gramsrv` | The server itself: MTProto protocol, all business logic, what clients actually connect to | Nothing works — not clients, not the admin panel |
+| `bin/telesrv-admin` | The admin web panel — talks to `gramsrv` over the admin API (token-authenticated) | The server works fine for users; you just lose the web UI for admin actions (still reachable via `curl` against `/v1/...` directly) |
 
 ```bash
 screen -S gramsrv
 ./bin/gramsrv
-# Ctrl+A, затем D — отключиться, процесс продолжит работать
+# Ctrl+A, then D — detach, the process keeps running
 
 screen -S admin
 ./bin/telesrv-admin
 # Ctrl+A, D
 ```
 
-Проверка: `screen -ls` должен показать обе сессии. Вернуться в любую —
+Check: `screen -ls` should list both sessions. Reattach to either with
 `screen -r gramsrv` / `screen -r admin`.
 
-## ⚠️ Самая частая ошибка при обновлении
+## ⚠️ The most common update mistake
 
-**Оба бинарника надо пересобирать и перезапускать отдельно.** Полностью
-рабочий цикл обновления после `git pull`:
+**Both binaries must be rebuilt and restarted separately.** The full update
+cycle after `git pull`:
 
 ```bash
 git pull
@@ -86,99 +86,100 @@ go build -o bin/gramsrv ./cmd/telesrv
 go build -o bin/telesrv-admin ./cmd/telesrv-admin
 ```
 
-Затем **в каждой** screen-сессии: `Ctrl+C` (убить старый процесс) → снова
-запустить бинарник → `Ctrl+A, D`.
+Then, **in each** screen session: `Ctrl+C` (kill the old process) → run the
+binary again → `Ctrl+A, D`.
 
-Если пересобрать/перезапустить только `telesrv-admin` — в панели появятся
-новые кнопки, но сам протокол (то, что видят клиенты — гифты, юзернеймы,
-метка Fake и т.д.) не изменится, потому что вся эта логика живёт в
-`gramsrv`, а не в админке. Проверить, что бинарник свежий:
+If you only rebuild/restart `telesrv-admin`, new buttons will show up in the
+panel, but the protocol itself (what clients actually see — gifts,
+usernames, the Fake badge, etc.) won't change, because that logic lives in
+`gramsrv`, not the admin panel. Check the binaries are actually fresh:
 ```bash
 ls -la bin/gramsrv bin/telesrv-admin
 ```
-Дата должна быть позже последнего `git pull`. Плюс жёсткий рефреш браузера
-(`Ctrl+Shift+R`) для самой веб-панели — иначе может отдаваться закэшированный
-старый JS.
+The timestamp should be after your last `git pull`. Also hard-refresh the
+browser (`Ctrl+Shift+R`) for the web panel itself — otherwise it may serve a
+cached old JS bundle.
 
-## Изменения этого форка относительно upstream
+## What this fork changes vs. upstream
 
-### Безопасность
-- **Код входа для существующих аккаунтов больше не статичный.** Раньше
-  `TELESRV_DEV_AUTH_CODE` (дефолт `12345`, публично известный) подходил для
-  входа в **любой** аккаунт, не только для регистрации новых — это и стало
-  причиной взлома аккаунтов, из-за которого весь этот форк начался. Теперь:
-  новый номер (аккаунта ещё нет) — код по-прежнему статичный, для удобства
-  тестов; для уже существующего аккаунта — код всегда случайный и приходит
-  **в приложение** на любую другую активную сессию владельца (как в
-  настоящем Telegram при входе с нового устройства). Если у аккаунта вообще
-  нет других активных сессий и не настроена реальная SMS-доставка — войти
-  будет неоткуда получить код (это ограничение dev-режима, не баг).
-- **`contacts.importContacts` больше не сливает телефоны всех юзеров.**
-  Раньше любой аккаунт мог массово прислать пачку номеров и узнать, какие из
-  них зарегистрированы на сервере, в обход настроек приватности. Теперь
-  учитывается `PrivacyKeyAddedByPhone` («кто может найти меня по номеру») —
-  номер раскрывается, только если у цели это разрешено, или если она уже
-  есть у тебя в контактах.
+### Security
+- **Login codes for existing accounts are no longer static.** Previously
+  `TELESRV_DEV_AUTH_CODE` (default `12345`, publicly documented) worked to
+  log into **any** account, not just for new signups — that's what led to
+  the account compromise this fork started from. Now: a brand-new phone
+  number (no account yet) still gets the static code, for easy testing; an
+  **existing** account always gets a random code, delivered in-app to any
+  other active session the owner has (same as real Telegram when you log in
+  from a new device). If the account has no other active sessions and no
+  real SMS provider is configured, there's nowhere to deliver the code —
+  that's an inherent limitation of dev mode, not a bug.
+- **`contacts.importContacts` no longer leaks every user's phone number.**
+  Previously any account could bulk-submit a batch of phone numbers and
+  learn which ones were registered on the server, bypassing privacy
+  settings entirely. Now it respects `PrivacyKeyAddedByPhone` ("who can find
+  me by phone number") — a number is only revealed if the target allows it,
+  or if they're already in your contacts.
 
-### Гифты (Stars Gifts)
-- Админ может выдать существующий каталожный гифт конкретному юзеру
-  (по `user_id`/username/телефону) бесплатно — без реальной оплаты, через
-  внутреннее финансирование от системного аккаунта, так что весь платёжный
-  ledger остаётся консистентным (без отдельного «бесплатного» пути в обход
-  обычной покупки).
-- **Тираж для обычных (не только официальных) гифтов.** `0` = неограниченно,
-  но такой гифт нельзя будет потом сделать коллекционным (NFT). `>0` —
-  ограниченный тираж, отслеживается и показывается клиенту как
-  «осталось/всего», как в оригинале. Апгрейд в NFT — отдельный, более
-  поздний шаг.
-- **«Выпущен кем»** — опционально указывается юзер или канал (по ID),
-  отображается клиенту как «Выпущен @username». Обязательно проверяется, что
-  у указанного юзера/канала есть юзернейм — иначе показывать нечего.
+### Gifts (Stars Gifts)
+- An admin can grant an existing catalog gift to a specific user (by
+  `user_id`/username/phone) for free — no real payment, funded internally
+  from the system account, so the whole payment ledger stays consistent
+  (no separate "free" code path bypassing normal purchase logic).
+- **Supply limits for plain (not just official) gifts.** `0` = unlimited,
+  but such a gift can never later be upgraded to a collectible (NFT). `>0` =
+  limited supply, tracked and shown to clients as remaining/total, same as
+  the original. Upgrading to a collectible is a separate, later step.
+- **"Released by"** — optionally set a user or channel (by ID), shown to
+  clients as "Released by @username". The referenced user/channel is
+  required to already have a username — otherwise there'd be nothing to
+  display.
 
-### Коллекционные (NFT) юзернеймы
-Реализовано с нуля — раньше сервер вообще не отвечал на
-`fragment.getCollectibleInfo` (сам протокольный метод не был подключён).
+### Collectible (NFT) usernames
+Implemented from scratch — the server previously didn't respond to
+`fragment.getCollectibleInfo` at all (the protocol method itself wasn't
+wired up).
 
-Важно: коллекционный юзернейм — это **второй, дополнительный** юзернейм
-(как в реальном Telegram: `usernames: vector<Username>` с флагами
-`editable`/`active`), а не переименование существующего. Админ выдаёт юзеру
-**новую** строку юзернейма; его основной юзернейм не трогается. Владелец
-может сам переключаться между ними через `account.toggleUsername` (эта
-RPC-функция раньше во всём проекте была только заглушкой — теперь реально
-работает для юзеров; для каналов/ботов заглушка пока осталась).
+Important: a collectible username is a **second, additional** username
+(matching real Telegram: `usernames: vector<Username>` with
+`editable`/`active` flags), not a relabeling of an existing one. An admin
+issues a **new** username string to a user; their primary username is left
+untouched. The owner can switch between the two themselves via
+`account.toggleUsername` (this RPC method was previously a no-op stub across
+the whole project — now it actually works for regular users; it remains a
+stub for channels/bots).
 
-Цена/валюта (например `1000 YUT`) — чисто отображаемое поле, ничего реально
-не списывается.
+Price/currency (e.g. `1000 YUT`) is purely a display field — nothing is
+actually charged.
 
-### Метка Fake
-Админ может проставить/снять `tg.User.fake` — в клиенте показывается как
-маленькая красная плашка «FAKE» рядом с именем (не текст в описании
-профиля — так это устроено и в оригинальном Telegram).
+### Fake badge
+An admin can set/clear `tg.User.fake` — clients render it as a small red
+"FAKE" tag next to the name (not text in the profile bio — that's how real
+Telegram does it too).
 
-## Структура
+## Layout
 
 ```
-cmd/telesrv/                gramsrv — сам сервер
-cmd/telesrv-admin/          telesrv-admin — веб-панель админки (Go backend + web/ — React/TS фронтенд)
-internal/rpc/                MTProto RPC-хендлеры
-internal/admin/               Бизнес-логика админских команд
-internal/adminapi/            HTTP-обвязка (Bearer-токен) поверх internal/admin
-internal/app/                  Прикладные сервисы (users, contacts, stars, stargifts, ...)
-internal/store/postgres/       Postgres-слой
-deploy/migrations/             SQL-миграции (накатываются автоматически при старте gramsrv)
-deploy/docker-compose.yml      Postgres + Redis для разработки/прода
+cmd/telesrv/                 gramsrv — the server itself
+cmd/telesrv-admin/           telesrv-admin — admin web panel (Go backend + web/ — React/TS frontend)
+internal/rpc/                 MTProto RPC handlers
+internal/admin/                Admin command business logic
+internal/adminapi/             HTTP wrapper (Bearer token) over internal/admin
+internal/app/                   Application services (users, contacts, stars, stargifts, ...)
+internal/store/postgres/        Postgres layer
+deploy/migrations/              SQL migrations (applied automatically on gramsrv startup)
+deploy/docker-compose.yml       Postgres + Redis for dev/prod
 ```
 
-## Диагностика
+## Diagnostics
 
 ```bash
-git log --oneline -1                             # текущий коммит
-ls -la bin/gramsrv bin/telesrv-admin              # даты бинарников — свежее последнего git pull?
-screen -ls                                        # оба процесса реально подняты?
-docker compose -f deploy/docker-compose.yml ps    # postgres/redis живы?
+git log --oneline -1                             # current commit
+ls -la bin/gramsrv bin/telesrv-admin              # binary timestamps — newer than the last git pull?
+screen -ls                                        # are both processes actually up?
+docker compose -f deploy/docker-compose.yml ps    # postgres/redis alive?
 ```
 
-Проверить содержимое конкретной таблицы напрямую:
+Query a specific table directly:
 ```bash
 docker exec -it telesrv-postgres psql -U telesrv -d telesrv -c "SELECT ...;"
 ```
