@@ -1,4 +1,4 @@
-# ResendGram Server
+# NerfGram Server
 
 A fork of [owpengram/owpengram-server](https://github.com/owpengram/owpengram-server) —
 a self-hosted server compatible with the Telegram protocol (MTProto, layer 225).
