@@ -1,11 +1,14 @@
 # syntax=docker/dockerfile:1.4
 #
-# Multi-stage Dockerfile optimized for layer caching and small runtime image.
-# Requires BuildKit (DOCKER_BUILDKIT=1). Cache mounts persist apk/go caches across builds.
+# Multi-target Dockerfile (BuildKit required for cache mounts).
+#
+#   docker build --target telesrv -t telesrv-server:local .
+#   docker build --target admin  -t telesrv-admin:local .
 #
 ARG GO_VERSION=1.26
-FROM golang:${GO_VERSION}-alpine AS builder
-LABEL stage=builder
+
+# --- shared module cache / source tree -----------------------------------------
+FROM golang:${GO_VERSION}-alpine AS deps
 WORKDIR /src
 
 RUN --mount=type=cache,target=/var/cache/apk \
@@ -21,18 +24,37 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY . .
 
+# --- compile binaries ----------------------------------------------------------
+FROM deps AS build-telesrv
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /app/gramsrv ./cmd/telesrv
 
-FROM alpine:3.21
-LABEL stage=runtime
+FROM deps AS build-admin
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /app/telesrv-admin ./cmd/telesrv-admin
+
+# --- runtime images ------------------------------------------------------------
+FROM gcr.io/distroless/static:nonroot AS admin
+WORKDIR /app
+
+COPY --from=build-admin /app/telesrv-admin /app/telesrv-admin
+COPY --from=build-admin /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+VOLUME ["/app/data"]
+EXPOSE 2600/tcp
+
+USER nonroot
+ENTRYPOINT ["/app/telesrv-admin"]
+
+FROM alpine:3.21 AS telesrv
 RUN --mount=type=cache,target=/var/cache/apk \
     apk add ca-certificates ffmpeg tzdata \
     && adduser -D -u 65532 -g '' nonroot
 WORKDIR /app
 
-COPY --from=builder /app/gramsrv /app/gramsrv
+COPY --from=build-telesrv /app/gramsrv /app/gramsrv
 
 ENV TELESRV_BLOB_DIR=/app/data/blobs
 

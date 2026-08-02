@@ -92,7 +92,7 @@ func main() {
 	defer func() { _ = logger.Sync() }()
 
 	if err := run(logger); err != nil {
-		logger.Error("telesrv 退出", zap.Error(err))
+		logger.Error("telesrv exiting", zap.Error(err))
 		_ = logger.Sync() // os.Exit 跳过 defer；缓冲写需显式 flush 错误日志
 		os.Exit(1)
 	}
@@ -254,10 +254,10 @@ func startDebugServer(ctx context.Context, addr string, metricsHandler http.Hand
 
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
-		logger.Info("pprof 调试端点已启用", zap.String("addr", addr),
+		logger.Info("pprof debug endpoint enabled", zap.String("addr", addr),
 			zap.String("hint", "go tool pprof http://"+addr+"/debug/pprof/profile?seconds=30"))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Warn("pprof 端点退出", zap.Error(err))
+			logger.Warn("pprof endpoint exited", zap.Error(err))
 		}
 	}()
 	go func() {
@@ -532,7 +532,7 @@ func run(logger *zap.Logger) error {
 
 	// tg.Layer 由当前导入的 canonical schema 生成；纳入未来 Layer 后无需
 	// 在 telesrv 另维护一份常量。
-	logger.Info("telesrv 启动",
+	logger.Info("telesrv starting",
 		zap.String("listen", cfg.ListenAddr),
 		zap.Int("dc", cfg.DC),
 		zap.String("default_country_code", cfg.DefaultCountryCode),
@@ -563,7 +563,7 @@ func run(logger *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("postgres migrate: %w", err)
 	}
-	logger.Info("PostgreSQL schema 已迁移",
+	logger.Info("PostgreSQL schema migrated",
 		zap.Uint("schema_version", migrationStatus.Version),
 		zap.Bool("schema_dirty", migrationStatus.Dirty),
 		zap.Bool("schema_empty", migrationStatus.Empty),

@@ -55,6 +55,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: telesrv
       args:
         GO_VERSION: "1.26"
       cache_from:
@@ -89,7 +90,8 @@ services:
   telesrv-admin:
     build:
       context: .
-      dockerfile: Dockerfile.admin
+      dockerfile: Dockerfile
+      target: admin
       args:
         GO_VERSION: "1.26"
       cache_from:

@@ -1,0 +1,35 @@
+---
+description: Create SQL migrations whenever database schema or seed structure changes
+alwaysApply: true
+---
+
+# Database migrations required
+
+Any change that alters durable PostgreSQL structure or migration-managed seed data must ship a matching pair under `deploy/migrations/`.
+
+## When a migration is required
+
+- Adding/dropping/renaming tables, columns, indexes, constraints, or enums
+- Changing column types, defaults, or nullability that existing rows must honor
+- Inserting or updating rows that migrations own (system accounts, built-in bots, catalog seeds)
+- Renaming or splitting migration-managed data so fresh DBs and upgrades stay in sync
+
+## When a migration is not required
+
+- Pure Go/RPC/UI logic with no schema impact
+- Temporary local scratch SQL under ignored `scripts/_*.sql` paths
+- Docs-only or in-memory store changes
+
+## How to write them
+
+- Add both `YYYYMMDDHHMMSS_name.up.sql` and matching `.down.sql`
+- Use the next timestamp after the latest file in `deploy/migrations/` (do not reuse or skip versions already recorded in `schema_migrations`)
+- Prefer idempotent guards where safe (`IF NOT EXISTS` / `IF EXISTS`) for additive local forks
+- Never delete a migration that may already be applied on a running database; restore missing files instead
+- Keep Go `sqlc` queries/models in sync when columns change (or use explicit raw SQL until regenerated)
+
+## Checklist before finishing
+
+- [ ] `.up.sql` and `.down.sql` both exist for the new version
+- [ ] Fresh migrate and upgrade-from-previous both make sense
+- [ ] App code that reads/writes the new shape is updated in the same change

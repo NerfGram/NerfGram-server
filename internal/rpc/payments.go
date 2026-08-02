@@ -52,9 +52,6 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 	registerRPC[*tg.PaymentsGetStarsTransactionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsTransactions, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsTransactionsRequest) (any, error) {
 		return r.onPaymentsGetStarsTransactions(ctx, layerRequest)
 	})
-	registerRPC[*tg.PaymentsGetStarsSubscriptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsSubscriptions, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsSubscriptionsRequest) (any, error) {
-		return r.onPaymentsGetStarsSubscriptions(ctx, layerRequest)
-	})
 	registerRPC[*tg.PaymentsCheckCanSendGiftRequest](d, tlprofile.SemanticMethodPaymentsCheckCanSendGift, func(ctx context.Context, req *tg.PaymentsCheckCanSendGiftRequest) (any, error) {
 		return r.onPaymentsCheckCanSendGift(ctx, req)
 	})
