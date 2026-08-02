@@ -31,3 +31,12 @@ tmp/
 # IDE
 .idea/
 .vscode/
+
+# Accidental root npm lockfile (admin UI lockfile lives under cmd/telesrv-admin/web/)
+/package-lock.json
+
+# Local scratch / debug dumps under scripts/
+scripts/_q.sql
+scripts/_dump_*
+scripts/_svc_*
+scripts/_service_*
