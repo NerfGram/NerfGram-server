@@ -43,6 +43,9 @@ type UserStore interface {
 	UpdateBirthday(ctx context.Context, userID int64, birthday domain.Birthday) (domain.User, error)
 	// UpdatePersonalChannel 设置/清除资料页个人频道（channelID=0 表示清除）。
 	UpdatePersonalChannel(ctx context.Context, userID int64, channelID int64) (domain.User, error)
+	// ListBroadcastRecipientIDs returns non-deleted human user ids suitable for
+	// service-notification fan-out (excludes bots and built-in system accounts).
+	ListBroadcastRecipientIDs(ctx context.Context) ([]int64, error)
 }
 
 // UserEmojiStatusEventStore is the aggregate write boundary used by the

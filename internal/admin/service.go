@@ -81,6 +81,9 @@ const (
 	maxPremiumMonths         = 120
 	maxStarsGrant            = 1_000_000_000
 	maxFreezeAppealURLLength = 2048
+	// defaultOfficialCollectibleSupply is used when an official NFT snapshot has
+	// no availability_total. Local collectible publish still requires supply > 0.
+	defaultOfficialCollectibleSupply = 100_000
 	// maxAccountRatingAdjustment bounds one manual rating adjustment in either
 	// direction. The domain only rejects a zero delta, so the operator-facing
 	// bound lives here next to the other grant limits.
@@ -2573,6 +2576,11 @@ func (s *Service) ImportOfficialStarGift(ctx context.Context, req ImportOfficial
 	}
 	if req.SupplyTotal <= 0 {
 		req.SupplyTotal = bundle.Gift.AvailabilityTotal
+	}
+	// Official snapshot NFT gifts often omit availability_total (sold-out /
+	// unlimited-upgrade catalogs). Collectible publish still needs a local supply.
+	if req.IncludeCollectible && req.SupplyTotal <= 0 {
+		req.SupplyTotal = defaultOfficialCollectibleSupply
 	}
 	if req.SlugPrefix = strings.ToLower(strings.TrimSpace(req.SlugPrefix)); req.SlugPrefix == "" {
 		req.SlugPrefix = "official-" + req.SourceGiftID

@@ -22,6 +22,8 @@ __pycache__/
 /data/*
 !/data/langpack/
 !/data/langpack/**
+!/data/official-gifts/
+!/data/official-gifts/**
 logs/
 tmp/
 .gocache/

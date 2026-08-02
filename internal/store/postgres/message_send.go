@@ -102,6 +102,7 @@ WITH desired (
 INSERT INTO peer_usernames (username_lower, username, peer_type, peer_id, active, editable, sort_order)
 SELECT lower(username), username, 'user', id, true, true, 0
 FROM desired
+WHERE COALESCE(username, '') <> ''
 ON CONFLICT (peer_type, peer_id) WHERE editable DO UPDATE SET
 	username_lower = EXCLUDED.username_lower,
 	username = EXCLUDED.username,

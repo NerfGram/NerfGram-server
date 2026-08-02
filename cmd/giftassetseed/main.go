@@ -39,25 +39,42 @@ var classicGiftIDs = []int64{
 	5170690322832818290,
 }
 
-var nftGiftIDs = []int64{
-	6005564615793050414,
-	5870972044522291836,
-	5936013938331222567,
-	5936017773737018241,
+// durovGiftIDs are excluded from the local catalog and collectible imports.
+var durovGiftIDs = map[int64]struct{}{
+	5915521180483191380: {}, // Durov's Cap
+	5834651202612102354: {}, // Durov's Glasses
+	6003477390536213997: {}, // Durov's Figurine
+	6001229799790478558: {}, // Durov's Boots
+	6001425315291727333: {}, // Durov's Coat
 }
 
 type giftsDetails struct {
 	Upgraded []struct {
+		FullName  string `json:"full_name"`
 		ShortName string `json:"short_name"`
 		RegularID string `json:"regular_id"`
 	} `json:"upgraded"`
+	Unupgraded []struct {
+		FullName  string `json:"full_name"`
+		ShortName string `json:"short_name"`
+		ID        string `json:"id"`
+	} `json:"unupgraded"`
+}
+
+func isDurovGift(id int64, shortName, fullName string) bool {
+	if _, ok := durovGiftIDs[id]; ok {
+		return true
+	}
+	name := strings.ToLower(shortName + " " + fullName)
+	return strings.Contains(name, "durov")
 }
 
 type modelAsset struct {
-	Name    string  `json:"name"`
-	ModelID string  `json:"model_id"`
-	TGSPath string  `json:"tgs_path"`
-	Rarity  float64 `json:"rarity_permille"`
+	Name               string  `json:"name"`
+	ModelID            string  `json:"model_id"`
+	TelegramDocumentID string  `json:"telegram_document_id"`
+	TGSPath            string  `json:"tgs_path"`
+	Rarity             float64 `json:"rarity_permille"`
 }
 
 type rarityManifest struct {
@@ -141,26 +158,36 @@ type fileArtifact struct {
 func main() {
 	out := flag.String("out", "data/official-gifts", "official gifts directory")
 	cdn := flag.String("cdn", defaultCDN, "TelegramGiftsAssests CDN base URL")
+	assets := flag.String("assets", "data/telegram-gifts-assets", "local TelegramGiftsAssests checkout (optional)")
 	flag.Parse()
-	if err := run(strings.TrimRight(*cdn, "/"), filepath.Clean(*out)); err != nil {
+	if err := run(strings.TrimRight(*cdn, "/"), filepath.Clean(*out), filepath.Clean(*assets)); err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(1)
 	}
 }
 
-func run(cdnBase, outDir string) error {
+func run(cdnBase, outDir, assetsDir string) error {
 	client := &http.Client{Timeout: 2 * time.Minute}
-	details, err := fetchGiftsDetails(client, cdnBase)
+	details, err := fetchGiftsDetails(client, cdnBase, assetsDir)
 	if err != nil {
 		return err
 	}
 	shortByGift := map[int64]string{}
 	for _, item := range details.Upgraded {
 		id, err := strconv.ParseInt(item.RegularID, 10, 64)
-		if err != nil || id <= 0 {
+		if err != nil || id <= 0 || isDurovGift(id, item.ShortName, item.FullName) {
 			continue
 		}
 		shortByGift[id] = item.ShortName
+	}
+	for _, item := range details.Unupgraded {
+		id, err := strconv.ParseInt(item.ID, 10, 64)
+		if err != nil || id <= 0 {
+			continue
+		}
+		if isDurovGift(id, item.ShortName, item.FullName) {
+			durovGiftIDs[id] = struct{}{}
+		}
 	}
 
 	catalog, catalogArtifact, err := loadCatalog(outDir)
@@ -168,9 +195,10 @@ func run(cdnBase, outDir string) error {
 		return err
 	}
 	giftDoc := map[int64]int64{}
+	upgradeable := make([]int64, 0, len(catalog.Gifts))
 	for _, class := range catalog.Gifts {
 		gift, ok := class.(*tg.StarGift)
-		if !ok {
+		if !ok || isDurovGift(gift.ID, "", gift.Title) {
 			continue
 		}
 		doc, ok := gift.Sticker.(*tg.Document)
@@ -178,37 +206,39 @@ func run(cdnBase, outDir string) error {
 			continue
 		}
 		giftDoc[gift.ID] = doc.ID
+		if gift.UpgradeStars > 0 || gift.UpgradeVariants > 0 {
+			upgradeable = append(upgradeable, gift.ID)
+		}
 	}
 
 	downloaded := 0
+	seedBaseIDs := make(map[int64]struct{}, len(classicGiftIDs)+len(upgradeable))
 	for _, giftID := range classicGiftIDs {
+		seedBaseIDs[giftID] = struct{}{}
+	}
+	for _, giftID := range upgradeable {
+		seedBaseIDs[giftID] = struct{}{}
+	}
+	for giftID := range seedBaseIDs {
 		docID := giftDoc[giftID]
 		if docID == 0 {
 			fmt.Printf("[skip base] gift=%d missing from catalog.tl\n", giftID)
 			continue
 		}
 		if ok, err := seedBase(client, cdnBase, outDir, giftID, docID); err != nil {
-			return err
+			fmt.Printf("[warn base] gift=%d: %v\n", giftID, err)
+			continue
 		} else if ok {
 			downloaded++
 		}
 	}
-	for _, giftID := range nftGiftIDs {
-		docID := giftDoc[giftID]
-		if docID == 0 {
-			fmt.Printf("[skip base] gift=%d missing from catalog.tl\n", giftID)
-			continue
-		}
-		if ok, err := seedBase(client, cdnBase, outDir, giftID, docID); err != nil {
-			return err
-		} else if ok {
-			downloaded++
-		}
+	for _, giftID := range upgradeable {
 		short := shortByGift[giftID]
 		if short == "" {
+			fmt.Printf("[skip models] gift=%d missing short_name in Gifts_Details\n", giftID)
 			continue
 		}
-		n, err := seedModels(client, cdnBase, outDir, short, giftID)
+		n, err := seedModels(client, cdnBase, assetsDir, outDir, short, giftID)
 		if err != nil {
 			return err
 		}
@@ -231,8 +261,15 @@ func run(cdnBase, outDir string) error {
 	return nil
 }
 
-func fetchGiftsDetails(client *http.Client, cdnBase string) (giftsDetails, error) {
+func fetchGiftsDetails(client *http.Client, cdnBase, assetsDir string) (giftsDetails, error) {
 	var details giftsDetails
+	local := filepath.Join(assetsDir, "Gifts_Details.json")
+	if raw, err := os.ReadFile(local); err == nil {
+		if err := json.Unmarshal(raw, &details); err != nil {
+			return details, fmt.Errorf("decode %s: %w", local, err)
+		}
+		return details, nil
+	}
 	if err := downloadJSON(client, cdnBase+"/Gifts_Details.json", &details); err != nil {
 		return details, err
 	}
@@ -248,7 +285,7 @@ func seedBase(client *http.Client, cdnBase, outDir string, giftID, docID int64) 
 	return true, downloadDocument(client, url, dest, docID)
 }
 
-func seedModels(client *http.Client, cdnBase, outDir, shortName string, giftID int64) (int, error) {
+func seedModels(client *http.Client, cdnBase, assetsDir, outDir, shortName string, giftID int64) (int, error) {
 	needed, err := missingModelNames(outDir, giftID)
 	if err != nil {
 		return 0, err
@@ -257,17 +294,29 @@ func seedModels(client *http.Client, cdnBase, outDir, shortName string, giftID i
 		return 0, nil
 	}
 	var models []modelAsset
-	if err := downloadJSON(client, fmt.Sprintf("%s/models/%s/config.json", cdnBase, shortName), &models); err != nil {
+	localConfig := filepath.Join(assetsDir, "models", shortName, "config.json")
+	if raw, err := os.ReadFile(localConfig); err == nil {
+		if err := json.Unmarshal(raw, &models); err != nil {
+			return 0, fmt.Errorf("decode %s: %w", localConfig, err)
+		}
+	} else if err := downloadJSON(client, fmt.Sprintf("%s/models/%s/config.json", cdnBase, shortName), &models); err != nil {
 		return 0, fmt.Errorf("models config %s: %w", shortName, err)
 	}
 	byID := map[string]string{}
 	byName := map[string]string{}
 	for _, model := range models {
-		if model.ModelID != "" && model.TGSPath != "" {
-			byID[model.ModelID] = model.TGSPath
+		path := strings.TrimSpace(model.TGSPath)
+		if path == "" {
+			continue
 		}
-		if model.Name != "" && model.TGSPath != "" {
-			byName[normalizeName(model.Name)] = model.TGSPath
+		if model.TelegramDocumentID != "" {
+			byID[model.TelegramDocumentID] = path
+		}
+		if model.ModelID != "" {
+			byID[model.ModelID] = path
+		}
+		if model.Name != "" {
+			byName[normalizeName(model.Name)] = path
 		}
 	}
 	count := 0
@@ -284,6 +333,12 @@ func seedModels(client *http.Client, cdnBase, outDir, shortName string, giftID i
 		} else {
 			tgsPath = fmt.Sprintf("models/%s/%s.tgs", shortName, slugFileName(name))
 		}
+		if copied, err := copyLocalAsset(assetsDir, tgsPath, dest, docID); err != nil {
+			fmt.Printf("[warn model] %s doc=%d local=%s: %v\n", name, docID, tgsPath, err)
+		} else if copied {
+			count++
+			continue
+		}
 		url := cdnBase + "/" + strings.TrimPrefix(tgsPath, "/")
 		if err := downloadDocument(client, url, dest, docID); err != nil {
 			fmt.Printf("[warn model] %s doc=%d url=%s: %v\n", name, docID, url, err)
@@ -291,8 +346,30 @@ func seedModels(client *http.Client, cdnBase, outDir, shortName string, giftID i
 		}
 		count++
 	}
-	fmt.Printf("[models] %s downloaded=%d\n", shortName, count)
+	fmt.Printf("[models] %s downloaded=%d still_missing=%d\n", shortName, count, len(needed)-count)
 	return count, nil
+}
+
+func copyLocalAsset(assetsDir, relPath, dest string, docID int64) (bool, error) {
+	if assetsDir == "" || assetsDir == "." {
+		return false, nil
+	}
+	src := filepath.Join(assetsDir, filepath.FromSlash(relPath))
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return false, nil
+	}
+	validator := &stargiftapp.Service{}
+	if _, err := validator.PrepareOfficialAnimation(fmt.Sprintf("%d.tgs", docID), data); err != nil {
+		return false, fmt.Errorf("invalid tgs: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return false, err
+	}
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func missingModelNames(outDir string, giftID int64) (map[int64]string, error) {
@@ -397,7 +474,7 @@ func rebuildManifest(outDir string, catalog *tg.PaymentsStarGifts, catalogArtifa
 
 	for index, class := range catalog.Gifts {
 		gift, ok := class.(*tg.StarGift)
-		if !ok || gift.ID <= 0 || gift.Stars <= 0 {
+		if !ok || gift.ID <= 0 || gift.Stars <= 0 || isDurovGift(gift.ID, "", gift.Title) {
 			continue
 		}
 		doc, ok := gift.Sticker.(*tg.Document)
@@ -429,14 +506,16 @@ func rebuildManifest(outDir string, catalog *tg.PaymentsStarGifts, catalogArtifa
 			continue
 		}
 		giftID, err := strconv.ParseInt(strings.TrimSuffix(entry.Name(), ".tl"), 10, 64)
-		if err != nil || giftID <= 0 {
+		if err != nil || giftID <= 0 || isDurovGift(giftID, "", "") {
 			continue
 		}
 		set, needed, err := loadUpgradeSet(outDir, giftID)
 		if err != nil {
 			return manifest, err
 		}
-		if !setComplete(outDir, needed) {
+		set = filterPresentAttributes(outDir, set)
+		needed = attributeDocumentIDs(set)
+		if !setImportable(set) || !setComplete(outDir, needed) {
 			continue
 		}
 		for id := range needed {
@@ -547,6 +626,66 @@ func setComplete(outDir string, needed map[int64]struct{}) bool {
 		}
 	}
 	return true
+}
+
+func filterPresentAttributes(outDir string, set upgradeSetManifest) upgradeSetManifest {
+	models := make([]modelEntry, 0, len(set.Models))
+	for _, model := range set.Models {
+		if documentExists(outDir, model.DocumentID) {
+			models = append(models, model)
+		}
+	}
+	patterns := make([]patternEntry, 0, len(set.Patterns))
+	for _, pattern := range set.Patterns {
+		if documentExists(outDir, pattern.DocumentID) {
+			patterns = append(patterns, pattern)
+		}
+	}
+	set.Models = models
+	set.Patterns = patterns
+	set.AttributeCount = len(set.Models) + len(set.Patterns) + len(set.Backdrops)
+	return set
+}
+
+func attributeDocumentIDs(set upgradeSetManifest) map[int64]struct{} {
+	needed := make(map[int64]struct{}, len(set.Models)+len(set.Patterns))
+	for _, model := range set.Models {
+		needed[model.DocumentID] = struct{}{}
+	}
+	for _, pattern := range set.Patterns {
+		needed[pattern.DocumentID] = struct{}{}
+	}
+	return needed
+}
+
+// setImportable mirrors domain collectible draft requirements closely enough for
+// official imports: at least two selectable (permille) models, patterns and backdrops.
+func setImportable(set upgradeSetManifest) bool {
+	selectable := func(kind string) int {
+		n := 0
+		switch kind {
+		case "model":
+			for _, m := range set.Models {
+				if m.Rarity.Kind == "permille" && !m.Crafted {
+					n++
+				}
+			}
+		case "pattern":
+			for _, p := range set.Patterns {
+				if p.Rarity.Kind == "permille" {
+					n++
+				}
+			}
+		case "backdrop":
+			for _, b := range set.Backdrops {
+				if b.Rarity.Kind == "permille" {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	return selectable("model") >= 2 && selectable("pattern") >= 2 && selectable("backdrop") >= 2
 }
 
 func documentExists(outDir string, id int64) bool {

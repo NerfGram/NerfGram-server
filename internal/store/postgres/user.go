@@ -662,6 +662,35 @@ func (s *UserStore) UpdatePersonalChannel(ctx context.Context, userID int64, cha
 	return userFromModel(row), nil
 }
 
+// ListBroadcastRecipientIDs returns non-deleted human accounts for service
+// notification fan-out. Built-in system ids and bots are excluded.
+func (s *UserStore) ListBroadcastRecipientIDs(ctx context.Context) ([]int64, error) {
+	systemIDs := domain.SystemUserIDs()
+	rows, err := s.db.Query(ctx, `
+SELECT id
+FROM users
+WHERE deleted_at IS NULL
+  AND is_bot = false
+  AND NOT (id = ANY($1::bigint[]))
+ORDER BY id`, systemIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list broadcast recipient ids: %w", err)
+	}
+	defer rows.Close()
+	out := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan broadcast recipient id: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate broadcast recipient ids: %w", err)
+	}
+	return out, nil
+}
+
 func (s *UserStore) UpdateColor(ctx context.Context, userID int64, forProfile bool, color domain.PeerColor) (domain.User, error) {
 	if forProfile {
 		row, err := s.q.UpdateUserProfileColor(ctx, sqlcgen.UpdateUserProfileColorParams{

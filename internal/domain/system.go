@@ -53,6 +53,13 @@ const (
 	// VerifierBotAccessHash is fixed and double-written with the seed row in
 	// migration 0156; the two must never drift.
 	VerifierBotAccessHash int64 = 6913402578811563729
+
+	// BroadcastBotUserID is the built-in @BroadcastBot: after password auth it
+	// fans out every inbound private message as a 777000 service notification.
+	BroadcastBotUserID int64 = 1250000014
+	// BroadcastBotAccessHash is fixed and double-written with the seed migration;
+	// the two must never drift.
+	BroadcastBotAccessHash int64 = 5918472036589120471
 )
 
 // officialSystemUserPhotoDCID/Stripped 由 files.Service.SeedOfficialSystemAvatar
@@ -184,6 +191,19 @@ func VerifierBotUser() User {
 	}
 }
 
+// BroadcastBotUser returns the built-in @BroadcastBot account.
+func BroadcastBotUser() User {
+	return User{
+		ID:             BroadcastBotUserID,
+		AccessHash:     BroadcastBotAccessHash,
+		FirstName:      branding.ProductName + " Broadcast",
+		Username:       "BroadcastBot",
+		Verified:       true,
+		Bot:            true,
+		BotInfoVersion: 1,
+	}
+}
+
 // SystemUserByID 返回内置系统账号；非系统账号返回 ok=false。
 // 所有对 777000 的硬编码注入点统一经此函数，新增内置账号只改这里。
 func SystemUserByID(id int64) (User, bool) {
@@ -202,6 +222,8 @@ func SystemUserByID(id int64) (User, bool) {
 		return VerifyBotUser(), true
 	case VerifierBotUserID:
 		return VerifierBotUser(), true
+	case BroadcastBotUserID:
+		return BroadcastBotUser(), true
 	}
 	return User{}, false
 }
@@ -225,6 +247,7 @@ func SystemUserIDs() []int64 {
 		StarsTestBotUserID,
 		VerifyBotUserID,
 		VerifierBotUserID,
+		BroadcastBotUserID,
 	}
 }
 

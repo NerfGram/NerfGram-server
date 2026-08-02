@@ -28,6 +28,18 @@ func (s *MessageStore) DeliverSystemInboxMessage(ctx context.Context, msg domain
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("encode system inbox entities: %w", err)
 	}
+	mediaJSON, err := encodeMessageMedia(msg.Media)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("encode system inbox media: %w", err)
+	}
+	replyMarkupJSON, err := encodeReplyMarkup(msg.ReplyMarkup)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("encode system inbox reply markup: %w", err)
+	}
+	richMessageJSON, err := encodeRichMessage(msg.RichMessage)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("encode system inbox rich message: %w", err)
+	}
 
 	beginner, ok := s.db.(txBeginner)
 	if !ok {
@@ -62,9 +74,13 @@ func (s *MessageStore) DeliverSystemInboxMessage(ctx context.Context, msg domain
 		RecipientDelivered: true,
 		EntitiesJson:       entitiesJSON,
 		QuoteEntitiesJson:  []byte("[]"),
-		MediaJson:          []byte("{}"),
-		ReplyMarkupJson:    []byte("{}"),
-		RichMessageJson:    []byte("{}"),
+		MediaJson:          mediaJSON,
+		ReplyMarkupJson:    replyMarkupJSON,
+		RichMessageJson:    richMessageJSON,
+		GroupedID:          msg.GroupedID,
+		Effect:             msg.Effect,
+		Silent:             msg.Silent,
+		Noforwards:         msg.NoForwards,
 	})
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("create system inbox private message: %w", err)
@@ -93,9 +109,14 @@ func (s *MessageStore) DeliverSystemInboxMessage(ctx context.Context, msg domain
 		EntitiesJson:      entitiesJSON,
 		QuoteEntitiesJson: []byte("[]"),
 		Pts:               int32(pts),
-		MediaJson:         []byte("{}"),
-		ReplyMarkupJson:   []byte("{}"),
-		RichMessageJson:   []byte("{}"),
+		MediaJson:         mediaJSON,
+		MediaUnread:       msg.MediaUnread || !msg.Media.IsZero(),
+		ReplyMarkupJson:   replyMarkupJSON,
+		RichMessageJson:   richMessageJSON,
+		GroupedID:         msg.GroupedID,
+		Effect:            msg.Effect,
+		Silent:            msg.Silent,
+		Noforwards:        msg.NoForwards,
 	})
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("create system inbox recipient box: %w", err)

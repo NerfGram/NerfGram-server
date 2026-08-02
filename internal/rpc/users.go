@@ -332,7 +332,15 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 			r.applyBusinessProfileToUserFull(ctx, &full, profile)
 		}
 	}
-	r.applyStarsRatingToUserFull(ctx, u.ID, &full)
+	// Prefer the composite account rating when wired. Falling through to the
+	// spent-stars projection only when AccountRatings is unset avoids writing a
+	// spent-based badge that would remain visible after a zero composite score
+	// is intentionally suppressed.
+	if r.deps.AccountRatings != nil {
+		r.applyAccountRatingToUserFull(ctx, currentUserID, u, &full)
+	} else {
+		r.applyStarsRatingToUserFull(ctx, u, &full)
+	}
 	if r.deps.Messages != nil {
 		// 置顶发现链路：userFull.pinned_msg_id 是该私聊（含 Saved
 		// Messages）当前最顶置顶；客户端凭此触发 filterPinned 搜索。
@@ -390,7 +398,6 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 			full.SetBirthday(tgBirthday(u.Birthday))
 		}
 	}
-	r.applyAccountRatingToUserFull(ctx, currentUserID, u, &full)
 	// 个人频道（account.updatePersonalChannel）不在此落地：它按 viewer 实时解析，作为缓存后的
 	// overlay 处理（applyPersonalChannelToUserFull），避免烤进 per-(viewer,target) 投影缓存以及
 	// build/chats 两次解析同一频道。
@@ -455,13 +462,19 @@ func (r *Router) userFullPrivacyVisibility(ctx context.Context, viewerUserID, ow
 // worker/admin paths.
 func (r *Router) applyAccountRatingToUserFull(ctx context.Context, viewerUserID int64, target domain.User, full *tg.UserFull) {
 	targetUserID := target.ID
-	if r.deps.AccountRatings == nil || full == nil || !domain.RatableAccount(targetUserID, target.Bot) {
+	// Support accounts and non-ratable peers never carry a visible rating badge.
+	if r.deps.AccountRatings == nil || full == nil || target.Support || !domain.RatableAccount(targetUserID, target.Bot) {
 		return
 	}
 	rating, err := r.deps.AccountRatings.Rating(ctx, targetUserID)
 	if err != nil {
 		// Missing, disabled and temporarily unavailable projections all preserve
 		// the legacy wire shape instead of failing the surrounding profile read.
+		return
+	}
+	// A zero score (exactly 0 — neither positive nor negative) is withheld so
+	// clients do not render an empty level-0 badge on every fresh account.
+	if rating.Stars == 0 {
 		return
 	}
 	full.SetStarsRating(tgAccountRatingLevel(rating.LevelSnapshot()))
@@ -926,11 +939,11 @@ func (r *Router) userFromInput(ctx context.Context, currentUserID int64, id tg.I
 	}
 }
 
-func (r *Router) applyStarsRatingToUserFull(ctx context.Context, userID int64, full *tg.UserFull) {
-	if full == nil || userID == 0 || r.deps.Stars == nil {
+func (r *Router) applyStarsRatingToUserFull(ctx context.Context, user domain.User, full *tg.UserFull) {
+	if full == nil || user.ID == 0 || user.Support || r.deps.Stars == nil {
 		return
 	}
-	spent, err := r.deps.Stars.TotalSpent(ctx, userID)
+	spent, err := r.deps.Stars.TotalSpent(ctx, user.ID)
 	if err != nil || spent <= 0 {
 		return
 	}

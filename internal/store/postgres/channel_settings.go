@@ -563,6 +563,10 @@ func (s *ChannelStore) SetSignatures(ctx context.Context, userID, channelID int6
 		return domain.Channel{}, fmt.Errorf("update channel signatures: %w", err)
 	}
 	channel.Signatures = enabled
+	// Invalidate in-process row cache so readers observe the new signatures flag.
+	if s.rowCache != nil {
+		s.rowCache.delete(channelID)
+	}
 	if prev != enabled {
 		if err := s.insertChannelAdminLogTx(ctx, tx, domain.ChannelAdminLogEvent{
 			ChannelID: channelID,

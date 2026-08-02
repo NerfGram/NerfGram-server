@@ -63,6 +63,7 @@ func NewBotStore(users *UserStore) *BotStore {
 	s.byID[domain.StickersBotUserID] = stickersSeedProfile()
 	s.byID[domain.ChatBotUserID] = chatBotSeedProfile()
 	s.byID[domain.StarsTestBotUserID] = starsTestBotSeedProfile()
+	s.byID[domain.BroadcastBotUserID] = broadcastBotSeedProfile()
 	return s
 }
 
@@ -128,6 +129,19 @@ func starsTestBotSeedProfile() domain.BotProfile {
 			{Command: "help", Description: "show help"},
 			{Command: "grant", Description: "credit Stars to your balance"},
 			{Command: "paidlink", Description: "export a paid invite for a channel you admin"},
+		},
+	}
+}
+
+func broadcastBotSeedProfile() domain.BotProfile {
+	return domain.BotProfile{
+		BotUserID:   domain.BroadcastBotUserID,
+		OwnerUserID: domain.BroadcastBotUserID,
+		Description: "Password-gated broadcast to all users via service notifications.",
+		Commands: []domain.BotCommand{
+			{Command: "start", Description: "request the broadcast password"},
+			{Command: "help", Description: "show help"},
+			{Command: "logout", Description: "clear password verification"},
 		},
 	}
 }

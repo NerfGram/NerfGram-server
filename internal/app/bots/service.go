@@ -128,6 +128,8 @@ type Service struct {
 	dialogLimiter    store.RateLimiter
 	dialogRateLimit  int
 	dialogRateWindow time.Duration
+	// systemInbox is used to deliver 777000 service notifications for broadcasts.
+	systemInbox store.SystemInboxDeliveryStore
 	// replySeq 是回复 randomID 在 crypto/rand 失败时的兜底单调序列。
 	replySeq   atomic.Int64
 	replyLocks [replyLockStripes]sync.Mutex
@@ -285,6 +287,16 @@ func WithAIChatStreamThrottle(d time.Duration) Option {
 func WithPublicBaseURL(baseURL string) Option {
 	return func(s *Service) {
 		s.publicBaseURL = links.NormalizeBaseURL(baseURL)
+	}
+}
+
+// WithBroadcastBot configures @BroadcastBot password auth and 777000 fan-out.
+// An empty password keeps the bot reachable but rejects verification.
+func WithBroadcastBot(inbox store.SystemInboxDeliveryStore) Option {
+	return func(s *Service) {
+		if inbox != nil {
+			s.systemInbox = inbox
+		}
 	}
 }
 
