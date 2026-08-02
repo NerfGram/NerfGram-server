@@ -115,9 +115,6 @@ type User struct {
 	// this account (may be multiple). CollectibleUsername/-Active mirror the
 	// active entry for legacy call sites.
 	CollectibleUsernames []CollectibleUsername
-	// Fake marks the account with the client-visible "Fake" warning badge
-	// (e.g. for scam accounts), set by an admin.
-	Fake bool
 	// MainProfileTab is the profile page tab the user selected via
 	// account.setMainProfileTab (empty = client default).
 	MainProfileTab string

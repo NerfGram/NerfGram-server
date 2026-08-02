@@ -52,6 +52,7 @@ type GatewayService interface {
 	BotAPIDeleteMessage(ctx context.Context, botID, chatID int64, messageID int) (bool, error)
 	BotAPIAnswerCallbackQuery(ctx context.Context, botID int64, callbackQueryID, text, url string, showAlert bool, cacheTime int) (bool, error)
 	BotAPIGetFile(ctx context.Context, botID int64, locationKey string, offset int64, limit int) (domain.FileChunk, bool, error)
+	BotAPISendChatAction(ctx context.Context, botID, chatID int64, action string) (bool, error)
 }
 
 type EphemeralGatewayService interface {
@@ -251,6 +252,8 @@ func (h *handler) handle(w http.ResponseWriter, r *http.Request) {
 		h.answerCallbackQuery(w, r, botID)
 	case "getfile":
 		h.getFile(w, r, botID)
+	case "sendchataction":
+		h.sendChatAction(w, r, botID)
 	case "deletewebhook":
 		h.deleteWebhook(w, r, botID)
 	case "getwebhookinfo":
@@ -855,6 +858,34 @@ func (h *handler) deleteMessage(w http.ResponseWriter, r *http.Request, botID in
 		return
 	}
 	ok, err := h.gateway.BotAPIDeleteMessage(r.Context(), botID, chatID, messageID)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, apiErrorDescription(err))
+		return
+	}
+	writeAPIOK(w, ok)
+}
+
+func (h *handler) sendChatAction(w http.ResponseWriter, r *http.Request, botID int64) {
+	if h.gateway == nil {
+		writeAPIError(w, http.StatusNotImplemented, "METHOD_NOT_FOUND")
+		return
+	}
+	values, err := requestValues(r)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "BAD_REQUEST")
+		return
+	}
+	chatID, err := strconv.ParseInt(strings.TrimSpace(values["chat_id"]), 10, 64)
+	if err != nil || chatID == 0 {
+		writeAPIError(w, http.StatusBadRequest, "CHAT_ID_INVALID")
+		return
+	}
+	action := strings.TrimSpace(values["action"])
+	if action == "" {
+		writeAPIError(w, http.StatusBadRequest, "ACTION_INVALID")
+		return
+	}
+	ok, err := h.gateway.BotAPISendChatAction(r.Context(), botID, chatID, action)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, apiErrorDescription(err))
 		return

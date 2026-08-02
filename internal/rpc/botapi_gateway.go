@@ -289,6 +289,79 @@ func (r *Router) BotAPISendRichMessage(ctx context.Context, botID, chatID int64,
 	return res.SenderMessage, nil
 }
 
+// BotAPISendChatAction pushes a typing-style indicator (e.g. "typing",
+// "upload_photo") to a chat, the same way messages.setTyping does at the
+// MTProto layer, just addressed by botID/chatID instead of a session.
+func (r *Router) BotAPISendChatAction(ctx context.Context, botID, chatID int64, action string) (bool, error) {
+	if r == nil || botID == 0 {
+		return false, errors.New("BOT_INVALID")
+	}
+	peer, ok := botAPIPeerFromChatID(chatID)
+	if !ok {
+		return false, errors.New("CHAT_ID_INVALID")
+	}
+	tlAction := botAPIChatActionToTL(action)
+	if peer.Type == domain.PeerTypeChannel {
+		if peer.ID == 0 {
+			return false, errors.New("CHAT_ID_INVALID")
+		}
+		updates := &tg.Updates{
+			Updates: []tg.UpdateClass{&tg.UpdateChannelUserTyping{
+				ChannelID: peer.ID,
+				FromID:    &tg.PeerUser{UserID: botID},
+				Action:    tlAction,
+			}},
+			Date: int(r.clock.Now().Unix()),
+		}
+		r.pushChannelViewerUpdates(ctx, 0, peer.ID, nil, func(int64) *tg.Updates { return updates })
+		return true, nil
+	}
+	if peer.Type != domain.PeerTypeUser || peer.ID == 0 || peer.ID == botID {
+		return false, errors.New("CHAT_ID_INVALID")
+	}
+	r.pushUserUpdates(ctx, peer.ID, &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateUserTyping{
+			UserID: botID,
+			Action: tlAction,
+		}},
+		Date: int(r.clock.Now().Unix()),
+	})
+	return true, nil
+}
+
+// botAPIChatActionToTL maps the Bot API's chat_action strings to the
+// matching MTProto SendMessageAction. Unrecognized values fall back to
+// "typing" rather than erroring, since new action strings get added to the
+// Bot API over time and a missing one shouldn't break the call.
+func botAPIChatActionToTL(action string) tg.SendMessageActionClass {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "upload_photo":
+		return &tg.SendMessageUploadPhotoAction{}
+	case "record_video":
+		return &tg.SendMessageRecordVideoAction{}
+	case "upload_video":
+		return &tg.SendMessageUploadVideoAction{}
+	case "record_voice", "record_audio":
+		return &tg.SendMessageRecordAudioAction{}
+	case "upload_voice", "upload_audio":
+		return &tg.SendMessageUploadAudioAction{}
+	case "upload_document":
+		return &tg.SendMessageUploadDocumentAction{}
+	case "find_location":
+		return &tg.SendMessageGeoLocationAction{}
+	case "choose_sticker":
+		return &tg.SendMessageChooseStickerAction{}
+	case "record_video_note":
+		return &tg.SendMessageRecordRoundAction{}
+	case "upload_video_note":
+		return &tg.SendMessageUploadRoundAction{}
+	case "cancel":
+		return &tg.SendMessageCancelAction{}
+	default:
+		return &tg.SendMessageTypingAction{}
+	}
+}
+
 // BotAPISendMedia sends a photo/document message through the same files service
 // and private/channel message state machines used by MTProto sendMedia.
 func (r *Router) BotAPISendMedia(ctx context.Context, botID, chatID int64, kind, locationKey, remoteURL, fileName, mimeType string, fileBytes []byte, caption string, entities []domain.MessageEntity, replyMarkup *domain.MessageReplyMarkup, silent bool, replyToMessageID int) (domain.Message, error) {
