@@ -1,0 +1,14 @@
+---
+description: Never run, modify, or touch tests in this project
+alwaysApply: true
+---
+
+# No tests
+
+Never run, modify, create, delete, or refactor tests in any way.
+
+- Do not run `go test`, `./gradlew test`, or any other test command
+- Do not edit `*_test.go`, `*Test.java`, `*Tests.kt`, or fixtures under `testdata/` / `__tests__/`
+- Do not add assertions, mocks, or coverage for changes you make
+- If a change would normally require updating a test, leave the test alone and only change production code
+- Prefer verifying with builds, manual checks, or reading code — not the test suite

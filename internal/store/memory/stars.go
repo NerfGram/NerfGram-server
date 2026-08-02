@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"telesrv/internal/domain"
@@ -19,6 +20,7 @@ type starsState struct {
 	balance int64
 	granted bool
 	txns    []domain.StarsTransaction // 追加序，读时倒序
+	subs    map[int64]domain.StarsSubscription
 }
 
 // NewStarsStore 创建内存 StarsStore。
@@ -159,6 +161,43 @@ func (s *StarsStore) TotalSpent(_ context.Context, userID int64) (int64, error) 
 		}
 	}
 	return spent, nil
+}
+
+func (s *StarsStore) ListSubscriptions(_ context.Context, userID int64) ([]domain.StarsSubscription, error) {
+	if userID == 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.states[userID]
+	if st == nil || len(st.subs) == 0 {
+		return nil, nil
+	}
+	out := make([]domain.StarsSubscription, 0, len(st.subs))
+	for _, sub := range st.subs {
+		out = append(out, sub)
+	}
+	return out, nil
+}
+
+func (s *StarsStore) UpsertSubscription(_ context.Context, sub domain.StarsSubscription) {
+	if sub.UserID == 0 || sub.ChannelID == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.states[sub.UserID]
+	if st == nil {
+		st = &starsState{}
+		s.states[sub.UserID] = st
+	}
+	if st.subs == nil {
+		st.subs = make(map[int64]domain.StarsSubscription)
+	}
+	if sub.ID == "" {
+		sub.ID = fmt.Sprintf("channel_%d", sub.ChannelID)
+	}
+	st.subs[sub.ChannelID] = sub
 }
 
 func (s *StarsStore) appendTxn(st *starsState, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) {

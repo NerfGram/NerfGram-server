@@ -9,7 +9,7 @@ import (
 	"telesrv/internal/store/memory"
 )
 
-func TestEmailSignupSignUpWritesWelcomeMessageMentioningEmail(t *testing.T) {
+func TestEmailSignupSignUpWritesWelcomeMessageOnce(t *testing.T) {
 	ctx := context.Background()
 	dialogs := memory.NewDialogStore()
 	messages := memory.NewMessageStore(dialogs)
@@ -42,12 +42,12 @@ func TestEmailSignupSignUpWritesWelcomeMessageMentioningEmail(t *testing.T) {
 	if len(list.Messages) != 1 {
 		t.Fatalf("messages = %+v, want exactly the welcome message (email channel skips the code-echo message)", list.Messages)
 	}
-	if !strings.Contains(list.Messages[0].Body, "Welcome to FromGram") || !strings.Contains(list.Messages[0].Body, "via email") {
-		t.Fatalf("welcome message body = %q, want greeting mentioning email", list.Messages[0].Body)
+	if !strings.Contains(list.Messages[0].Body, "Добро пожаловать в FromGram") {
+		t.Fatalf("welcome message body = %q, want Russian FromGram welcome", list.Messages[0].Body)
 	}
 }
 
-func TestSignInWritesWelcomeMessageOnEveryLogin(t *testing.T) {
+func TestSignInWritesNewLoginMessageNotWelcome(t *testing.T) {
 	ctx := context.Background()
 	dialogs := memory.NewDialogStore()
 	messages := memory.NewMessageStore(dialogs)
@@ -68,37 +68,47 @@ func TestSignInWritesWelcomeMessageOnEveryLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SignUp: %v", err)
 	}
+	afterSignUp, err := dialogs.ListByUser(ctx, u.ID, domain.DialogFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListByUser after signup: %v", err)
+	}
+	if len(afterSignUp.Messages) != 1 || !strings.Contains(afterSignUp.Messages[0].Body, "Добро пожаловать в FromGram") {
+		t.Fatalf("after signup top = %+v, want welcome", afterSignUp.Messages)
+	}
 	if err := svc.LogOut(ctx, key); err != nil {
 		t.Fatalf("LogOut: %v", err)
 	}
 
-	// A second, independent login (different device/session) must also get a
-	// fresh welcome message, not just the original SignUp.
 	hash, err = svc.SendCode(ctx, "+15550009911")
 	if err != nil {
 		t.Fatalf("SendCode signin: %v", err)
 	}
 	var key2 [8]byte
 	key2[0] = 43
-	if _, _, _, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key2}, "+15550009911", hash, "12345"); err != nil {
+	code := loginCodeFromOfficialTopMessage(t, dialogs, u.ID)
+	if _, _, _, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key2}, "+15550009911", hash, code); err != nil {
 		t.Fatalf("SignIn: %v", err)
 	}
 
-	list, err := dialogs.ListByUser(ctx, u.ID, domain.DialogFilter{Limit: 10})
+	afterSignIn, err := dialogs.ListByUser(ctx, u.ID, domain.DialogFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListByUser: %v", err)
 	}
-	if len(list.Messages) != 1 || !strings.Contains(list.Messages[0].Body, "Welcome to FromGram") {
-		t.Fatalf("messages = %+v, want the second sign-in's fresh welcome message as new top message", list.Messages)
+	if strings.Contains(afterSignIn.Messages[0].Body, "Добро пожаловать в FromGram") {
+		t.Fatalf("second sign-in top message should not be a new welcome: %q", afterSignIn.Messages[0].Body)
 	}
-	// SignUp's welcome + login-code message, plus SendCode's re-delivered code
-	// message, plus the second sign-in's welcome message.
-	if list.Dialogs[0].UnreadCount < 3 {
-		t.Fatalf("dialog unread = %+v, want at least 3 accumulated messages across both logins", list.Dialogs[0])
+
+	svc.RecordNewLoginMessage(ctx, u, "сейчас", "testdevice", "Testland")
+	list, err := dialogs.ListByUser(ctx, u.ID, domain.DialogFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListByUser after new-login: %v", err)
+	}
+	if !strings.Contains(list.Messages[0].Body, "Новый вход") || !strings.Contains(list.Messages[0].Body, "testdevice") {
+		t.Fatalf("new login message = %q, want Russian new-login with device", list.Messages[0].Body)
 	}
 }
 
-func TestTwoFactorSignInDefersWelcomeMessageUntilPasswordCompletes(t *testing.T) {
+func TestTwoFactorSignInDoesNotSendWelcomeOnPasswordComplete(t *testing.T) {
 	ctx := context.Background()
 	passwords := memory.NewPasswordStore()
 	dialogs := memory.NewDialogStore()
@@ -121,6 +131,14 @@ func TestTwoFactorSignInDefersWelcomeMessageUntilPasswordCompletes(t *testing.T)
 	if err != nil {
 		t.Fatalf("SignUp: %v", err)
 	}
+	afterSignUp, err := dialogs.ListByUser(ctx, u.ID, domain.DialogFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListByUser after signup: %v", err)
+	}
+	if !strings.Contains(afterSignUp.Messages[0].Body, "Добро пожаловать в FromGram") {
+		t.Fatalf("signup top = %q, want welcome", afterSignUp.Messages[0].Body)
+	}
+	welcomeTopID := afterSignUp.Messages[0].ID
 	if err := svc.LogOut(ctx, key); err != nil {
 		t.Fatalf("LogOut: %v", err)
 	}
@@ -128,27 +146,21 @@ func TestTwoFactorSignInDefersWelcomeMessageUntilPasswordCompletes(t *testing.T)
 		t.Fatalf("save password settings: %v", err)
 	}
 
-	afterSignUp, err := dialogs.ListByUser(ctx, u.ID, domain.DialogFilter{Limit: 10})
-	if err != nil {
-		t.Fatalf("ListByUser after signup: %v", err)
-	}
-	unreadAfterSignUp := afterSignUp.Dialogs[0].UnreadCount
-
 	hash, err = svc.SendCode(ctx, "+15550009922")
 	if err != nil {
 		t.Fatalf("SendCode signin: %v", err)
 	}
-	if _, _, _, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, "+15550009922", hash, "12345"); err == nil {
+	code := loginCodeFromOfficialTopMessage(t, dialogs, u.ID)
+	if _, _, _, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, "+15550009922", hash, code); err == nil {
 		t.Fatalf("SignIn err = nil, want ErrSessionPasswordNeeded")
 	}
 
-	// Still pending 2FA: no welcome message yet, only the re-delivered code.
 	pending, err := dialogs.ListByUser(ctx, u.ID, domain.DialogFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListByUser pending: %v", err)
 	}
-	if strings.Contains(pending.Messages[0].Body, "Welcome to FromGram") {
-		t.Fatalf("welcome message fired before password check completed: %+v", pending.Messages[0])
+	if strings.Contains(pending.Messages[0].Body, "Новый вход") {
+		t.Fatalf("new-login message fired before password check completed: %+v", pending.Messages[0])
 	}
 
 	if err := svc.CompletePasswordSignIn(ctx, key); err != nil {
@@ -159,10 +171,12 @@ func TestTwoFactorSignInDefersWelcomeMessageUntilPasswordCompletes(t *testing.T)
 	if err != nil {
 		t.Fatalf("ListByUser done: %v", err)
 	}
-	if len(done.Messages) != 1 || !strings.Contains(done.Messages[0].Body, "Welcome to FromGram") {
-		t.Fatalf("messages after CompletePasswordSignIn = %+v, want fresh welcome message", done.Messages)
+	if done.Messages[0].ID == welcomeTopID && strings.Contains(done.Messages[0].Body, "Добро пожаловать в FromGram") {
+		// Still only the signup welcome as historical top if no newer inbox rows — OK
+		// as long as CompletePasswordSignIn did not append another welcome.
+		return
 	}
-	if done.Dialogs[0].UnreadCount <= unreadAfterSignUp {
-		t.Fatalf("unread did not grow after CompletePasswordSignIn: before=%d after=%d", unreadAfterSignUp, done.Dialogs[0].UnreadCount)
+	if strings.Contains(done.Messages[0].Body, "Добро пожаловать в FromGram") && done.Messages[0].ID != welcomeTopID {
+		t.Fatalf("CompletePasswordSignIn wrote a second welcome: %+v", done.Messages[0])
 	}
 }

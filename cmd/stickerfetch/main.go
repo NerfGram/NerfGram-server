@@ -90,14 +90,24 @@ type inputSetRefJSON struct {
 }
 
 type documentJSON struct {
-	ID            int64      `json:"id"`
-	AccessHash    int64      `json:"access_hash"`
-	FileReference string     `json:"file_reference"`
-	Date          string     `json:"date"`
-	MimeType      string     `json:"mime_type"`
-	Size          int64      `json:"size"`
-	DCID          int        `json:"dc_id"`
-	Attributes    []attrJSON `json:"attributes"`
+	ID            int64       `json:"id"`
+	AccessHash    int64       `json:"access_hash"`
+	FileReference string      `json:"file_reference"`
+	Date          string      `json:"date"`
+	MimeType      string      `json:"mime_type"`
+	Size          int64       `json:"size"`
+	DCID          int         `json:"dc_id"`
+	Attributes    []attrJSON  `json:"attributes"`
+	Thumbs        []thumbJSON `json:"thumbs,omitempty"`
+}
+
+type thumbJSON struct {
+	Type     string `json:"_"`
+	SizeType string `json:"type,omitempty"`
+	W        int    `json:"w,omitempty"`
+	H        int    `json:"h,omitempty"`
+	Size     int    `json:"size,omitempty"`
+	Bytes    string `json:"bytes,omitempty"`
 }
 
 type packJSON struct {
@@ -115,6 +125,7 @@ type setJSON struct {
 	Official   bool   `json:"official"`
 	Masks      bool   `json:"masks"`
 	Emojis     bool   `json:"emojis"`
+	TextColor  bool   `json:"text_color,omitempty"`
 }
 
 type resultJSON struct {
@@ -154,6 +165,23 @@ func mapAttrs(in []tg.DocumentAttributeClass) []attrJSON {
 			out = append(out, attrJSON{Type: "DocumentAttributeVideo", W: v.W, H: v.H, Duration: v.Duration, RoundMessage: v.RoundMessage, SupportsStreaming: v.SupportsStreaming})
 		case *tg.DocumentAttributeFilename:
 			out = append(out, attrJSON{Type: "DocumentAttributeFilename", FileName: v.FileName})
+		}
+	}
+	return out
+}
+
+func mapThumbs(in []tg.PhotoSizeClass) []thumbJSON {
+	out := make([]thumbJSON, 0, len(in))
+	for _, t := range in {
+		switch v := t.(type) {
+		case *tg.PhotoSize:
+			out = append(out, thumbJSON{Type: "PhotoSize", SizeType: v.Type, W: v.W, H: v.H, Size: v.Size})
+		case *tg.PhotoCachedSize:
+			out = append(out, thumbJSON{Type: "PhotoCachedSize", SizeType: v.Type, W: v.W, H: v.H, Bytes: hex.EncodeToString(v.Bytes)})
+		case *tg.PhotoStrippedSize:
+			out = append(out, thumbJSON{Type: "PhotoStrippedSize", SizeType: v.Type, Bytes: hex.EncodeToString(v.Bytes)})
+		case *tg.PhotoPathSize:
+			out = append(out, thumbJSON{Type: "PhotoPathSize", SizeType: v.Type, Bytes: hex.EncodeToString(v.Bytes)})
 		}
 	}
 	return out
@@ -253,6 +281,7 @@ func fetchSet(ctx context.Context, api *tg.Client, dl *downloader.Downloader, ou
 			Size:          doc.Size,
 			DCID:          doc.DCID,
 			Attributes:    mapAttrs(doc.Attributes),
+			Thumbs:        mapThumbs(doc.Thumbs),
 		})
 		if (i+1)%25 == 0 || i+1 == len(full.Documents) {
 			fmt.Printf("[%s] docs %d/%d\n", spec, i+1, len(full.Documents))

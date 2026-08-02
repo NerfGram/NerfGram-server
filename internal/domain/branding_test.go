@@ -7,8 +7,8 @@ import (
 
 func TestServiceIdentityAndLoginMessageUseFromGramBrand(t *testing.T) {
 	serviceUser := OfficialSystemUser()
-	if serviceUser.FirstName != "FromGram" || serviceUser.Username != "fromgram" {
-		t.Fatalf("service user = %+v, want FromGram identity", serviceUser)
+	if serviceUser.FirstName != "FromGram" || serviceUser.Username != "" {
+		t.Fatalf("service user = %+v, want FromGram with empty username", serviceUser)
 	}
 	message, err := OfficialLoginCodeMessage(42, "12345", 1)
 	if err != nil {

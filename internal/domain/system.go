@@ -27,6 +27,11 @@ const (
 	// ChatBotAccessHash 固定不变；与 postgres 种子行双写，必须保持一致。
 	ChatBotAccessHash int64 = 6332902371644871201
 
+	// StarsTestBotUserID 是内置 @StarsTestBot，用于本地测试 Stars paid invite links。
+	StarsTestBotUserID int64 = 1250000008
+	// StarsTestBotAccessHash 固定不变；与 postgres 种子行双写，必须保持一致。
+	StarsTestBotAccessHash int64 = 7129485031847261503
+
 	// VerifyBotUserID is the built-in @verifybot: it collects official platform
 	// verification applications and reports decisions back to the applicant. The
 	// id is reserved and stable, so a restart never re-creates the account under a
@@ -100,7 +105,7 @@ func BotFatherUser() User {
 	return User{
 		ID:             BotFatherUserID,
 		AccessHash:     BotFatherAccessHash,
-		FirstName:      "BotFather",
+		FirstName:      branding.ProductName + " BotFather",
 		Username:       "BotFather",
 		Verified:       true,
 		Bot:            true,
@@ -113,7 +118,7 @@ func StickersBotUser() User {
 	return User{
 		ID:             StickersBotUserID,
 		AccessHash:     StickersBotAccessHash,
-		FirstName:      "Stickers",
+		FirstName:      branding.ProductName + " Stickers",
 		Username:       "Stickers",
 		Verified:       true,
 		Bot:            true,
@@ -126,8 +131,21 @@ func ChatBotUser() User {
 	return User{
 		ID:             ChatBotUserID,
 		AccessHash:     ChatBotAccessHash,
-		FirstName:      "ChatBot",
+		FirstName:      branding.ProductName + " ChatBot",
 		Username:       "ChatBot",
+		Verified:       true,
+		Bot:            true,
+		BotInfoVersion: 1,
+	}
+}
+
+// StarsTestBotUser 返回内置 @StarsTestBot 账号。
+func StarsTestBotUser() User {
+	return User{
+		ID:             StarsTestBotUserID,
+		AccessHash:     StarsTestBotAccessHash,
+		FirstName:      branding.ProductName + " Stars",
+		Username:       "StarsTestBot",
 		Verified:       true,
 		Bot:            true,
 		BotInfoVersion: 1,
@@ -178,6 +196,8 @@ func SystemUserByID(id int64) (User, bool) {
 		return StickersBotUser(), true
 	case ChatBotUserID:
 		return ChatBotUser(), true
+	case StarsTestBotUserID:
+		return StarsTestBotUser(), true
 	case VerifyBotUserID:
 		return VerifyBotUser(), true
 	case VerifierBotUserID:
@@ -202,6 +222,7 @@ func SystemUserIDs() []int64 {
 		BotFatherUserID,
 		StickersBotUserID,
 		ChatBotUserID,
+		StarsTestBotUserID,
 		VerifyBotUserID,
 		VerifierBotUserID,
 	}

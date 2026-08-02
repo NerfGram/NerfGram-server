@@ -355,6 +355,7 @@ type UserIdentityService interface {
 	UpdateUsername(ctx context.Context, userID int64, username string) (domain.User, error)
 	UpdateBirthday(ctx context.Context, userID int64, birthday domain.Birthday) (domain.User, error)
 	UpdatePersonalChannel(ctx context.Context, userID int64, channelID int64) (domain.User, error)
+	SetMainProfileTab(ctx context.Context, userID int64, tab string) (domain.User, error)
 	ResolveUsername(ctx context.Context, currentUserID int64, username string) (domain.User, bool, error)
 	ResolvePhone(ctx context.Context, currentUserID int64, phone string) (domain.User, bool, error)
 }
@@ -1173,6 +1174,8 @@ type StarsService interface {
 	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
+	TotalSpent(ctx context.Context, userID int64) (int64, error)
+	ListSubscriptions(ctx context.Context, userID int64) ([]domain.StarsSubscription, error)
 }
 
 // SecretChatService 抽象私聊端对端加密（Secret Chat）握手状态机（app/secretchat）。

@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"telesrv/internal/config"
+	"telesrv/internal/store/redisstore"
 )
 
 const defaultAdminAPIAddr = "127.0.0.1:2599"
@@ -41,7 +42,13 @@ func run() error {
 	}
 	defer pool.Close()
 
-	srv, err := newServer(cfg, newReadStore(pool))
+	rdb, err := redisstore.Open(ctx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	if err != nil {
+		return fmt.Errorf("connect redis: %w", err)
+	}
+	defer func() { _ = rdb.Close() }()
+
+	srv, err := newServer(cfg, newReadStore(pool), redisstore.NewCodeStore(rdb))
 	if err != nil {
 		return err
 	}
@@ -71,6 +78,9 @@ type uiConfig struct {
 	Password      string
 	Token         string
 	SessionKey    []byte
+	RedisAddr     string
+	RedisPassword string
+	RedisDB       int
 	// Permissions is the right set a panel session is issued with, from
 	// TELESRV_ADMIN_UI_PERMISSIONS. The shipped default is the single wildcard
 	// entry, so introducing the permission model never locks an operator out of a
@@ -110,6 +120,9 @@ func loadConfig() (uiConfig, error) {
 		Password:      appCfg.AdminUIPassword,
 		Token:         appCfg.AdminUIToken,
 		SessionKey:    sum[:],
+		RedisAddr:     appCfg.RedisAddr,
+		RedisPassword: appCfg.RedisPassword,
+		RedisDB:       appCfg.RedisDB,
 		Permissions:   appCfg.AdminUIPermissions,
 	}, nil
 }

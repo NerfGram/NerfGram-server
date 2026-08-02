@@ -45,6 +45,19 @@ func TestUserVisibleTextRebrandsLocalizedProductNames(t *testing.T) {
 	}
 }
 
+func TestUserVisibleTextRebrandsLegacyProductNames(t *testing.T) {
+	for input, want := range map[string]string{
+		"telesrv":   "FromGram",
+		"OwpenGram": "FromGram",
+		"fromgram":  "FromGram",
+		"telesrv.net/join": "fromgram.org/join",
+	} {
+		if got := UserVisibleText(input, ""); got != want {
+			t.Fatalf("UserVisibleText(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestClientPresentationNames(t *testing.T) {
 	for platform, want := range map[string]string{
 		"tdesktop":    DesktopAppName,

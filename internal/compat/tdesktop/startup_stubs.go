@@ -59,7 +59,7 @@ func GlobalPrivacySettings() *tg.GlobalPrivacySettings {
 
 const chatThemesHash int64 = 2026080101
 const uniqueGiftChatThemesHash int64 = 2026061201
-const wallPapersHash int64 = 2026062502
+const wallPapersHash int64 = 2026080102
 const peerColorsHash = 2026061202
 const peerProfileColorsHash = 2026062801
 

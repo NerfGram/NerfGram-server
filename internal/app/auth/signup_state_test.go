@@ -192,9 +192,10 @@ func TestPasswordLookupFailureNeverCreatesOrChangesAuthorization(t *testing.T) {
 	authz := memory.NewAuthorizationStore()
 	lookupErr := errors.New("password store unavailable")
 	passwords := &failingPasswordStore{PasswordStore: memory.NewPasswordStore(), err: lookupErr}
+	delivery := &captureLoginCodeDelivery{}
 	svc := NewService(users, authz, memory.NewCodeStore(), nil, nil, "12345",
 		WithPasswords(passwords),
-		WithLoginCodeDelivery(&captureLoginCodeDelivery{}),
+		WithLoginCodeDelivery(delivery),
 	)
 
 	t.Run("unbound-key-remains-unbound", func(t *testing.T) {
@@ -203,7 +204,11 @@ func TestPasswordLookupFailureNeverCreatesOrChangesAuthorization(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SendCode: %v", err)
 		}
-		if _, _, _, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, target.Phone, hash, "12345"); !errors.Is(err, lookupErr) {
+		if len(delivery.requests) == 0 {
+			t.Fatal("expected login code delivery request")
+		}
+		code := delivery.requests[len(delivery.requests)-1].Code
+		if _, _, _, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, target.Phone, hash, code); !errors.Is(err, lookupErr) {
 			t.Fatalf("SignIn err=%v, want password lookup failure", err)
 		}
 		if got, found, err := authz.ByAuthKey(ctx, key); err != nil || found {
@@ -221,7 +226,8 @@ func TestPasswordLookupFailureNeverCreatesOrChangesAuthorization(t *testing.T) {
 		if err != nil {
 			t.Fatalf("SendCode: %v", err)
 		}
-		if _, _, _, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, target.Phone, hash, "12345"); !errors.Is(err, lookupErr) {
+		code := delivery.requests[len(delivery.requests)-1].Code
+		if _, _, _, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, target.Phone, hash, code); !errors.Is(err, lookupErr) {
 			t.Fatalf("SignIn err=%v, want password lookup failure", err)
 		}
 		got, found, err := authz.ByAuthKey(ctx, key)
@@ -383,7 +389,7 @@ func TestEmailSetupVerificationAuthorizesSignUpWithWelcomeMessageOnlyNoCodeEcho(
 	if err != nil {
 		t.Fatalf("ListByUser: %v", err)
 	}
-	if len(list.Dialogs) != 1 || len(list.Messages) != 1 || !strings.Contains(list.Messages[0].Body, "Welcome to FromGram") {
+	if len(list.Dialogs) != 1 || len(list.Messages) != 1 || !strings.Contains(list.Messages[0].Body, "Добро пожаловать в FromGram") {
 		t.Fatalf("email SignUp welcome message = dialogs=%+v messages=%+v, want exactly one welcome message", list.Dialogs, list.Messages)
 	}
 	if email, found, err := accountSvc.LoginEmailByPhone(ctx, phone); err != nil || !found || email != "new@example.test" {

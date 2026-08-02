@@ -144,6 +144,28 @@ export type BotDetail = {
   AuditLogs: AuditLogRow[];
 };
 
+export type ActivePhoneCode = {
+  hash: string;
+  phone: string;
+  email: string;
+  pending_email: string;
+  code: string;
+  channel: string;
+  purpose: string;
+  user_id: string;
+  issued_user_id: string;
+  attempts: number;
+  max_attempts: number;
+  sign_up_verified: boolean;
+  require_sign_up: boolean;
+  verified_email: boolean;
+  ttl_seconds: number;
+};
+
+export type ActivePhoneCodeListResponse = {
+  rows: ActivePhoneCode[];
+};
+
 export type MessageRow = {
   OwnerUserID: number;
   BoxID: number;

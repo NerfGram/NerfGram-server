@@ -23,10 +23,9 @@ type Config struct {
 	From     string
 	FromName string
 	// AppName is the product name shown in the email subject/body (e.g.
-	// "Your <AppName> login code"). Defaults to "telesrv" if empty, matching
-	// this package's other defaults — callers should pass the same brand
-	// name used elsewhere (e.g. Config.PublicAppName), or codes will read as
-	// coming from "telesrv" regardless of the operator's own branding.
+	// "Your <AppName> login code"). Defaults to "FromGram" if empty.
+	// Callers should pass the same brand name used elsewhere
+	// (e.g. Config.PublicAppName).
 	AppName string
 	TLSMode string
 	Timeout time.Duration
@@ -48,7 +47,7 @@ func New(cfg Config) *Sender {
 		cfg.From = cfg.Username
 	}
 	if strings.TrimSpace(cfg.AppName) == "" {
-		cfg.AppName = "telesrv"
+		cfg.AppName = "FromGram"
 	}
 	return &Sender{cfg: cfg}
 }

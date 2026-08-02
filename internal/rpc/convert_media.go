@@ -297,6 +297,13 @@ func tgDocument(d domain.Document) tg.DocumentClass {
 	if d.ID == 0 {
 		return &tg.DocumentEmpty{}
 	}
+	attrs := d.Attributes
+	// Android text_color custom emoji render from PhotoPathSize. Docs that claim
+	// text_color without a path thumb paint blank in the background/reply picker
+	// (profile status emoji skip text_color packs and still animate as Lottie).
+	if documentClaimsTextColor(attrs) && !documentHasPathThumb(d.Thumbs) {
+		attrs = demoteTextColorAttributes(attrs)
+	}
 	return &tg.Document{
 		ID:            d.ID,
 		AccessHash:    d.AccessHash,
@@ -306,8 +313,36 @@ func tgDocument(d domain.Document) tg.DocumentClass {
 		Size:          d.Size,
 		Thumbs:        tgDocumentThumbs(d.MimeType, d.Thumbs),
 		DCID:          d.DCID,
-		Attributes:    tgDocumentAttributes(d.MimeType, d.Attributes),
+		Attributes:    tgDocumentAttributes(d.MimeType, attrs),
 	}
+}
+
+func documentClaimsTextColor(attrs []domain.DocumentAttribute) bool {
+	for _, a := range attrs {
+		if a.Kind == domain.DocAttrCustomEmoji && a.TextColor {
+			return true
+		}
+	}
+	return false
+}
+
+func documentHasPathThumb(thumbs []domain.PhotoSize) bool {
+	for _, t := range thumbs {
+		if t.Kind == domain.PhotoSizeKindPath && len(t.Bytes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func demoteTextColorAttributes(attrs []domain.DocumentAttribute) []domain.DocumentAttribute {
+	out := append([]domain.DocumentAttribute(nil), attrs...)
+	for i := range out {
+		if out[i].Kind == domain.DocAttrCustomEmoji {
+			out[i].TextColor = false
+		}
+	}
+	return out
 }
 
 func tgDocuments(docs []domain.Document) []tg.DocumentClass {
@@ -640,12 +675,18 @@ func effectDocumentIDs(effects []domain.AvailableEffect) []int64 {
 // ---- sticker sets ----
 
 func tgStickerSet(set domain.StickerSet) tg.StickerSet {
+	textColor := set.TextColor
+	// StatusPack was seeded without PhotoPathSize; keep the set flag off so
+	// Android does not force path-silhouette rendering for blank icons.
+	if strings.EqualFold(set.ShortName, "StatusPack") {
+		textColor = false
+	}
 	out := tg.StickerSet{
 		Archived:   set.Archived,
 		Official:   set.Official,
 		Masks:      set.Masks,
 		Emojis:     set.Emojis,
-		TextColor:  set.TextColor,
+		TextColor:  textColor,
 		Creator:    set.Creator,
 		ID:         set.ID,
 		AccessHash: set.AccessHash,

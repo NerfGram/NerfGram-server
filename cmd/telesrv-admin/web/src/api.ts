@@ -3,6 +3,7 @@ import type {
   AccountListResponse,
   AccountRatingDetail,
   AccountRatingListResponse,
+  ActivePhoneCodeListResponse,
   AdminLoginResult,
   AdminSession,
   BotDetail,
@@ -184,6 +185,7 @@ export const api = {
     request<CustomVerificationRequestDetail>(`/api/botverification/requests/${encodeURIComponent(id)}`),
   botVerificationCounts: () => request<BotVerificationCountsResponse>("/api/botverification/counts"),
   emoji: (params: URLSearchParams) => request<EmojiListResponse>(`/api/emoji?${params.toString()}`),
+  codes: () => request<ActivePhoneCodeListResponse>("/api/codes"),
   emojiAnimation: (documentID: string) => request<Record<string, unknown>>(`/api/emoji/${encodeURIComponent(documentID)}/animation`),
   messages: (params: URLSearchParams) => request<MessageListResponse>(`/api/messages?${params.toString()}`),
   message: (ownerUserID: number, msgID: number) => {

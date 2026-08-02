@@ -153,3 +153,8 @@ func validPurchaseCommand(form domain.StarsPurchaseForm) bool {
 func (s *Service) TotalSpent(ctx context.Context, userID int64) (int64, error) {
 	return s.store.TotalSpent(ctx, userID)
 }
+
+// ListSubscriptions returns channel Stars subscriptions for the user.
+func (s *Service) ListSubscriptions(ctx context.Context, userID int64) ([]domain.StarsSubscription, error) {
+	return s.store.ListSubscriptions(ctx, userID)
+}

@@ -115,7 +115,8 @@ const (
 	StarsReasonPaidMedia     StarsTransactionReason = "paid_media"   // 付费媒体解锁
 	StarsReasonPaidMessage   StarsTransactionReason = "paid_message" // 频道 Direct Message 花费
 	StarsReasonSuggestedPost StarsTransactionReason = "suggested_post"
-	StarsReasonAdjust        StarsTransactionReason = "adjust" // 兜底/人工调整
+	StarsReasonSubscription StarsTransactionReason = "subscription" // paid invite / channel subscription
+	StarsReasonAdjust       StarsTransactionReason = "adjust" // 兜底/人工调整
 )
 
 // StarsTransaction 是一条账本流水。amount 带符号：贷记 > 0（含 refund/收取），借记 < 0。

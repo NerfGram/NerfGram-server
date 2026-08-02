@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -18,7 +17,6 @@ import (
 
 	"github.com/iamxvbaba/td/tlprofile"
 	"telesrv/internal/app/auth"
-	"telesrv/internal/branding"
 	"telesrv/internal/domain"
 )
 
@@ -626,6 +624,7 @@ func (r *Router) finishAuthSignIn(ctx context.Context, u domain.User, needSignUp
 		r.setAuthUserCache(id, u.ID, true)
 	}
 	r.bindSessionUser(ctx, u.ID)
+	r.recordNewLoginNotice(ctx, u)
 	r.pushSignInServiceNotificationToOthers(ctx, u)
 	return &tg.AuthAuthorization{User: r.tgSelfUser(u)}, nil
 }
@@ -827,6 +826,12 @@ func (r *Router) completePendingPasswordSignIn(ctx context.Context, authKeyID [8
 	r.invalidateAuthUserCache(authKeyID)
 	r.setAuthUserCache(authKeyID, userID, true)
 	r.bindSessionUser(ctx, userID)
+	if r.deps.Users != nil {
+		if u, err := r.deps.Users.Self(ctx, userID); err == nil {
+			r.recordNewLoginNotice(ctx, u)
+			r.pushSignInServiceNotificationToOthers(ctx, u)
+		}
+	}
 	return nil
 }
 
@@ -908,6 +913,8 @@ func (r *Router) onAuthFinishPasskeyLogin(ctx context.Context, req *tg.AuthFinis
 		r.setAuthUserCache(id, u.ID, true)
 	}
 	r.bindSessionUser(ctx, u.ID)
+	r.recordNewLoginNotice(ctx, u)
+	r.pushSignInServiceNotificationToOthers(ctx, u)
 	return &tg.AuthAuthorization{User: r.tgSelfUser(u)}, nil
 }
 
@@ -1065,43 +1072,51 @@ func (r *Router) pushSignInServiceNotificationToOthers(ctx context.Context, u do
 	}()
 }
 
+type newLoginNotifier interface {
+	RecordNewLoginMessage(ctx context.Context, u domain.User, whenLabel, device, location string)
+}
+
+func (r *Router) recordNewLoginNotice(ctx context.Context, u domain.User) {
+	notifier, ok := r.deps.Auth.(newLoginNotifier)
+	if !ok || u.ID == 0 {
+		return
+	}
+	whenLabel, device, location := r.signInNoticeFields(ctx)
+	notifier.RecordNewLoginMessage(ctx, u, whenLabel, device, location)
+}
+
+func (r *Router) signInNoticeFields(ctx context.Context) (whenLabel, device, location string) {
+	now := r.clock.Now()
+	whenLabel = domain.FormatMoscowLoginWhen(now)
+	location = "неизвестно"
+	device = "неизвестно"
+	if ci, ok := ClientInfoFrom(ctx); ok {
+		device = domain.FormatLoginDeviceLabel(ci.DeviceModel, ci.AppVersion, ci.SystemVersion)
+	}
+	return whenLabel, device, location
+}
+
 func (r *Router) tgSignInServiceNotification(ctx context.Context, u domain.User, authKeyID [8]byte) *tg.Updates {
 	now := r.clock.Now()
-	client := "Unknown device"
-	if ci, ok := ClientInfoFrom(ctx); ok {
-		parts := []string{}
-		if ci.DeviceModel != "" {
-			parts = append(parts, branding.UserVisibleText(ci.DeviceModel, ""))
-		}
-		if ci.SystemVersion != "" {
-			parts = append(parts, branding.UserVisibleText(ci.SystemVersion, ""))
-		}
-		if ci.AppVersion != "" {
-			parts = append(parts, branding.UserVisibleText(ci.AppVersion, ""))
-		}
-		if len(parts) > 0 {
-			client = strings.Join(parts, " / ")
-		}
+	whenLabel, device, location := r.signInNoticeFields(ctx)
+	name := domain.ServiceNotificationDisplayName(u)
+	msg, err := domain.OfficialNewLoginMessage(u.ID, name, whenLabel, device, location, int(now.Unix()))
+	message := ""
+	entities := []tg.MessageEntityClass{}
+	if err == nil {
+		message = msg.Body
+		entities = convertDomainMessageEntities(msg.Entities)
+	} else {
+		message = fmt.Sprintf("👤 Новый вход. %s, кто-то вошел в ваш аккаунт %s.\n\n💻 Устройство: %s\n📍 Местоположение: %s",
+			name, whenLabel, device, location)
 	}
-	name := strings.TrimSpace(strings.TrimSpace(u.FirstName + " " + u.LastName))
-	if name == "" {
-		name = u.Phone
-	}
-	if name == "" {
-		name = "there"
-	}
-	message := fmt.Sprintf("New login.\nDear %s, we detected a login into your account from a new device on %s.\n\nDevice: %s\nLocation: Unknown\n\nIf this wasn't you, you can terminate that session in Settings > Devices (or Privacy & Security > Active Sessions).",
-		name,
-		now.UTC().Format(time.RFC1123),
-		client,
-	)
 	authID := int64(binary.LittleEndian.Uint64(authKeyID[:]))
 	update := &tg.UpdateServiceNotification{
 		InboxDate: int(now.Unix()),
 		Type:      fmt.Sprintf("auth%d_%d", authID, now.Unix()),
 		Message:   message,
 		Media:     &tg.MessageMediaEmpty{},
-		Entities:  signInNotificationEntities(message),
+		Entities:  entities,
 	}
 	return &tg.Updates{
 		Updates: []tg.UpdateClass{update},
@@ -1109,12 +1124,19 @@ func (r *Router) tgSignInServiceNotification(ctx context.Context, u domain.User,
 	}
 }
 
-func signInNotificationEntities(message string) []tg.MessageEntityClass {
-	terms := []string{"New login.", "Settings > Devices", "Privacy & Security > Active Sessions"}
-	out := make([]tg.MessageEntityClass, 0, len(terms))
-	for _, term := range terms {
-		if offset := strings.Index(message, term); offset >= 0 {
-			out = append(out, &tg.MessageEntityBold{Offset: offset, Length: len(term)})
+func convertDomainMessageEntities(entities []domain.MessageEntity) []tg.MessageEntityClass {
+	if len(entities) == 0 {
+		return nil
+	}
+	out := make([]tg.MessageEntityClass, 0, len(entities))
+	for _, entity := range entities {
+		switch entity.Type {
+		case domain.MessageEntityBold:
+			out = append(out, &tg.MessageEntityBold{Offset: entity.Offset, Length: entity.Length})
+		case domain.MessageEntitySpoiler:
+			out = append(out, &tg.MessageEntitySpoiler{Offset: entity.Offset, Length: entity.Length})
+		case domain.MessageEntityCustomEmoji:
+			out = append(out, &tg.MessageEntityCustomEmoji{Offset: entity.Offset, Length: entity.Length, DocumentID: entity.DocumentID})
 		}
 	}
 	return out

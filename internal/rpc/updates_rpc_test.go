@@ -215,13 +215,13 @@ func TestSignInServiceNotificationMatchesEnterpriseShape(t *testing.T) {
 	if update.Popup || update.InboxDate == 0 || update.Media == nil {
 		t.Fatalf("notification flags/media = popup %v inbox %d media %T", update.Popup, update.InboxDate, update.Media)
 	}
-	for _, want := range []string{"New login.", "Test User", "FromGram Desktop", "Settings > Devices"} {
+	for _, want := range []string{"Новый вход", "Test User", "FromGram Desktop", "Устройство:", "Местоположение:"} {
 		if !strings.Contains(update.Message, want) {
 			t.Fatalf("notification message %q missing %q", update.Message, want)
 		}
 	}
 	if len(update.Entities) < 3 {
-		t.Fatalf("entities = %+v, want bold entities for title/settings links", update.Entities)
+		t.Fatalf("entities = %+v, want bold/custom-emoji entities", update.Entities)
 	}
 }
 

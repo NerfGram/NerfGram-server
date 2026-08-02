@@ -29,6 +29,7 @@ export function routeTitle(pathname: string, t: TFunction): string {
   if (pathname.startsWith("/moderation")) return t("route.moderation");
   if (pathname.startsWith("/emoji")) return t("route.emoji");
   if (pathname.startsWith("/messages")) return t("route.messages");
+  if (pathname.startsWith("/codes")) return t("route.codes");
 	if (pathname.startsWith("/give-gifts")) return t("route.giveGifts");
 	if (pathname.startsWith("/gifts")) return t("route.gifts");
   return t("route.dashboard");
@@ -45,6 +46,7 @@ export function routeSubtitle(pathname: string, t: TFunction): string {
   if (pathname.startsWith("/moderation")) return t("route.moderationSubtitle");
   if (pathname.startsWith("/emoji")) return t("route.emojiSubtitle");
   if (pathname.startsWith("/messages")) return t("route.messagesSubtitle");
+  if (pathname.startsWith("/codes")) return t("route.codesSubtitle");
 	if (pathname.startsWith("/give-gifts")) return t("route.giveGiftsSubtitle");
 	if (pathname.startsWith("/gifts")) return t("route.giftsSubtitle");
   return t("route.dashboardSubtitle");

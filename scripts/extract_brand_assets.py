@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Extract raster gradient and plane path from Untitled.svg for Android assets."""
+"""Extract raster gradient and plane path from brand SVG for Android assets.
+
+The SVG uses viewBox="0 0 69.2 69.2" with the white plane path in that space.
+The embedded gradient PNG sits under a scale transform from a 1000x1000 clip.
+The Android vector viewport must match the path coordinate space (69.2), not
+1000 — otherwise the plane is a speck in the corner and looks missing.
+"""
 import base64
 import pathlib
 import re
@@ -17,6 +23,13 @@ bg_path = out_dir / "fromgram_icon_background.png"
 bg_path.write_bytes(png)
 print(f"wrote background png ({len(png)} bytes)")
 
+view_box = re.search(r'viewBox="0\s+0\s+([0-9.]+)\s+([0-9.]+)"', svg)
+if not view_box:
+    raise SystemExit("viewBox not found")
+viewport_w = view_box.group(1)
+viewport_h = view_box.group(2)
+print(f"viewport {viewport_w}x{viewport_h}")
+
 paths = re.findall(r'<path[^>]+fill="#FFFFFF"[^>]*d="([^"]+)"', svg, flags=re.I)
 if not paths:
     paths = re.findall(r'<path[^>]+d="([^"]+)"[^>]+fill="#FFFFFF"', svg, flags=re.I)
@@ -31,8 +44,8 @@ plane_xml = f'''<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="1000"
-    android:viewportHeight="1000">
+    android:viewportWidth="{viewport_w}"
+    android:viewportHeight="{viewport_h}">
     <path
         android:pathData="{plane}"
         android:fillColor="#FFFFFF"

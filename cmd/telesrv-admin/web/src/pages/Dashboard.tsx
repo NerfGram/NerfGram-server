@@ -1,4 +1,4 @@
-import { CheckCircle2, ChevronRight, Clock3, FileJson, KeyRound, MessageSquareText, ShieldCheck, Users } from "lucide-react";
+import { CheckCircle2, ChevronRight, Clock3, FileJson, KeyRound, ShieldCheck, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import { AppLink } from "../components/AppLink";
 import { StatusItem } from "../components/ui";
@@ -23,7 +23,7 @@ export function Dashboard({ navigate }: { navigate: Navigate }) {
       <div className="command-grid">
         <Launcher icon={<Users />} title={t("route.accounts")} text={t("dashboard.accountsText")} href="/accounts" navigate={navigate} />
         <Launcher icon={<ShieldCheck />} title={t("route.channels")} text={t("dashboard.channelsText")} href="/channels" navigate={navigate} />
-        <Launcher icon={<MessageSquareText />} title={t("route.messages")} text={t("dashboard.messagesText")} href="/messages" navigate={navigate} />
+        <Launcher icon={<KeyRound />} title={t("route.codes")} text={t("dashboard.codesText")} href="/codes" navigate={navigate} />
       </div>
       <section className="work-strip">
         <div className="strip-item"><CheckCircle2 size={16} /><span>{t("dashboard.strip.dryRun")}</span></div>

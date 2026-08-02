@@ -208,6 +208,47 @@ func starsTransactionQueryParts(ownerColumn, amountColumn string, ownerID int64,
 	return where, order, args
 }
 
+func (s *StarsStore) TotalSpent(ctx context.Context, userID int64) (int64, error) {
+	if userID == 0 {
+		return 0, nil
+	}
+	var spent int64
+	err := s.db.QueryRow(ctx, `
+SELECT COALESCE(SUM(-amount), 0)
+FROM stars_transactions
+WHERE user_id = $1 AND amount < 0`, userID).Scan(&spent)
+	if err != nil {
+		return 0, fmt.Errorf("sum stars spent: %w", err)
+	}
+	return spent, nil
+}
+
+func (s *StarsStore) ListSubscriptions(ctx context.Context, userID int64) ([]domain.StarsSubscription, error) {
+	if userID == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+SELECT channel_id, invite_hash, until_date, period, amount, canceled, title
+FROM stars_subscriptions
+WHERE user_id = $1
+ORDER BY until_date DESC, channel_id DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list stars subscriptions: %w", err)
+	}
+	defer rows.Close()
+	out := make([]domain.StarsSubscription, 0)
+	for rows.Next() {
+		var sub domain.StarsSubscription
+		sub.UserID = userID
+		if err := rows.Scan(&sub.ChannelID, &sub.InviteHash, &sub.UntilDate, &sub.Period, &sub.Amount, &sub.Canceled, &sub.Title); err != nil {
+			return nil, err
+		}
+		sub.ID = fmt.Sprintf("channel_%d", sub.ChannelID)
+		out = append(out, sub)
+	}
+	return out, rows.Err()
+}
+
 // insertStarsTxn 在事务内写一条流水（amount 带符号）。
 func insertStarsTxn(ctx context.Context, tx pgx.Tx, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) error {
 	if _, err := tx.Exec(ctx, `

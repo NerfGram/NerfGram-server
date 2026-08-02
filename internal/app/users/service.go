@@ -20,13 +20,18 @@ type ProfilePhotoProvider = userprojection.ProfilePhotoProvider
 
 // Service 提供用户查询。
 type Service struct {
-	users     store.UserStore
-	cache     store.UserCache
-	contacts  store.ContactStore
-	photos    ProfilePhotoProvider
-	privacy   userprojection.PrivacyEvaluator
-	freezes   userprojection.AccountFreezeProvider
-	projector *userprojection.Projector
+	users       store.UserStore
+	cache       store.UserCache
+	contacts    store.ContactStore
+	photos      ProfilePhotoProvider
+	privacy     userprojection.PrivacyEvaluator
+	freezes     userprojection.AccountFreezeProvider
+	projector   *userprojection.Projector
+	profileTabs profileTabStore
+}
+
+type profileTabStore interface {
+	SetMainProfileTab(ctx context.Context, userID int64, tab string) error
 }
 
 type usernameAvailabilityStore interface {
@@ -62,6 +67,11 @@ func WithPrivacyEvaluator(p userprojection.PrivacyEvaluator) Option {
 
 func WithAccountFreezeProvider(p userprojection.AccountFreezeProvider) Option {
 	return func(s *Service) { s.freezes = p }
+}
+
+// WithProfileTabStore persists account.setMainProfileTab preferences.
+func WithProfileTabStore(p profileTabStore) Option {
+	return func(s *Service) { s.profileTabs = p }
 }
 
 const (
@@ -555,6 +565,22 @@ func (s *Service) UpdatePersonalChannel(ctx context.Context, userID int64, chann
 	}
 	s.refreshCachedUsers(ctx, u)
 	return u, nil
+}
+
+// SetMainProfileTab stores the account profile tab preference.
+func (s *Service) SetMainProfileTab(ctx context.Context, userID int64, tab string) (domain.User, error) {
+	self, err := s.loadSelf(ctx, userID)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if s.profileTabs != nil {
+		if err := s.profileTabs.SetMainProfileTab(ctx, self.ID, tab); err != nil {
+			return domain.User{}, err
+		}
+	}
+	self.MainProfileTab = tab
+	s.refreshCachedUsers(ctx, self)
+	return self, nil
 }
 
 // UpdateColor updates the user's message accent or profile background color.

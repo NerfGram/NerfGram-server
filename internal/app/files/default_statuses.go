@@ -87,7 +87,7 @@ func (s *Service) EnsureDefaultEmojiStatusSet(ctx context.Context) (int, bool, e
 	set := domain.StickerSet{
 		ID:         defaultEmojiStatusSetID,
 		AccessHash: defaultEmojiStatusSetAccessHash,
-		ShortName:  "TelesrvDefaultStatuses",
+		ShortName:  "FromGramDefaultStatuses",
 		Title:      "Default Emoji Statuses",
 		Kind:       domain.StickerSetKindSystem,
 		SystemKey:  domain.StickerSetSystemKeyEmojiDefaultStatuses,

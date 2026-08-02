@@ -29,6 +29,14 @@ func (r *Router) onMessagesExportChatInvite(ctx context.Context, req *tg.Message
 	if req.UsageLimit < 0 || req.ExpireDate < 0 || len(req.Title) > domain.MaxChannelInviteTitleLength {
 		return nil, limitInvalidErr()
 	}
+	period, amount := 0, int64(0)
+	if pricing, ok := req.GetSubscriptionPricing(); ok {
+		normalizedPeriod, normalizedAmount, err := domain.NormalizeStarsSubscriptionPricing(pricing.Period, pricing.Amount)
+		if err != nil {
+			return nil, limitInvalidErr()
+		}
+		period, amount = normalizedPeriod, normalizedAmount
+	}
 	res, err := r.deps.Channels.ExportInvite(ctx, userID, domain.ExportChannelInviteRequest{
 		UserID:                userID,
 		ChannelID:             peer.ID,
@@ -38,6 +46,8 @@ func (r *Router) onMessagesExportChatInvite(ctx context.Context, req *tg.Message
 		UsageLimit:            req.UsageLimit,
 		LegacyRevokePermanent: req.LegacyRevokePermanent,
 		Date:                  int(r.clock.Now().Unix()),
+		SubscriptionPeriod:    period,
+		SubscriptionAmount:    amount,
 	})
 	if err != nil {
 		return nil, channelInviteErr(err)
@@ -84,6 +94,12 @@ func (r *Router) onMessagesCheckChatInvite(ctx context.Context, hash string) (tg
 	// third-party mark is part of what identifies the peer, so the preview a
 	// non-member sees has to carry it as well.
 	r.applyBotVerificationToChatInvite(ctx, invite, res.Channel.ID)
+	if res.Invite.HasStarsSubscription() {
+		invite.SetSubscriptionPricing(tg.StarsSubscriptionPricing{
+			Period: res.Invite.SubscriptionPeriod,
+			Amount: res.Invite.SubscriptionAmount,
+		})
+	}
 	return invite, nil
 }
 
@@ -415,6 +431,12 @@ func tgExportedChannelInvite(invite domain.ChannelInvite, publicBaseURL string) 
 	if invite.RequestedCount > 0 {
 		out.SetRequested(invite.RequestedCount)
 	}
+	if invite.HasStarsSubscription() {
+		out.SetSubscriptionPricing(tg.StarsSubscriptionPricing{
+			Period: invite.SubscriptionPeriod,
+			Amount: invite.SubscriptionAmount,
+		})
+	}
 	return out
 }
 
@@ -479,6 +501,8 @@ func channelInviteErr(err error) error {
 		return tgerr400("USER_KICKED")
 	case errors.Is(err, domain.ErrBotGroupsBlocked):
 		return tgerr400("BOT_GROUPS_BLOCKED")
+	case errors.Is(err, domain.ErrStarsInsufficient):
+		return tgerr400("BALANCE_TOO_LOW")
 	default:
 		return channelInvalidErr(err)
 	}

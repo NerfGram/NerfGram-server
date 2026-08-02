@@ -1,4 +1,4 @@
-// Package branding owns the user-visible telesrv product identity.
+// Package branding owns the user-visible FromGram product identity.
 //
 // Protocol identifiers, client detection tokens and third-party compatibility
 // headers do not belong here: callers must only pass text that is rendered to
@@ -22,7 +22,7 @@ const (
 	WebKAppName      = "FromGram Web K"
 	PremiumName      = "FromGram Premium"
 	StarsName        = "FromGram Stars"
-	DefaultPublicURL = "https://fromgram.org"
+	DefaultPublicURL = "https://t.fromchat.ru"
 )
 
 // ClientAppName returns the branded display name for a stored client platform.
@@ -60,8 +60,9 @@ var (
 	officialHTTPHostRE = regexp.MustCompile(`(?i)https?://(?:[a-z0-9-]+\.)*(?:telegram\.(?:org|me|com|dog)|t\.me)([^a-z0-9]|$)`)
 	officialBareHostRE = regexp.MustCompile(`(?i)(?:(?:[a-z0-9-]+\.)*telegram\.(?:org|me|com|dog)|\bt\.me)([^a-z0-9]|$)`)
 	officialBrandRE    = regexp.MustCompile(`(?i)telegram|телеграм[\p{L}]*|تيليجرام|تلگرام|텔레그램|טלגרם`)
-	legacyBrandRE      = regexp.MustCompile(`(?i)fromgram`)
-	legacyHostRE       = regexp.MustCompile(`(?i)fromgram\.org`)
+	legacyBrandRE      = regexp.MustCompile(`(?i)\b(?:owpengram|telesrv)\b`)
+	productBrandCaseRE = regexp.MustCompile(`(?i)\bfromgram\b([^.\w]|$)`)
+	legacyHostRE       = regexp.MustCompile(`(?i)(?:fromgram\.org|telesrv\.net|owpengram\.[a-z]+|t\.fromchat\.ru)`)
 	technicalIDRE      = regexp.MustCompile(`^[A-Za-z0-9-]+(?:[._][A-Za-z0-9-]+)+$`)
 )
 
@@ -76,13 +77,15 @@ func UserVisibleText(value, publicBaseURL string) string {
 	value = officialHTTPHostRE.ReplaceAllString(value, baseURL+"${1}")
 	value = officialBareHostRE.ReplaceAllString(value, publicHost+"${1}")
 	value = legacyHostRE.ReplaceAllString(value, strings.TrimPrefix(DefaultPublicURL, "https://"))
-	value = legacyBrandRE.ReplaceAllString(value, ProductName)
 	// Some platform packs carry dotted or underscored runtime identifiers as
 	// values. They are not copy and changing them can break client navigation.
 	if technicalIDRE.MatchString(value) {
 		return value
 	}
-	return officialBrandRE.ReplaceAllString(value, ProductName)
+	value = officialBrandRE.ReplaceAllString(value, ProductName)
+	value = legacyBrandRE.ReplaceAllString(value, ProductName)
+	// Normalize "fromgram" product copy without rewriting hostnames like fromgram.org.
+	return productBrandCaseRE.ReplaceAllString(value, ProductName+"$1")
 }
 
 func publicDestination(raw string) (string, string) {

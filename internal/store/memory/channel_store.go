@@ -98,6 +98,7 @@ type ChannelStore struct {
 	deleteReceipts         map[channelMessageReplayKey]*domain.ChannelUpdateEvent
 	starsBalances          map[int64]int64
 	channelStarsBalances   map[int64]int64
+	starsSubscriptions     map[int64]map[int64]domain.StarsSubscription // userID -> channelID -> sub
 	tonBalances            map[int64]int64
 	channelTONBalances     map[int64]int64
 	suggestedPostApprovals map[memorySuggestedPostKey]memorySuggestedPostApproval
@@ -155,6 +156,7 @@ func NewChannelStore() *ChannelStore {
 		deleteReceipts:         make(map[channelMessageReplayKey]*domain.ChannelUpdateEvent),
 		starsBalances:          make(map[int64]int64),
 		channelStarsBalances:   make(map[int64]int64),
+		starsSubscriptions:     make(map[int64]map[int64]domain.StarsSubscription),
 		tonBalances:            make(map[int64]int64),
 		channelTONBalances:     make(map[int64]int64),
 		suggestedPostApprovals: make(map[memorySuggestedPostKey]memorySuggestedPostApproval),

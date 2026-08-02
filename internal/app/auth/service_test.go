@@ -377,6 +377,32 @@ func TestPhoneCodeAcceptsTDesktopDigitsOnlySignIn(t *testing.T) {
 	}
 }
 
+func loginCodeFromOfficialTopMessage(t *testing.T, dialogs *memory.DialogStore, userID int64) string {
+	t.Helper()
+	list, err := dialogs.ListByUser(context.Background(), userID, domain.DialogFilter{Limit: 10})
+	if err != nil || len(list.Messages) == 0 {
+		t.Fatalf("ListByUser for login code: messages=%+v err=%v", list.Messages, err)
+	}
+	const marker = "Код для входа: "
+	body := list.Messages[0].Body
+	idx := strings.Index(body, marker)
+	if idx < 0 {
+		markerEN := "Login code: "
+		idx = strings.Index(body, markerEN)
+		if idx < 0 {
+			t.Fatalf("top message %q has no login code", body)
+		}
+		body = body[idx+len(markerEN):]
+	} else {
+		body = body[idx+len(marker):]
+	}
+	end := strings.IndexAny(body, ".\n")
+	if end <= 0 {
+		t.Fatalf("cannot parse login code from %q", list.Messages[0].Body)
+	}
+	return strings.TrimSpace(body[:end])
+}
+
 func verifyCodeForSignUp(t *testing.T, svc *Service, phone, hash, code string) {
 	t.Helper()
 	got, msg, needSignUp, err := svc.SignIn(context.Background(), domain.Authorization{}, phone, hash, code)
@@ -388,32 +414,31 @@ func verifyCodeForSignUp(t *testing.T, svc *Service, phone, hash, code string) {
 func TestSystemUserPhoneCannotLoginOrSignUp(t *testing.T) {
 	ctx := context.Background()
 	codes := memory.NewCodeStore()
-	svc := NewService(memory.NewUserStore(), memory.NewAuthorizationStore(), codes, nil, nil, "12345")
-	phone := domain.OfficialSystemUser().Phone
+	users := memory.NewUserStore()
+	svc := NewService(users, memory.NewAuthorizationStore(), codes, nil, nil, "12345")
 
-	if _, err := svc.SendCode(ctx, phone); !errors.Is(err, ErrSystemUserLoginForbidden) {
-		t.Fatalf("SendCode official system phone err = %v, want ErrSystemUserLoginForbidden", err)
-	}
-
-	if err := codes.Set(ctx, "system-signin", store.PhoneCode{Phone: phone, Code: "12345"}, time.Minute); err != nil {
-		t.Fatalf("seed sign-in code: %v", err)
-	}
-	if _, _, _, err := svc.SignIn(ctx, domain.Authorization{}, phone, "system-signin", "12345"); !errors.Is(err, ErrSystemUserLoginForbidden) {
-		t.Fatalf("SignIn official system phone err = %v, want ErrSystemUserLoginForbidden", err)
-	}
-
-	if err := codes.Set(ctx, "system-email", store.PhoneCode{Phone: phone, Code: "12345"}, time.Minute); err != nil {
-		t.Fatalf("seed email code: %v", err)
-	}
-	if _, _, _, err := svc.SignInWithEmail(ctx, domain.Authorization{}, phone, "system-email", "anything"); !errors.Is(err, ErrSystemUserLoginForbidden) {
-		t.Fatalf("SignInWithEmail official system phone err = %v, want ErrSystemUserLoginForbidden", err)
+	// System accounts intentionally expose no login phone. Binding an auth key
+	// to a system user id is still rejected (see TestSystemUserAuthorizationIsRejectedAndRevoked).
+	for _, id := range []int64{domain.OfficialSystemUserID, domain.BotFatherUserID, domain.StickersBotUserID, domain.ChatBotUserID, domain.StarsTestBotUserID} {
+		u, ok := domain.SystemUserByID(id)
+		if !ok {
+			t.Fatalf("missing system user %d", id)
+		}
+		if u.Phone != "" {
+			if _, err := svc.SendCode(ctx, u.Phone); !errors.Is(err, ErrSystemUserLoginForbidden) {
+				t.Fatalf("SendCode system phone %q err = %v, want ErrSystemUserLoginForbidden", u.Phone, err)
+			}
+		}
 	}
 
-	if err := codes.Set(ctx, "system-signup", store.PhoneCode{Phone: phone, Code: "12345"}, time.Minute); err != nil {
-		t.Fatalf("seed sign-up code: %v", err)
+	authKeyID := [8]byte{0x72}
+	authz := memory.NewAuthorizationStore()
+	svc = NewService(users, authz, codes, nil, nil, "12345")
+	if err := authz.Bind(ctx, domain.Authorization{AuthKeyID: authKeyID, UserID: domain.BotFatherUserID}); err != nil {
+		t.Fatalf("bind botfather authorization: %v", err)
 	}
-	if _, _, err := svc.SignUp(ctx, domain.Authorization{}, phone, "system-signup", "System", "User"); !errors.Is(err, ErrSystemUserLoginForbidden) {
-		t.Fatalf("SignUp official system phone err = %v, want ErrSystemUserLoginForbidden", err)
+	if got, found, err := svc.UserID(ctx, authKeyID); err != nil || found || got != 0 {
+		t.Fatalf("UserID(system bot auth) = %d found=%v err=%v, want not found", got, found, err)
 	}
 }
 
@@ -650,14 +675,12 @@ func TestSignUpWritesOfficialLoginMessage(t *testing.T) {
 	if len(list.Users) != 1 || list.Users[0].ID != domain.OfficialSystemUserID || !list.Users[0].Verified || !list.Users[0].Support {
 		t.Fatalf("users = %+v, want verified support system user", list.Users)
 	}
-	if msg.ID == 0 || !strings.Contains(msg.Body, "Login code: 12345") {
+	if msg.ID == 0 || !strings.Contains(msg.Body, "Код для входа: 12345") {
 		t.Fatalf("login message = %+v, want returned official login code message", msg)
 	}
-	// SignUp now also writes an unconditional welcome message alongside the
-	// phone channel's login-code message, created after it — so it becomes
-	// the dialog's new top message (ListByUser surfaces the top message per
-	// dialog, not full history).
-	if len(list.Messages) != 1 || !strings.Contains(list.Messages[0].Body, "Welcome to FromGram") {
+	// SignUp also writes the once-per-account welcome message after the
+	// phone channel's login-code message, so it becomes the dialog top.
+	if len(list.Messages) != 1 || !strings.Contains(list.Messages[0].Body, "Добро пожаловать в FromGram") {
 		t.Fatalf("messages = %+v, want welcome message as new dialog top message", list.Messages)
 	}
 	if list.Dialogs[0].TopMessage != list.Messages[0].ID || list.Dialogs[0].UnreadCount != 2 {
@@ -722,16 +745,17 @@ func TestSendCodeLoginMessagePreservesOfficialDialogReadWatermark(t *testing.T) 
 		t.Fatalf("dialog after second SendCode = %+v, want read=%d unread=1", afterSecondSendCode, readWatermark)
 	}
 
-	// Completing SignIn adds its own welcome message (a second, independent
-	// source of new messages) without touching the read watermark either.
-	if _, signInMessage, needSignUp, err := svc.SignIn(ctx, domain.Authorization{}, phone, hash, "12345"); err != nil || needSignUp {
+	// Completing SignIn must not emit another welcome (once-per-account) and
+	// must not reset the read watermark established above.
+	code := loginCodeFromOfficialTopMessage(t, dialogs, u.ID)
+	if _, signInMessage, needSignUp, err := svc.SignIn(ctx, domain.Authorization{}, phone, hash, code); err != nil || needSignUp {
 		t.Fatalf("SignIn second needSignUp=%v err=%v", needSignUp, err)
 	} else if signInMessage.ID != 0 {
 		t.Fatalf("SignIn second returned a late login message %+v", signInMessage)
 	}
 	afterSecondSignIn := dialogState()
-	if afterSecondSignIn.ReadInboxMaxID != readWatermark || afterSecondSignIn.UnreadCount != 2 {
-		t.Fatalf("dialog after second SignIn = %+v, want read=%d unread=2 (new code + its own welcome message)", afterSecondSignIn, readWatermark)
+	if afterSecondSignIn.ReadInboxMaxID != readWatermark || afterSecondSignIn.UnreadCount != 1 {
+		t.Fatalf("dialog after second SignIn = %+v, want read=%d unread=1 (only the new code message)", afterSecondSignIn, readWatermark)
 	}
 
 	// One more full round trip to make sure the watermark keeps holding
@@ -741,17 +765,16 @@ func TestSendCodeLoginMessagePreservesOfficialDialogReadWatermark(t *testing.T) 
 		t.Fatalf("SendCode signin third: %v", err)
 	}
 	afterThirdSendCode := dialogState()
-	if afterThirdSendCode.ReadInboxMaxID != readWatermark || afterThirdSendCode.UnreadCount != 3 {
-		t.Fatalf("dialog after third SendCode = %+v, want read=%d unread=3", afterThirdSendCode, readWatermark)
+	if afterThirdSendCode.ReadInboxMaxID != readWatermark || afterThirdSendCode.UnreadCount != 2 {
+		t.Fatalf("dialog after third SendCode = %+v, want read=%d unread=2", afterThirdSendCode, readWatermark)
 	}
-	if _, signInMessage, needSignUp, err := svc.SignIn(ctx, domain.Authorization{}, phone, hash, "12345"); err != nil || needSignUp {
+	code = loginCodeFromOfficialTopMessage(t, dialogs, u.ID)
+	if _, _, needSignUp, err := svc.SignIn(ctx, domain.Authorization{}, phone, hash, code); err != nil || needSignUp {
 		t.Fatalf("SignIn third needSignUp=%v err=%v", needSignUp, err)
-	} else if signInMessage.ID != 0 {
-		t.Fatalf("SignIn third returned a late login message %+v", signInMessage)
 	}
 	afterThirdSignIn := dialogState()
-	if afterThirdSignIn.ReadInboxMaxID != readWatermark || afterThirdSignIn.UnreadCount != 4 {
-		t.Fatalf("dialog after third SignIn = %+v, want read=%d unread=4", afterThirdSignIn, readWatermark)
+	if afterThirdSignIn.ReadInboxMaxID != readWatermark || afterThirdSignIn.UnreadCount != 2 {
+		t.Fatalf("dialog after third SignIn = %+v, want read=%d unread=2", afterThirdSignIn, readWatermark)
 	}
 }
 
@@ -788,7 +811,8 @@ func TestSignInExistingTwoFactorAccountNeedsPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendCode signin: %v", err)
 	}
-	got, signInMessage, needSignUp, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, "+15550004312", hash, "12345")
+	code := loginCodeFromOfficialTopMessage(t, dialogs, u.ID)
+	got, signInMessage, needSignUp, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, "+15550004312", hash, code)
 	if !errors.Is(err, domain.ErrSessionPasswordNeeded) {
 		t.Fatalf("SignIn err = %v, want ErrSessionPasswordNeeded", err)
 	}

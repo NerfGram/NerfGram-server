@@ -7,11 +7,11 @@ import (
 )
 
 const (
-	DefaultPublicBaseURL = "https://telesrv.net"
-	DefaultWebBaseURL    = "https://weba.telesrv.net"
+	DefaultPublicBaseURL = "https://t.fromchat.ru"
+	DefaultWebBaseURL    = "https://web.fromchat.ru"
 	DefaultAppScheme     = "telesrv"
-	DefaultAppName       = "telesrv"
-	DefaultDownloadURL   = "https://fromgram.org"
+	DefaultAppName       = "FromGram"
+	DefaultDownloadURL   = "https://t.fromchat.ru"
 )
 const MaxChatlistSlugBytes = 128
 
@@ -258,7 +258,7 @@ func Build(baseURL, path string, query url.Values) string {
 func Host(baseURL string) string {
 	baseURL, err := ValidateBaseURL(baseURL)
 	if err != nil {
-		return "telesrv.net"
+		return "fromgram.org"
 	}
 	parsed, _ := url.Parse(baseURL)
 	if host := parsed.Hostname(); host != "" {

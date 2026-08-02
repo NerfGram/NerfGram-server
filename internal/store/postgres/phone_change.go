@@ -66,7 +66,19 @@ func (s *PhoneChangeStore) ChangePhone(ctx context.Context, req domain.PhoneChan
 
 	var row sqlcgen.User
 	if req.SignupEmail != "" {
-		row, err = qtx.UpdateUserPhoneAndSignupEmail(ctx, sqlcgen.UpdateUserPhoneAndSignupEmailParams{ID: req.UserID, Phone: req.Phone, SignupEmail: req.SignupEmail})
+		_, err = tx.Exec(ctx, `
+UPDATE users
+SET phone = $1,
+    signup_email = $2,
+    updated_at = now()
+WHERE id = $3 AND deleted_at IS NULL`, req.Phone, req.SignupEmail, req.UserID)
+		if err != nil {
+			if isUniqueConstraint(err, "users_phone_unique_idx") || isUniqueConstraint(err, "users_signup_email_lower_unique_idx") {
+				return domain.PhoneChangeResult{}, domain.ErrPhoneNumberOccupied
+			}
+			return domain.PhoneChangeResult{}, fmt.Errorf("update user phone: %w", err)
+		}
+		row, err = qtx.GetUserByID(ctx, req.UserID)
 	} else {
 		row, err = qtx.UpdateUserPhone(ctx, sqlcgen.UpdateUserPhoneParams{ID: req.UserID, Phone: req.Phone})
 	}

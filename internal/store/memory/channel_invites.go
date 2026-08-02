@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"sort"
 	"strings"
 	"telesrv/internal/domain"
@@ -176,16 +177,18 @@ func (s *ChannelStore) ExportInvite(_ context.Context, req domain.ExportChannelI
 		return domain.ExportChannelInviteResult{}, err
 	}
 	invite := domain.ChannelInvite{
-		ChannelID:     req.ChannelID,
-		InviteID:      inviteID,
-		Hash:          hash,
-		AdminUserID:   req.UserID,
-		Title:         req.Title,
-		Permanent:     req.ExpireDate == 0 && req.UsageLimit == 0 && !req.RequestNeeded && req.Title == "",
-		RequestNeeded: req.RequestNeeded,
-		ExpireDate:    req.ExpireDate,
-		UsageLimit:    req.UsageLimit,
-		Date:          req.Date,
+		ChannelID:          req.ChannelID,
+		InviteID:           inviteID,
+		Hash:               hash,
+		AdminUserID:        req.UserID,
+		Title:              req.Title,
+		Permanent:          req.ExpireDate == 0 && req.UsageLimit == 0 && !req.RequestNeeded && req.Title == "" && req.SubscriptionAmount == 0,
+		RequestNeeded:      req.RequestNeeded,
+		ExpireDate:         req.ExpireDate,
+		UsageLimit:         req.UsageLimit,
+		Date:               req.Date,
+		SubscriptionPeriod: req.SubscriptionPeriod,
+		SubscriptionAmount: req.SubscriptionAmount,
 	}
 	s.invites[hash] = invite
 	channel = s.refreshChannelHasLinkLocked(req.ChannelID)
@@ -740,6 +743,9 @@ func (s *ChannelStore) approveInviteImporterLocked(channel domain.Channel, invit
 			return domain.CreateChannelResult{}, domain.ErrInviteHashInvalid
 		}
 	}
+	if err := s.chargeStarsSubscriptionLocked(channel, invite, userID, date); err != nil {
+		return domain.CreateChannelResult{}, err
+	}
 	preJoinTopID := channel.TopMessageID
 	minID := channelInitialAvailableMinID(channel)
 	inviterID := invite.AdminUserID
@@ -982,6 +988,48 @@ func canInviteToChannel(channel domain.Channel, member domain.ChannelMember) boo
 func canExportChannelInvite(member domain.ChannelMember) bool {
 	return member.Role == domain.ChannelRoleCreator ||
 		(member.Role == domain.ChannelRoleAdmin && (member.AdminRights.InviteUsers || member.AdminRights.ChangeInfo))
+}
+
+func (s *ChannelStore) chargeStarsSubscriptionLocked(channel domain.Channel, invite domain.ChannelInvite, userID int64, date int) error {
+	if !invite.HasStarsSubscription() {
+		return nil
+	}
+	channelID := channel.ID
+	if channelID == 0 {
+		channelID = invite.ChannelID
+	}
+	if byChannel := s.starsSubscriptions[userID]; byChannel != nil {
+		if existing, ok := byChannel[channelID]; ok && !existing.Canceled && existing.UntilDate > date {
+			return nil
+		}
+	}
+	current, ok := s.starsBalances[userID]
+	if !ok {
+		current = domain.DefaultStarsStartingGrant
+	}
+	if current < invite.SubscriptionAmount {
+		return domain.ErrStarsInsufficient
+	}
+	s.starsBalances[userID] = current - invite.SubscriptionAmount
+	s.channelStarsBalances[channelID] += invite.SubscriptionAmount
+	title := channel.Title
+	if title == "" {
+		title = "Channel subscription"
+	}
+	if s.starsSubscriptions[userID] == nil {
+		s.starsSubscriptions[userID] = make(map[int64]domain.StarsSubscription)
+	}
+	s.starsSubscriptions[userID][channelID] = domain.StarsSubscription{
+		ID:         fmt.Sprintf("channel_%d", channelID),
+		UserID:     userID,
+		ChannelID:  channelID,
+		InviteHash: invite.Hash,
+		UntilDate:  date + invite.SubscriptionPeriod,
+		Period:     invite.SubscriptionPeriod,
+		Amount:     invite.SubscriptionAmount,
+		Title:      title,
+	}
+	return nil
 }
 
 func randomMemoryInviteHash() (string, error) {

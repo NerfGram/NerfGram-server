@@ -19,6 +19,7 @@ import (
 
 	"telesrv/internal/admin"
 	"telesrv/internal/domain"
+	"telesrv/internal/store/redisstore"
 )
 
 //go:embed web/dist
@@ -27,11 +28,12 @@ var webDist embed.FS
 type server struct {
 	cfg       uiConfig
 	read      *readStore
+	codes     *redisstore.CodeStore
 	web       fs.FS
 	webServer http.Handler
 }
 
-func newServer(cfg uiConfig, read *readStore) (*server, error) {
+func newServer(cfg uiConfig, read *readStore, codes *redisstore.CodeStore) (*server, error) {
 	web, err := fs.Sub(webDist, "web/dist")
 	if err != nil {
 		return nil, err
@@ -39,6 +41,7 @@ func newServer(cfg uiConfig, read *readStore) (*server, error) {
 	return &server{
 		cfg:       cfg,
 		read:      read,
+		codes:     codes,
 		web:       web,
 		webServer: http.FileServer(http.FS(web)),
 	}, nil
@@ -64,6 +67,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/messages/detail", s.requireAuthAPI(http.HandlerFunc(s.handleMessageDetailAPI)))
 	mux.Handle("GET /api/messages/groups", s.requireAuthAPI(http.HandlerFunc(s.handleGroupMessagesAPI)))
 	mux.Handle("GET /api/messages/groups/detail", s.requireAuthAPI(http.HandlerFunc(s.handleGroupMessageDetailAPI)))
+	mux.Handle("GET /api/codes", s.requireAuthAPI(http.HandlerFunc(s.handleCodesAPI)))
 	mux.Handle("GET /api/gifts", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftsAPI)))
 	mux.Handle("GET /api/official-gifts", s.requireAuthAPI(http.HandlerFunc(s.handleOfficialStarGiftsAPI)))
 	mux.Handle("GET /api/official-gifts/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleOfficialStarGiftAnimationAPI)))
@@ -83,10 +87,6 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/set-frozen", s.requireAuthAPI(http.HandlerFunc(s.handleSetAccountFrozenAPI)))
 	mux.Handle("POST /api/actions/grant-premium", s.requireAuthAPI(http.HandlerFunc(s.handleGrantPremiumAPI)))
 	mux.Handle("POST /api/actions/grant-stars", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarsAPI)))
-	mux.Handle("POST /api/actions/grant-star-gift", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarGiftAPI)))
-	mux.Handle("POST /api/actions/issue-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleIssueCollectibleUsernameAPI)))
-	mux.Handle("POST /api/actions/remove-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleRemoveCollectibleUsernameAPI)))
-	mux.Handle("POST /api/actions/set-fake", s.requireAuthAPI(http.HandlerFunc(s.handleSetFakeAPI)))
 	mux.Handle("POST /api/actions/set-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetVerifiedAPI)))
 	mux.Handle("POST /api/actions/set-account-flags", s.requireAuthAPI(http.HandlerFunc(s.handleSetUserFlagsAPI)))
 	mux.Handle("POST /api/actions/set-channel-flags", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelFlagsAPI)))
@@ -879,6 +879,22 @@ func (s *server) handleGroupMessageDetailAPI(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, detail)
 }
 
+func (s *server) handleCodesAPI(w http.ResponseWriter, r *http.Request) {
+	if s.codes == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "code store is not configured")
+		return
+	}
+	rows, err := s.codes.ListActive(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if rows == nil {
+		rows = []redisstore.ActivePhoneCode{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rows": rows})
+}
+
 type setAccountFrozenAPIRequest struct {
 	CommandID string    `json:"command_id"`
 	Reason    string    `json:"reason"`
@@ -946,118 +962,6 @@ func (s *server) handleGrantStarsAPI(w http.ResponseWriter, r *http.Request) {
 		Amount:      body.Amount,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/grant-stars", req)
-	writeCommandResultAPI(w, result, err)
-}
-
-type grantStarGiftAPIRequest struct {
-	CommandID  string `json:"command_id"`
-	Reason     string `json:"reason"`
-	Confirm    bool   `json:"confirm"`
-	UserID     int64  `json:"user_id"`
-	Username   string `json:"username"`
-	Phone      string `json:"phone"`
-	GiftID     int64  `json:"gift_id"`
-	PriceLabel string `json:"price_label"`
-	Message    string `json:"message"`
-	HideName   bool   `json:"hide_name"`
-}
-
-func (s *server) handleGrantStarGiftAPI(w http.ResponseWriter, r *http.Request) {
-	var body grantStarGiftAPIRequest
-	if !decodeAction(w, r, &body) {
-		return
-	}
-	req := admin.GrantStarGiftRequest{
-		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "grant-star-gift"),
-		UserID:      body.UserID,
-		Username:    body.Username,
-		Phone:       body.Phone,
-		GiftID:      body.GiftID,
-		PriceLabel:  body.PriceLabel,
-		Message:     body.Message,
-		HideName:    body.HideName,
-	}
-	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/grant-star-gift", req)
-	writeCommandResultAPI(w, result, err)
-}
-
-type issueCollectibleUsernameAPIRequest struct {
-	CommandID      string `json:"command_id"`
-	Reason         string `json:"reason"`
-	Confirm        bool   `json:"confirm"`
-	UserID         int64  `json:"user_id"`
-	Username       string `json:"username"`
-	Phone          string `json:"phone"`
-	NewUsername    string `json:"new_username"`
-	Currency       string `json:"currency"`
-	Amount         int64  `json:"amount"`
-	CryptoCurrency string `json:"crypto_currency"`
-	CryptoAmount   int64  `json:"crypto_amount"`
-	URL            string `json:"url"`
-	Active         bool   `json:"active"`
-}
-
-func (s *server) handleIssueCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
-	var body issueCollectibleUsernameAPIRequest
-	if !decodeAction(w, r, &body) {
-		return
-	}
-	req := admin.IssueCollectibleUsernameRequest{
-		CommandMeta:    s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "issue-collectible-username"),
-		UserID:         body.UserID,
-		Username:       body.Username,
-		Phone:          body.Phone,
-		NewUsername:    body.NewUsername,
-		Currency:       body.Currency,
-		Amount:         body.Amount,
-		CryptoCurrency: body.CryptoCurrency,
-		CryptoAmount:   body.CryptoAmount,
-		URL:            body.URL,
-		Active:         body.Active,
-	}
-	result, err := s.callAdminAPI(r.Context(), "/v1/usernames/issue-collectible", req)
-	writeCommandResultAPI(w, result, err)
-}
-
-type removeCollectibleUsernameAPIRequest struct {
-	CommandID string `json:"command_id"`
-	Reason    string `json:"reason"`
-	Confirm   bool   `json:"confirm"`
-	Username  string `json:"username"`
-}
-
-func (s *server) handleRemoveCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
-	var body removeCollectibleUsernameAPIRequest
-	if !decodeAction(w, r, &body) {
-		return
-	}
-	req := admin.RemoveCollectibleUsernameRequest{
-		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "remove-collectible-username"),
-		Username:    body.Username,
-	}
-	result, err := s.callAdminAPI(r.Context(), "/v1/usernames/remove-collectible", req)
-	writeCommandResultAPI(w, result, err)
-}
-
-type setFakeAPIRequest struct {
-	CommandID string `json:"command_id"`
-	Reason    string `json:"reason"`
-	Confirm   bool   `json:"confirm"`
-	UserID    int64  `json:"user_id"`
-	Fake      bool   `json:"fake"`
-}
-
-func (s *server) handleSetFakeAPI(w http.ResponseWriter, r *http.Request) {
-	var body setFakeAPIRequest
-	if !decodeAction(w, r, &body) {
-		return
-	}
-	req := admin.SetFakeRequest{
-		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-fake"),
-		UserID:      body.UserID,
-		Fake:        body.Fake,
-	}
-	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-fake", req)
 	writeCommandResultAPI(w, result, err)
 }
 

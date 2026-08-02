@@ -2066,19 +2066,21 @@ type UnpinAllChannelMessagesRequest struct {
 
 // ChannelInvite is an exported invite link without TL dependencies.
 type ChannelInvite struct {
-	ChannelID      int64
-	InviteID       int64
-	Hash           string
-	AdminUserID    int64
-	Title          string
-	Permanent      bool
-	Revoked        bool
-	RequestNeeded  bool
-	ExpireDate     int
-	UsageLimit     int
-	UsageCount     int
-	RequestedCount int
-	Date           int
+	ChannelID           int64
+	InviteID            int64
+	Hash                string
+	AdminUserID         int64
+	Title               string
+	Permanent           bool
+	Revoked             bool
+	RequestNeeded       bool
+	ExpireDate          int
+	UsageLimit          int
+	UsageCount          int
+	RequestedCount      int
+	Date                int
+	SubscriptionPeriod  int
+	SubscriptionAmount  int64
 }
 
 // ExportChannelInviteRequest creates one invite link.
@@ -2091,6 +2093,8 @@ type ExportChannelInviteRequest struct {
 	UsageLimit            int
 	LegacyRevokePermanent bool
 	Date                  int
+	SubscriptionPeriod    int
+	SubscriptionAmount    int64
 }
 
 // ExportChannelInviteResult returns the exported invite.

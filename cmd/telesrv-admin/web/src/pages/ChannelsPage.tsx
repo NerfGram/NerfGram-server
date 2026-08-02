@@ -80,7 +80,7 @@ export function ChannelsPage({ navigate }: { navigate: Navigate }) {
           </button>
           {data?.listing && data.has_more && (
             <button className="btn icon-text" type="button" onClick={() => load(true)} disabled={busy}>
-              <ChevronRight size={15} /> {t("messages.nextPage")}
+              <ChevronRight size={15} /> {t("common.nextPage")}
             </button>
           )}
         </form>

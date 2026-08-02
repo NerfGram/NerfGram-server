@@ -10,6 +10,7 @@ import { ChannelsPage } from "./ChannelsPage";
 import { BotDetailPage } from "./BotDetailPage";
 import { BotsPage } from "./BotsPage";
 import { EmojiPage } from "./EmojiPage";
+import { CodesPage } from "./CodesPage";
 import { Dashboard } from "./Dashboard";
 import { GroupMessageDetailPage } from "./GroupMessageDetailPage";
 import { GroupMessagesPage } from "./GroupMessagesPage";
@@ -110,6 +111,9 @@ export function Routes({ route, navigate }: { route: RouteState; navigate: Navig
   }
   if (route.path === "/emoji") {
     return <EmojiPage />;
+  }
+  if (route.path === "/codes") {
+    return <CodesPage />;
   }
 	if (route.path === "/gifts") {
 		return <GiftsPage />;

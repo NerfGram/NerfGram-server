@@ -18,7 +18,6 @@ import (
 	"github.com/iamxvbaba/td/bin"
 	mtcrypto "github.com/iamxvbaba/td/crypto"
 
-	"telesrv/internal/branding"
 	"telesrv/internal/domain"
 	"telesrv/internal/otpdelivery"
 	"telesrv/internal/store"
@@ -350,13 +349,8 @@ func (s *Service) CompletePasswordSignIn(ctx context.Context, authKeyID [8]byte)
 	if err := s.auths.MarkPasswordPassed(ctx, authKeyID); err != nil {
 		return err
 	}
-	// This is where a 2FA account's sign-in actually finishes — finishSignIn
-	// deliberately skipped the welcome message while password_pending.
-	if a, found, err := s.auths.ByAuthKey(ctx, authKeyID); err == nil && found {
-		if u, found, err := s.users.ByID(ctx, a.UserID); err == nil && found {
-			s.recordWelcomeMessage(ctx, u)
-		}
-	}
+	// Welcome is SignUp-only. New-login notices are recorded by the RPC layer
+	// after password verification (it has ClientInfo for device/location).
 	return nil
 }
 
@@ -1147,10 +1141,8 @@ func (s *Service) finishSignIn(ctx context.Context, auth domain.Authorization, e
 	if passwordNeeded {
 		return existing, domain.Message{}, false, domain.ErrSessionPasswordNeeded
 	}
-	// 2FA accounts only really finish authorizing in CompletePasswordSignIn;
-	// firing the welcome message here too would notify about an attempt that
-	// never actually got past the password check.
-	s.recordWelcomeMessage(ctx, existing)
+	// Returning users get a new-login notice (RPC enriches device/location).
+	// The once-per-account welcome is SignUp-only.
 	return existing, domain.Message{}, false, nil
 }
 
@@ -1282,17 +1274,10 @@ func (s *Service) SignUp(ctx context.Context, auth domain.Authorization, phone, 
 		return domain.User{}, domain.Message{}, err
 	}
 	loginMessage := domain.Message{}
-	// A new account has no owner/dialog at issuance time. Only the development
-	// phone/App registration path creates its bootstrap 777000 message here;
-	// external SMS, email setup, and email-signup registration retain only
-	// their verified fact — every account additionally gets the welcome
-	// message below regardless of channel.
-	if rec.Channel == codeChannelPhone {
-		loginMessage, err = s.recordLoginMessage(ctx, u.ID, rec.Code)
-		if err != nil {
-			return domain.User{}, domain.Message{}, err
-		}
-	}
+	// A new account has no owner/dialog at issuance time. Do not echo the
+	// registration code into 777000 — that first code was delivered via SMS/
+	// email/setup. Subsequent SendCode for existing accounts uses durable
+	// DeliverLoginCodeMessage. Welcome is SignUp-only.
 	s.recordWelcomeMessage(ctx, u)
 	return u, loginMessage, nil
 }
@@ -1522,64 +1507,66 @@ func (s *Service) passwordNeeded(ctx context.Context, userID int64) (bool, error
 	return found && settings.HasPassword, nil
 }
 
-const loginMessageTpl = `Login code: %s. Do not give this code to anyone, even if they say they are from ` + branding.ProductName + `!
-
-This code can be used to log in to your ` + branding.ProductName + ` account. We never ask it for anything else.
-
-If you didn't request this code by trying to log in on another device, simply ignore this message.`
-
-func (s *Service) recordLoginMessage(ctx context.Context, userID int64, code string) (domain.Message, error) {
-	if s.messages == nil || s.dialogs == nil {
-		return domain.Message{}, nil
-	}
-	body := fmt.Sprintf(loginMessageTpl, code)
-	codeOffset := len("Login code: ")
-	msg, err := s.messages.Create(ctx, domain.Message{
-		OwnerUserID: userID,
-		Peer:        domain.Peer{Type: domain.PeerTypeUser, ID: domain.OfficialSystemUserID},
-		From:        domain.Peer{Type: domain.PeerTypeUser, ID: domain.OfficialSystemUserID},
-		Date:        int(time.Now().Unix()),
-		Body:        body,
-		Entities: []domain.MessageEntity{
-			{Type: domain.MessageEntityBold, Offset: 0, Length: len("Login code:")},
-			{Type: domain.MessageEntityBold, Offset: codeOffset, Length: len(code)},
-		},
-	})
-	if err != nil {
-		return domain.Message{}, err
-	}
-	if err := s.dialogs.UpsertInbox(ctx, userID, domain.Dialog{
-		Peer:           msg.Peer,
-		TopMessage:     msg.ID,
-		TopMessageDate: msg.Date,
-	}); err != nil {
-		return domain.Message{}, err
-	}
-	return msg, nil
-}
-
-// recordWelcomeMessage writes the unconditional "Welcome to FromGram!"
-// 777000 message for every completed sign-in (SignUp and every subsequent
-// SignIn/SignInWithEmail), regardless of channel. Best-effort: a failure here
-// must never fail the sign-in itself, since unlike recordLoginMessage it
-// carries no secret the caller needs.
+// recordWelcomeMessage writes the once-per-account welcome from 777000.
+// Call only from SignUp. Best-effort: never fail the sign-up itself.
 func (s *Service) recordWelcomeMessage(ctx context.Context, u domain.User) {
-	if s == nil || s.messages == nil || s.dialogs == nil {
+	if s == nil {
 		return
 	}
 	msg, err := domain.OfficialWelcomeMessage(u.ID, domain.SignInMethodLabel(u), int(time.Now().Unix()))
 	if err != nil {
 		return
 	}
-	created, err := s.messages.Create(ctx, msg)
+	_, _ = s.deliverOfficialInbox(ctx, msg)
+}
+
+// RecordNewLoginMessage writes the 777000 "new login" notice for an existing
+// account (each completed SignIn after SignUp). Best-effort; never fails the sign-in itself.
+func (s *Service) RecordNewLoginMessage(ctx context.Context, u domain.User, whenLabel, device, location string) {
+	if s == nil || u.ID == 0 {
+		return
+	}
+	msg, err := domain.OfficialNewLoginMessage(
+		u.ID,
+		domain.ServiceNotificationDisplayName(u),
+		whenLabel,
+		device,
+		location,
+		int(time.Now().Unix()),
+	)
 	if err != nil {
 		return
 	}
-	_ = s.dialogs.UpsertInbox(ctx, u.ID, domain.Dialog{
-		Peer:           created.Peer,
-		TopMessage:     created.ID,
-		TopMessageDate: created.Date,
-	})
+	if _, err := s.deliverOfficialInbox(ctx, msg); err != nil {
+		log.Printf("RecordNewLoginMessage deliver failed: user=%d err=%v\n", u.ID, err)
+	}
+}
+
+// deliverOfficialInbox prefers the durable pts/dispatch path so clients see
+// the message via updates.getDifference. Falls back to Create+UpsertInbox when
+// that store is unavailable (dev wiring without LoginCodeDelivery).
+func (s *Service) deliverOfficialInbox(ctx context.Context, msg domain.Message) (domain.Message, error) {
+	if delivery, ok := s.loginCodeDelivery.(store.SystemInboxDeliveryStore); ok && delivery != nil {
+		return delivery.DeliverSystemInboxMessage(ctx, msg)
+	}
+	if s.messages == nil {
+		return domain.Message{}, nil
+	}
+	if inbox, ok := s.messages.(store.SystemInboxDeliveryStore); ok {
+		return inbox.DeliverSystemInboxMessage(ctx, msg)
+	}
+	created, err := s.messages.Create(ctx, msg)
+	if err != nil {
+		return domain.Message{}, err
+	}
+	if s.dialogs != nil {
+		_ = s.dialogs.UpsertInbox(ctx, msg.OwnerUserID, domain.Dialog{
+			Peer:           created.Peer,
+			TopMessage:     created.ID,
+			TopMessageDate: created.Date,
+		})
+	}
+	return created, nil
 }
 
 func (s *Service) validateBindTempAuthKey(ctx context.Context, sessionID int64, binding domain.TempAuthKeyBinding) (mtcrypto.BindAuthKeyInner, int, error) {

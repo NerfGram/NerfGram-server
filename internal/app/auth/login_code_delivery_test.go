@@ -70,16 +70,16 @@ func TestExistingAccountSendCodeDeliversBeforeSignInAndDoesNotRedeliver(t *testi
 		t.Fatalf("SendCode hash=%q delivery calls=%d, want non-empty/1", hash, len(delivery.requests))
 	}
 	req := delivery.requests[0]
-	if req.UserID != u.ID || req.PhoneCodeHash != hash || req.Code != "12345" || req.Date < before || req.ExpiresAt < int64(before)+int64((5*time.Minute)/time.Second)-1 {
-		t.Fatalf("delivery request = %+v, want user=%d hash=%q code=12345 date>=%d", req, u.ID, hash, before)
+	if req.UserID != u.ID || req.PhoneCodeHash != hash || req.Code == "" || req.Date < before || req.ExpiresAt < int64(before)+int64((5*time.Minute)/time.Second)-1 {
+		t.Fatalf("delivery request = %+v, want user=%d hash=%q non-empty code date>=%d", req, u.ID, hash, before)
 	}
-	if rec, found, err := codes.Get(ctx, hash); err != nil || !found || rec.Code != "12345" {
+	if rec, found, err := codes.Get(ctx, hash); err != nil || !found || rec.Code != req.Code {
 		t.Fatalf("code after synchronous delivery = %+v found=%v err=%v", rec, found, err)
 	}
 
 	var key [8]byte
 	key[0] = 0x92
-	got, lateMessage, needSignUp, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, "+15550009201", hash, "12345")
+	got, lateMessage, needSignUp, err := svc.SignIn(ctx, domain.Authorization{AuthKeyID: key}, "+15550009201", hash, req.Code)
 	if err != nil || needSignUp || got.ID != u.ID {
 		t.Fatalf("SignIn user=%d needSignUp=%v err=%v, want %d/false", got.ID, needSignUp, err, u.ID)
 	}

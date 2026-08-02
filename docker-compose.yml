@@ -101,6 +101,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       telesrv:
         condition: service_started
     environment:
@@ -110,6 +112,7 @@ services:
       TELESRV_ADMIN_UI_PASSWORD: "changeme_ui_password"
       TELESRV_ADMIN_SESSION_KEY: "changeme_admin_session_key"
       TELESRV_POSTGRES_DSN: "postgres://telesrv:telesrv@postgres:5432/telesrv?sslmode=disable"
+      TELESRV_REDIS_ADDR: "redis:6379"
     volumes:
       - ./data:/app/data
     ports:

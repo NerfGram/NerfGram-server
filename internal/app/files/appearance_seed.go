@@ -136,6 +136,7 @@ func (s *Service) appearanceSeedReady(ctx context.Context, catalog appearance.Ca
 		if !ok {
 			continue
 		}
+		want = appearanceDocumentForMedia(want)
 		if doc.DCID != s.dc || doc.MimeType != want.MimeType || doc.Size != want.Size {
 			return false, nil
 		}
@@ -163,6 +164,7 @@ func (s *Service) seedAppearanceDocument(ctx context.Context, in appearance.Docu
 	if in.ID == 0 {
 		return domain.Document{}, 0, nil
 	}
+	in = appearanceDocumentForMedia(in)
 	doc := domain.Document{
 		ID:         in.ID,
 		AccessHash: in.AccessHash,
@@ -238,6 +240,28 @@ func readAppearanceSeedBlob(path, wantSHA string) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("%s sha256 = %s, want %s", path, got, wantSHA)
 	}
 	return data, append([]byte(nil), sum[:]...), nil
+}
+
+// appearanceDocumentForMedia mirrors appearanceDocumentForClients: store PNG
+// pattern bytes under doc:<id> so upload.getFile matches account.getChatThemes.
+func appearanceDocumentForMedia(in appearance.Document) appearance.Document {
+	if in.MimeType != "application/x-tgwallpattern" || len(in.Thumbs) == 0 {
+		return in
+	}
+	thumb := in.Thumbs[0]
+	if thumb.Path == "" || thumb.Size <= 0 || thumb.W <= 0 || thumb.H <= 0 {
+		return in
+	}
+	out := in
+	out.MimeType = "image/png"
+	out.Size = int64(thumb.Size)
+	out.Path = thumb.Path
+	out.SHA256 = thumb.SHA256
+	out.Attributes = []appearance.DocumentAttribute{
+		{Kind: "image_size", W: thumb.W, H: thumb.H},
+		{Kind: "filename", FileName: "pattern.png"},
+	}
+	return out
 }
 
 func appearanceDocumentAttributes(in []appearance.DocumentAttribute) []domain.DocumentAttribute {

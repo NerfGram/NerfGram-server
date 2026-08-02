@@ -12,8 +12,8 @@ func TestNormalizeBaseURL(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{name: "default", raw: "", want: "https://telesrv.net"},
-		{name: "host only", raw: "telesrv.net/", want: "https://telesrv.net"},
+		{name: "default", raw: "", want: "https://fromgram.org"},
+		{name: "host only", raw: "fromgram.org/", want: "https://fromgram.org"},
 		{name: "local http", raw: "http://127.0.0.1:2401/", want: "http://127.0.0.1:2401"},
 	}
 	for _, tt := range tests {
@@ -32,7 +32,7 @@ func TestValidateBaseURL(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "default", raw: "", want: "https://telesrv.net"},
+		{name: "default", raw: "", want: "https://fromgram.org"},
 		{name: "host and path", raw: "links.example.test/root/", want: "https://links.example.test/root"},
 		{name: "local HTTP", raw: "http://127.0.0.1:2401/", want: "http://127.0.0.1:2401"},
 		{name: "missing host", raw: "https://", wantErr: true},

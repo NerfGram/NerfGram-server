@@ -75,14 +75,17 @@ func (s *UserStore) ByEmail(ctx context.Context, email string) (domain.User, boo
 	if email == "" {
 		return domain.User{}, false, nil
 	}
-	row, err := s.q.GetUserBySignupEmail(ctx, email)
+	var id int64
+	err := s.db.QueryRow(ctx, `
+SELECT id FROM users
+WHERE lower(signup_email) = lower($1) AND signup_email <> ''`, email).Scan(&id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.User{}, false, nil
 		}
 		return domain.User{}, false, fmt.Errorf("get user by signup email: %w", err)
 	}
-	return userFromModel(row), true, nil
+	return s.ByID(ctx, id)
 }
 
 func (s *UserStore) ByPhones(ctx context.Context, phones []string) ([]domain.User, error) {
@@ -304,7 +307,6 @@ func (s *UserStore) Create(ctx context.Context, u domain.User) (domain.User, err
 	row, err := qtx.CreateUser(ctx, sqlcgen.CreateUserParams{
 		AccessHash:       u.AccessHash,
 		Phone:            u.Phone,
-		SignupEmail:      u.SignupEmail,
 		FirstName:        u.FirstName,
 		LastName:         u.LastName,
 		Username:         u.Username,
@@ -317,6 +319,14 @@ func (s *UserStore) Create(ctx context.Context, u domain.User) (domain.User, err
 		}
 		return domain.User{}, fmt.Errorf("create user: %w", err)
 	}
+	if strings.TrimSpace(u.SignupEmail) != "" {
+		if _, err := tx.Exec(ctx, `UPDATE users SET signup_email = $1, updated_at = now() WHERE id = $2`, strings.TrimSpace(u.SignupEmail), row.ID); err != nil {
+			if isUniqueConstraint(err, "users_signup_email_lower_unique_idx") {
+				return domain.User{}, domain.ErrPhoneNumberOccupied
+			}
+			return domain.User{}, fmt.Errorf("set signup email: %w", err)
+		}
+	}
 	usernameLower := strings.ToLower(row.Username)
 	if usernameLower != "" {
 		if err := replacePeerUsernameTx(ctx, tx, peerUsernameTypeUser, row.ID, row.Username, usernameLower); err != nil {
@@ -327,7 +337,9 @@ func (s *UserStore) Create(ctx context.Context, u domain.User) (domain.User, err
 		return domain.User{}, fmt.Errorf("commit create user: %w", err)
 	}
 	committed = true
-	return userFromModel(row), nil
+	out := userFromModel(row)
+	out.SignupEmail = strings.TrimSpace(u.SignupEmail)
+	return out, nil
 }
 
 // SetPremiumUntil 把会员到期时间设为绝对 Unix 秒（0 = 清除会员）。
@@ -715,7 +727,6 @@ func userFromModel(r sqlcgen.User) domain.User {
 		ID:                     r.ID,
 		AccessHash:             r.AccessHash,
 		Phone:                  r.Phone,
-		SignupEmail:            r.SignupEmail,
 		FirstName:              r.FirstName,
 		LastName:               r.LastName,
 		About:                  r.About,

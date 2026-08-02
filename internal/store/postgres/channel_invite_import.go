@@ -126,6 +126,9 @@ func (s *ChannelStore) approveInviteImporterTx(ctx context.Context, tx pgx.Tx, c
 	} else if !errors.Is(err, domain.ErrChannelPrivate) {
 		return domain.CreateChannelResult{}, err
 	}
+	if err := s.chargeStarsSubscriptionTx(ctx, tx, channel, invite, userID, date); err != nil {
+		return domain.CreateChannelResult{}, err
+	}
 	preJoinTopID := channel.TopMessageID
 	minID := channelInitialAvailableMinID(channel)
 	inviterID := invite.AdminUserID
@@ -298,6 +301,78 @@ SET requested_count = CASE WHEN requested_count > 0 THEN requested_count - 1 ELS
     updated_at = now()
 WHERE channel_id = $1 AND invite_id = $2`, invite.ChannelID, invite.InviteID); err != nil {
 		return fmt.Errorf("decrement channel invite requested count: %w", err)
+	}
+	return nil
+}
+
+func (s *ChannelStore) chargeStarsSubscriptionTx(ctx context.Context, tx pgx.Tx, channel domain.Channel, invite domain.ChannelInvite, userID int64, date int) error {
+	if !invite.HasStarsSubscription() {
+		return nil
+	}
+	channelID := channel.ID
+	if channelID == 0 {
+		channelID = invite.ChannelID
+	}
+	var existingUntil int
+	err := tx.QueryRow(ctx, `
+SELECT until_date
+FROM stars_subscriptions
+WHERE user_id = $1 AND channel_id = $2 AND NOT canceled`, userID, channelID).Scan(&existingUntil)
+	if err == nil && existingUntil > date {
+		return nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("lookup stars subscription: %w", err)
+	}
+	balance := domain.StarsBalance{UserID: userID}
+	if err := tx.QueryRow(ctx, `SELECT balance, granted FROM stars_balances WHERE user_id = $1 FOR UPDATE`, userID).
+		Scan(&balance.Balance, &balance.Granted); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.ErrStarsInsufficient
+		}
+		return fmt.Errorf("lock subscription payer balance: %w", err)
+	}
+	if balance.Balance < invite.SubscriptionAmount {
+		return domain.ErrStarsInsufficient
+	}
+	if err := tx.QueryRow(ctx, `
+UPDATE stars_balances
+SET balance = balance - $2, updated_at = now()
+WHERE user_id = $1
+RETURNING balance`, userID, invite.SubscriptionAmount).Scan(&balance.Balance); err != nil {
+		return fmt.Errorf("debit subscription payer balance: %w", err)
+	}
+	title := channel.Title
+	if title == "" {
+		title = "Channel subscription"
+	}
+	if err := insertStarsTxn(ctx, tx, userID, -invite.SubscriptionAmount, domain.StarsReasonSubscription,
+		domain.Peer{Type: domain.PeerTypeChannel, ID: channelID}, date, title, ""); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO channel_stars_balances(channel_id, balance)
+VALUES($1, $2)
+ON CONFLICT(channel_id) DO UPDATE
+SET balance = channel_stars_balances.balance + EXCLUDED.balance, updated_at = now()`,
+		channelID, invite.SubscriptionAmount); err != nil {
+		return fmt.Errorf("credit channel stars for subscription: %w", err)
+	}
+	until := date + invite.SubscriptionPeriod
+	if _, err := tx.Exec(ctx, `
+INSERT INTO stars_subscriptions (
+    user_id, channel_id, invite_hash, until_date, period, amount, canceled, title, created_at, updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,false,$7,now(),now())
+ON CONFLICT (user_id, channel_id) DO UPDATE SET
+    invite_hash = EXCLUDED.invite_hash,
+    until_date = EXCLUDED.until_date,
+    period = EXCLUDED.period,
+    amount = EXCLUDED.amount,
+    canceled = false,
+    title = EXCLUDED.title,
+    updated_at = now()`,
+		userID, channelID, invite.Hash, until, invite.SubscriptionPeriod, invite.SubscriptionAmount, title); err != nil {
+		return fmt.Errorf("upsert stars subscription: %w", err)
 	}
 	return nil
 }

@@ -74,8 +74,8 @@ func (r *Router) onPhoneRequestCall(ctx context.Context, req *tg.PhoneRequestCal
 	if err != nil {
 		return nil, internalErr()
 	}
-	// 自呼 / bot / 不存在统一 USER_ID_INVALID。
-	if !found || callee.ID == 0 || callee.ID == callerID || callee.Bot {
+	// 自呼 / bot / 系统通知号 / support / 不存在统一 USER_ID_INVALID。
+	if !found || callee.ID == 0 || callee.ID == callerID || callee.Bot || callee.Support || callee.ID == domain.OfficialSystemUserID {
 		return nil, userIDInvalidErr()
 	}
 	if blocked, err := r.peerBlocksUser(ctx, callerID, callee.ID); err != nil {

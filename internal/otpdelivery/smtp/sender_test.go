@@ -47,12 +47,12 @@ func TestEmailContentUsesConfiguredAppName(t *testing.T) {
 	}
 }
 
-// TestNewDefaultsAppNameToTelesrvWhenUnset asserts the package's own
+// TestNewDefaultsAppNameToFromGramWhenUnset asserts the package's own
 // self-contained fallback (used only if a caller forgets to pass AppName)
 // still works, mirroring FromName/TLSMode/Timeout's existing defaulting.
-func TestNewDefaultsAppNameToTelesrvWhenUnset(t *testing.T) {
+func TestNewDefaultsAppNameToFromGramWhenUnset(t *testing.T) {
 	sender := New(Config{Host: "smtp.example.test", Port: 25, From: "noreply@example.test"})
-	if sender.cfg.AppName != "telesrv" {
-		t.Fatalf("cfg.AppName = %q, want default %q", sender.cfg.AppName, "telesrv")
+	if sender.cfg.AppName != "FromGram" {
+		t.Fatalf("cfg.AppName = %q, want default %q", sender.cfg.AppName, "FromGram")
 	}
 }

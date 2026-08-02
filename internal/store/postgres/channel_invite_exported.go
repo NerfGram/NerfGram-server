@@ -57,16 +57,18 @@ WHERE channel_id = $1 AND admin_user_id = $2 AND permanent AND NOT revoked`, req
 		return domain.ExportChannelInviteResult{}, err
 	}
 	invite := domain.ChannelInvite{
-		ChannelID:     req.ChannelID,
-		InviteID:      inviteID,
-		Hash:          hash,
-		AdminUserID:   req.UserID,
-		Title:         req.Title,
-		Permanent:     req.ExpireDate == 0 && req.UsageLimit == 0 && !req.RequestNeeded && req.Title == "",
-		RequestNeeded: req.RequestNeeded,
-		ExpireDate:    req.ExpireDate,
-		UsageLimit:    req.UsageLimit,
-		Date:          req.Date,
+		ChannelID:          req.ChannelID,
+		InviteID:           inviteID,
+		Hash:               hash,
+		AdminUserID:        req.UserID,
+		Title:              req.Title,
+		Permanent:          req.ExpireDate == 0 && req.UsageLimit == 0 && !req.RequestNeeded && req.Title == "" && req.SubscriptionAmount == 0,
+		RequestNeeded:      req.RequestNeeded,
+		ExpireDate:         req.ExpireDate,
+		UsageLimit:         req.UsageLimit,
+		Date:               req.Date,
+		SubscriptionPeriod: req.SubscriptionPeriod,
+		SubscriptionAmount: req.SubscriptionAmount,
 	}
 	if err := insertChannelInviteTx(ctx, tx, invite); err != nil {
 		return domain.ExportChannelInviteResult{}, err
@@ -114,6 +116,7 @@ func (s *ChannelStore) EnsurePermanentInvite(ctx context.Context, channelID, adm
 	rows, err := tx.Query(ctx, `
 SELECT channel_id, invite_id, hash, admin_user_id, title, permanent, revoked, request_needed,
        COALESCE(expire_date, 0), COALESCE(usage_limit, 0), usage_count, requested_count,
+       COALESCE(subscription_period, 0), COALESCE(subscription_amount, 0),
        EXTRACT(EPOCH FROM created_at)::int
 FROM channel_invites
 WHERE channel_id = $1 AND admin_user_id = $2 AND permanent AND NOT revoked
@@ -193,6 +196,7 @@ WHERE channel_id = $1 AND admin_user_id = $2 AND revoked = $3`, req.ChannelID, r
 	rows, err := s.db.Query(ctx, `
 SELECT channel_id, invite_id, hash, admin_user_id, title, permanent, revoked, request_needed,
        COALESCE(expire_date, 0), COALESCE(usage_limit, 0), usage_count, requested_count,
+       COALESCE(subscription_period, 0), COALESCE(subscription_amount, 0),
        EXTRACT(EPOCH FROM created_at)::int
 FROM channel_invites
 WHERE channel_id = $1
@@ -223,6 +227,7 @@ func (s *ChannelStore) getPermanentInviteForAdmin(ctx context.Context, db sqlcge
 	row := db.QueryRow(ctx, `
 SELECT channel_id, invite_id, hash, admin_user_id, title, permanent, revoked, request_needed,
        COALESCE(expire_date, 0), COALESCE(usage_limit, 0), usage_count, requested_count,
+       COALESCE(subscription_period, 0), COALESCE(subscription_amount, 0),
        EXTRACT(EPOCH FROM created_at)::int
 FROM channel_invites
 WHERE channel_id = $1 AND admin_user_id = $2 AND permanent AND NOT revoked
@@ -439,11 +444,13 @@ func insertChannelInviteTx(ctx context.Context, tx pgx.Tx, invite domain.Channel
 	if _, err := tx.Exec(ctx, `
 INSERT INTO channel_invites (
     channel_id, invite_id, hash, admin_user_id, title, permanent, revoked, request_needed,
-    expire_date, usage_limit, usage_count, requested_count, created_at, updated_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,0),NULLIF($10,0),$11,$12,to_timestamp($13),to_timestamp($13))`,
+    expire_date, usage_limit, usage_count, requested_count, subscription_period, subscription_amount,
+    created_at, updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9,0),NULLIF($10,0),$11,$12,$13,$14,to_timestamp($15),to_timestamp($15))`,
 		invite.ChannelID, invite.InviteID, invite.Hash, invite.AdminUserID, invite.Title,
 		invite.Permanent, invite.Revoked, invite.RequestNeeded, invite.ExpireDate,
-		invite.UsageLimit, invite.UsageCount, invite.RequestedCount, invite.Date); err != nil {
+		invite.UsageLimit, invite.UsageCount, invite.RequestedCount,
+		invite.SubscriptionPeriod, invite.SubscriptionAmount, invite.Date); err != nil {
 		return fmt.Errorf("insert channel invite: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -472,7 +479,9 @@ func (s *ChannelStore) getInviteByHashLocked(ctx context.Context, db sqlcgen.DBT
 	row := db.QueryRow(ctx, `
 SELECT `+channelColumns+`,
        i.channel_id, i.invite_id, i.hash, i.admin_user_id, i.title, i.permanent, i.revoked, i.request_needed,
-       COALESCE(i.expire_date, 0), COALESCE(i.usage_limit, 0), i.usage_count, i.requested_count, EXTRACT(EPOCH FROM i.created_at)::int
+       COALESCE(i.expire_date, 0), COALESCE(i.usage_limit, 0), i.usage_count, i.requested_count,
+       COALESCE(i.subscription_period, 0), COALESCE(i.subscription_amount, 0),
+       EXTRACT(EPOCH FROM i.created_at)::int
 FROM channel_invite_hashes h
 JOIN channel_invites i ON i.channel_id = h.channel_id AND i.invite_id = h.invite_id
 JOIN channels c ON c.id = i.channel_id AND NOT c.deleted
@@ -484,7 +493,8 @@ WHERE h.hash = $1 AND NOT i.revoked`+lockClause, hash)
 	dest := append(channelScanDest(&ch, &rights, &reactionPolicy, &wallpaper),
 		&invite.ChannelID, &invite.InviteID, &invite.Hash, &invite.AdminUserID, &invite.Title,
 		&invite.Permanent, &invite.Revoked, &invite.RequestNeeded, &invite.ExpireDate,
-		&invite.UsageLimit, &invite.UsageCount, &invite.RequestedCount, &invite.Date,
+		&invite.UsageLimit, &invite.UsageCount, &invite.RequestedCount,
+		&invite.SubscriptionPeriod, &invite.SubscriptionAmount, &invite.Date,
 	)
 	if err := row.Scan(dest...); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -504,6 +514,7 @@ func (s *ChannelStore) getInviteByChannelHash(ctx context.Context, db sqlcgen.DB
 	row := db.QueryRow(ctx, `
 SELECT channel_id, invite_id, hash, admin_user_id, title, permanent, revoked, request_needed,
        COALESCE(expire_date, 0), COALESCE(usage_limit, 0), usage_count, requested_count,
+       COALESCE(subscription_period, 0), COALESCE(subscription_amount, 0),
        EXTRACT(EPOCH FROM created_at)::int
 FROM channel_invites
 WHERE channel_id = $1 AND hash = $2`+lockClause, channelID, strings.TrimSpace(hash))
@@ -522,6 +533,7 @@ func (s *ChannelStore) getInviteByID(ctx context.Context, db sqlcgen.DBTX, chann
 	row := db.QueryRow(ctx, `
 SELECT channel_id, invite_id, hash, admin_user_id, title, permanent, revoked, request_needed,
        COALESCE(expire_date, 0), COALESCE(usage_limit, 0), usage_count, requested_count,
+       COALESCE(subscription_period, 0), COALESCE(subscription_amount, 0),
        EXTRACT(EPOCH FROM created_at)::int
 FROM channel_invites
 WHERE channel_id = $1 AND invite_id = $2`+lockClause, channelID, inviteID)
@@ -547,6 +559,8 @@ func scanChannelInvite(row rowScanner) (domain.ChannelInvite, error) {
 		&invite.UsageLimit,
 		&invite.UsageCount,
 		&invite.RequestedCount,
+		&invite.SubscriptionPeriod,
+		&invite.SubscriptionAmount,
 		&invite.Date,
 	)
 	return invite, err

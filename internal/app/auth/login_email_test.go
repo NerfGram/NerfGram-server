@@ -43,7 +43,8 @@ func TestSignInWithEmailCompletesLogin(t *testing.T) {
 	if _, _, _, err := svc.SignInWithEmail(ctx, domain.Authorization{AuthKeyID: key}, "+15550009001", hash, "anything-goes"); !errors.Is(err, ErrCodeInvalid) {
 		t.Fatalf("SignInWithEmail arbitrary nonempty code err=%v, want ErrCodeInvalid", err)
 	}
-	got, _, needSignUp, err := svc.SignInWithEmail(ctx, domain.Authorization{AuthKeyID: key}, "+15550009001", hash, "12345")
+	code := loginCodeFromOfficialTopMessage(t, dialogs, u.ID)
+	got, _, needSignUp, err := svc.SignInWithEmail(ctx, domain.Authorization{AuthKeyID: key}, "+15550009001", hash, code)
 	if err != nil {
 		t.Fatalf("SignInWithEmail: %v", err)
 	}
@@ -103,7 +104,8 @@ func TestSignInWithEmailStillHonorsTwoFactor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendCode signin: %v", err)
 	}
-	got, _, _, err := svc.SignInWithEmail(ctx, domain.Authorization{AuthKeyID: key}, "+15550009003", hash, "12345")
+	code := loginCodeFromOfficialTopMessage(t, dialogs, u.ID)
+	got, _, _, err := svc.SignInWithEmail(ctx, domain.Authorization{AuthKeyID: key}, "+15550009003", hash, code)
 	if !errors.Is(err, domain.ErrSessionPasswordNeeded) {
 		t.Fatalf("SignInWithEmail err = %v, want ErrSessionPasswordNeeded", err)
 	}

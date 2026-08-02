@@ -174,27 +174,65 @@ func DefaultDocument(in appearance.Document) tg.DocumentClass {
 	if in.ID == 0 {
 		return &tg.DocumentEmpty{}
 	}
+	doc := appearanceDocumentForClients(in)
 	return &tg.Document{
-		ID:            in.ID,
-		AccessHash:    in.AccessHash,
-		Date:          in.Date,
-		MimeType:      in.MimeType,
-		Size:          in.Size,
-		Thumbs:        DefaultPhotoSizes(in.Thumbs),
+		ID:            doc.ID,
+		AccessHash:    doc.AccessHash,
+		Date:          doc.Date,
+		MimeType:      doc.MimeType,
+		Size:          doc.Size,
+		Thumbs:        DefaultPhotoSizes(in.Thumbs, doc),
 		DCID:          appearanceSeedDCID,
-		Attributes:    DefaultDocumentAttributes(in.Attributes),
+		Attributes:    DefaultDocumentAttributes(doc.Attributes),
 		FileReference: nil,
 	}
 }
 
-func DefaultPhotoSizes(in []appearance.PhotoSize) []tg.PhotoSizeClass {
+// appearanceDocumentForClients rewrites gzip-SVG wall patterns as PNG using the
+// catalog thumb. Android ImageLoader treats application/x-tgwallpattern thumbs
+// as SVG and fails to decode the PNG preview; desktop accepts PNG patterns.
+func appearanceDocumentForClients(in appearance.Document) appearance.Document {
+	if in.MimeType != "application/x-tgwallpattern" || len(in.Thumbs) == 0 {
+		return in
+	}
+	thumb := in.Thumbs[0]
+	if thumb.Path == "" || thumb.Size <= 0 || thumb.W <= 0 || thumb.H <= 0 {
+		return in
+	}
+	out := in
+	out.MimeType = "image/png"
+	out.Size = int64(thumb.Size)
+	out.Path = thumb.Path
+	out.SHA256 = thumb.SHA256
+	out.Attributes = []appearance.DocumentAttribute{
+		{Kind: "image_size", W: thumb.W, H: thumb.H},
+		{Kind: "filename", FileName: "pattern.png"},
+	}
+	return out
+}
+
+func DefaultPhotoSizes(in []appearance.PhotoSize, doc appearance.Document) []tg.PhotoSizeClass {
 	out := make([]tg.PhotoSizeClass, 0, len(in))
 	for _, size := range in {
 		switch size.Kind {
 		case "size":
-			if size.Type != "" && size.W > 0 && size.H > 0 && size.Size > 0 {
-				out = append(out, &tg.PhotoSize{Type: size.Type, W: size.W, H: size.H, Size: size.Size})
+			if size.Type == "" || size.W <= 0 || size.H <= 0 || size.Size <= 0 {
+				continue
 			}
+			// Inline PNG thumb bytes so Android/Desktop preview without a second
+			// getFile round-trip (and without SVG mis-decode of the thumb).
+			if doc.MimeType == "image/png" && size.Path != "" {
+				if data, err := appearance.FS.ReadFile(size.Path); err == nil && len(data) > 0 {
+					out = append(out, &tg.PhotoCachedSize{
+						Type:  size.Type,
+						W:     size.W,
+						H:     size.H,
+						Bytes: append([]byte(nil), data...),
+					})
+					continue
+				}
+			}
+			out = append(out, &tg.PhotoSize{Type: size.Type, W: size.W, H: size.H, Size: size.Size})
 		}
 	}
 	if len(out) == 0 {

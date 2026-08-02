@@ -23,7 +23,7 @@ const (
 	// 1x1 preview where the sticker catalog has a real static thumbnail.
 	seedStickerPreviewStateVersion = "sticker-previews-v2-monotonic"
 	seedAppearanceStateKey         = "files.appearance"
-	seedAppearanceStateVersion     = "appearance-v1"
+	seedAppearanceStateVersion     = "appearance-v2-png-patterns"
 )
 
 func (s *Service) seedStateMatches(ctx context.Context, key, want string) (bool, error) {

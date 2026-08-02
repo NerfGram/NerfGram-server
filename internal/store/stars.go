@@ -21,6 +21,10 @@ type StarsStore interface {
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) (domain.StarsBalance, error)
 	// ListTransactions 按方向与顺序做 keyset 分页，返回一页流水 + 当前余额。
 	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
+	// TotalSpent returns cumulative Stars debited by the user (absolute sum of negative amounts).
+	TotalSpent(ctx context.Context, userID int64) (int64, error)
+	// ListSubscriptions returns channel Stars subscriptions for the user.
+	ListSubscriptions(ctx context.Context, userID int64) ([]domain.StarsSubscription, error)
 }
 
 // StarsPurchaseStore owns fiat self-topup, friend-gift and giveaway-launch

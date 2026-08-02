@@ -62,6 +62,7 @@ func NewBotStore(users *UserStore) *BotStore {
 	s.byID[domain.BotFatherUserID] = botFatherSeedProfile()
 	s.byID[domain.StickersBotUserID] = stickersSeedProfile()
 	s.byID[domain.ChatBotUserID] = chatBotSeedProfile()
+	s.byID[domain.StarsTestBotUserID] = starsTestBotSeedProfile()
 	return s
 }
 
@@ -113,6 +114,20 @@ func chatBotSeedProfile() domain.BotProfile {
 			{Command: "start", Description: "start chatting"},
 			{Command: "help", Description: "show help"},
 			{Command: "reset", Description: "clear local chat context"},
+		},
+	}
+}
+
+func starsTestBotSeedProfile() domain.BotProfile {
+	return domain.BotProfile{
+		BotUserID:   domain.StarsTestBotUserID,
+		OwnerUserID: domain.StarsTestBotUserID,
+		Description: "Create and test Stars paid invite links.",
+		Commands: []domain.BotCommand{
+			{Command: "start", Description: "how to test paid invites"},
+			{Command: "help", Description: "show help"},
+			{Command: "grant", Description: "credit Stars to your balance"},
+			{Command: "paidlink", Description: "export a paid invite for a channel you admin"},
 		},
 	}
 }

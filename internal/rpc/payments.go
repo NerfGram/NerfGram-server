@@ -52,6 +52,9 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 	registerRPC[*tg.PaymentsGetStarsTransactionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsTransactions, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsTransactionsRequest) (any, error) {
 		return r.onPaymentsGetStarsTransactions(ctx, layerRequest)
 	})
+	registerRPC[*tg.PaymentsGetStarsSubscriptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsSubscriptions, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsSubscriptionsRequest) (any, error) {
+		return r.onPaymentsGetStarsSubscriptions(ctx, layerRequest)
+	})
 	registerRPC[*tg.PaymentsCheckCanSendGiftRequest](d, tlprofile.SemanticMethodPaymentsCheckCanSendGift, func(ctx context.Context, req *tg.PaymentsCheckCanSendGiftRequest) (any, error) {
 		return r.onPaymentsCheckCanSendGift(ctx, req)
 	})
@@ -306,29 +309,53 @@ func (r *Router) onPaymentsGetStarsStatus(ctx context.Context, req *tg.PaymentsG
 	return emptyStarsStatus(&tg.StarsAmount{Amount: bal.Balance}), nil
 }
 
-// onPaymentsGetStarsSubscriptions returns the authoritative current balance
-// with an empty subscription page. telesrv does not create recurring Stars
-// subscriptions yet; returning a well-shaped terminal page lets both official
-// clients finish loading the Stars screen without inventing subscription state.
+// onPaymentsGetStarsSubscriptions returns the caller's Stars subscription list.
 func (r *Router) onPaymentsGetStarsSubscriptions(ctx context.Context, req *tg.PaymentsGetStarsSubscriptionsRequest) (*tg.PaymentsStarsStatus, error) {
-	if req == nil || len(req.Offset) > domain.MaxStarsTransactionsOffsetBytes {
-		return nil, inputRequestInvalidErr()
+	if req == nil {
+		return nil, peerIDInvalidErr()
 	}
-	userID, owner, err := r.starGiftLedgerOwnerForPeer(ctx, req.Peer)
+	userID, _, err := r.starGiftLedgerOwnerForPeer(ctx, req.Peer)
 	if err != nil {
 		return nil, err
 	}
-	if owner.Type != domain.PeerTypeUser || owner.ID != userID {
-		return nil, peerIDInvalidErr()
+	balance := int64(0)
+	if r.deps.Stars != nil {
+		bal, err := r.deps.Stars.GetBalance(ctx, userID)
+		if err != nil {
+			return nil, starsErr(err)
+		}
+		balance = bal.Balance
 	}
-	if r.deps.Stars == nil {
-		return emptyStarsStatus(&tg.StarsAmount{}), nil
+	out := emptyStarsStatus(&tg.StarsAmount{Amount: balance})
+	subs := []tg.StarsSubscription{}
+	if r.deps.Stars != nil {
+		listed, err := r.deps.Stars.ListSubscriptions(ctx, userID)
+		if err != nil {
+			return nil, starsErr(err)
+		}
+		subs = make([]tg.StarsSubscription, 0, len(listed))
+		for _, item := range listed {
+			sub := tg.StarsSubscription{
+				Canceled:  item.Canceled,
+				ID:        item.ID,
+				Peer:      &tg.PeerChannel{ChannelID: item.ChannelID},
+				UntilDate: item.UntilDate,
+				Pricing: tg.StarsSubscriptionPricing{
+					Period: item.Period,
+					Amount: item.Amount,
+				},
+			}
+			if item.InviteHash != "" {
+				sub.SetChatInviteHash(item.InviteHash)
+			}
+			if item.Title != "" {
+				sub.SetTitle(item.Title)
+			}
+			subs = append(subs, sub)
+		}
 	}
-	balance, err := r.deps.Stars.GetBalance(ctx, userID)
-	if err != nil {
-		return nil, starsErr(err)
-	}
-	return emptyStarsStatus(&tg.StarsAmount{Amount: balance.Balance}), nil
+	out.SetSubscriptions(subs)
+	return out, nil
 }
 
 // onPaymentsGetStarsTransactions 返回 keyset 分页的 Stars 流水（同 starsStatus 信封）。
