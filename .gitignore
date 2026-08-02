@@ -24,6 +24,8 @@ __pycache__/
 !/data/langpack/**
 !/data/official-gifts/
 !/data/official-gifts/**
+/data/official-gifts/thumbs/
+/data/official-gifts/thumbs/**
 logs/
 tmp/
 .gocache/
@@ -42,3 +44,7 @@ scripts/_q.sql
 scripts/_dump_*
 scripts/_svc_*
 scripts/_service_*
+#
+# Ignore generated official-gifts upgrade attribute snapshots (large, generated).
+/data/official-gifts/upgrade-attributes/*.tl
+/data/official-gifts/upgrade-attributes/**
