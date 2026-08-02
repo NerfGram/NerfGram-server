@@ -32,7 +32,7 @@ const (
 	// legacy constructions which do not declare a stronger ownership model.
 	outboundLayerBindingSession outboundLayerBindingKind = iota
 	// A request-bound result retains the profile captured by admission. A later
-	// invokeWithLayer correction must not invalidate that in-flight/cached result.
+	// invokeWithLayer correction must not invalidate that in-flight/retained result.
 	outboundLayerBindingRequest
 )
 

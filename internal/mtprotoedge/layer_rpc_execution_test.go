@@ -138,6 +138,9 @@ func TestProjectionFailureCachesInternalWithoutRepeatingBusiness(t *testing.T) {
 	if rpcErr.ErrorCode != 500 || rpcErr.ErrorMessage != "INTERNAL" {
 		t.Fatalf("projection terminal = %+v", rpcErr)
 	}
+	if _, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, reqMsgID); !ok {
+		t.Fatal("projection receipt disappeared before duplicate acquire")
+	}
 	// A same-msg replay is served from the completed exact identity; there is no
 	// second DispatchAdmitted call even though projection failed after business
 	// success.
@@ -145,8 +148,13 @@ func TestProjectionFailureCachesInternalWithoutRepeatingBusiness(t *testing.T) {
 		c.authKeyID, c.sessionID, reqMsgID,
 		tlprofile.Profile227, request.Prepared().Identity(),
 	)
-	if err != nil || replay.state != rpcResultAcquireCompleted || replay.encoded != completed.encoded {
+	if err != nil || replay.state != rpcResultAcquireCompleted {
 		t.Fatalf("projection replay = state:%d err:%v", replay.state, err)
+	}
+	if replay.encoded == nil || replay.encoded.replayMsgID != completed.encoded.replayMsgID ||
+		replay.encoded.replaySeqNo != completed.encoded.replaySeqNo ||
+		!sameBacking(replay.encoded.body, completed.encoded.body) {
+		t.Fatal("projection replay did not reference the original logical-outbox frame")
 	}
 	if got := handler.calls.Load(); got != 1 {
 		t.Fatalf("replay repeated business calls=%d", got)

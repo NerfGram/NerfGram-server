@@ -26,6 +26,10 @@ type StarGiftStore interface {
 	// PublishCollectibleRevision validates and atomically publishes a new immutable attribute pool.
 	PublishCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
 	ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error)
+	// ActiveCollectibleProjection omits heavyweight animation bodies from read-only client/admin
+	// projections. samplePerKind=0 returns the complete attribute metadata; a positive value
+	// returns at most that many randomly selected ordinary-upgrade attributes per kind.
+	ActiveCollectibleProjection(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error)
 	CollectibleAvailability(ctx context.Context, giftIDs []int64) (map[int64]domain.StarGiftCollectibleAvailability, error)
 	CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
 	UniqueBySlug(ctx context.Context, slug string) (domain.UniqueStarGift, bool, error)
@@ -42,6 +46,10 @@ type StarGiftStore interface {
 	ListByOwnerFiltered(ctx context.Context, filter domain.SavedStarGiftFilter) (domain.SavedStarGiftPage, error)
 	// GetByRef 按协议引用取礼物实例：用户用 msg_id，频道用 saved_id。
 	GetByRef(ctx context.Context, ref domain.SavedStarGiftRef) (domain.SavedStarGift, bool, error)
+	// ResolveUserMessageRef resolves only an explicit viewer-local service-message
+	// alias. The returned ref retains the saved gift's authoritative user/channel
+	// owner; callers must still authorize that owner.
+	ResolveUserMessageRef(ctx context.Context, viewerUserID int64, msgID int) (domain.SavedStarGiftRef, bool, error)
 	// ResolveSavedIDs resolves an ordered batch of protocol references without
 	// per-gift round trips. Every ref must belong to owner and resolve to a live gift.
 	ResolveSavedIDs(ctx context.Context, owner domain.Peer, refs []domain.SavedStarGiftRef) ([]int64, error)
@@ -67,6 +75,7 @@ type StarGiftStore interface {
 type StarGiftUpgradeStore interface {
 	UpgradeStarGift(ctx context.Context, req domain.StarGiftUpgradeRequest) (domain.StarGiftUpgradeResult, error)
 	StarGiftUpgradeReceipt(ctx context.Context, userID int64, commandKey string) (domain.StarGiftUpgradeReceipt, bool, error)
+	GrantUniqueStarGift(ctx context.Context, req domain.AdminStarGiftGrant) (domain.AdminStarGiftGrantResult, error)
 }
 
 // StarGiftLifecycleStore owns transactions that span collectible ownership, listings,
@@ -94,15 +103,16 @@ type StarGiftLifecycleStore interface {
 	PrepayStarGiftUpgrade(ctx context.Context, req domain.StarGiftPrepaidUpgradeRequest) (domain.StarGiftPrepaidUpgradeResult, error)
 	DropStarGiftOriginalDetails(ctx context.Context, req domain.StarGiftDropOriginalDetailsRequest) (domain.StarGiftDropOriginalDetailsResult, error)
 	SetStarGiftNotifications(ctx context.Context, userID, channelID int64, enabled bool) error
+	StarGiftNotificationsEnabled(ctx context.Context, userID, channelID int64) (bool, error)
 	RecordStarGiftWithdrawal(ctx context.Context, req domain.StarGiftWithdrawalRequest, provider, providerRequestID, url string, expiresAt int) (domain.StarGiftWithdrawal, error)
 	ResolveStarGiftWithdrawal(ctx context.Context, providerRequestID string) (domain.StarGiftWithdrawal, bool, error)
 	CompleteStarGiftWithdrawal(ctx context.Context, providerRequestID string, date int) (domain.StarGiftWithdrawal, error)
 	TonBalance(ctx context.Context, userID int64) (int64, error)
-	TonTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.TonTransactionPage, error)
+	TonTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error)
 	ChannelStarsBalance(ctx context.Context, channelID int64) (int64, error)
-	ChannelStarsTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.StarsTransactionPage, error)
+	ChannelStarsTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
 	ChannelTonBalance(ctx context.Context, channelID int64) (int64, error)
-	ChannelTonTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.TonTransactionPage, error)
+	ChannelTonTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error)
 	// SweepStarGiftLifecycle advances time-driven offer/auction aggregates and
 	// drains their durable notification/delivery outboxes in bounded batches.
 	SweepStarGiftLifecycle(ctx context.Context, now, limit int) error

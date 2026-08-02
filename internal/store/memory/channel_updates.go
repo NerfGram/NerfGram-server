@@ -31,16 +31,6 @@ func (s *ChannelStore) ListChannelDifference(_ context.Context, req domain.Chann
 	if preview {
 		dialog = previewChannelDialog(req.UserID, channel, member)
 	}
-	if preview && member.Status != domain.ChannelMemberActive {
-		return domain.ChannelDifference{
-			Channel: channel,
-			Self:    member,
-			Pts:     channel.Pts,
-			Final:   true,
-			Timeout: 30,
-			Dialog:  dialog,
-		}, nil
-	}
 	checkpoint := s.channelUpdateCheckpointLocked(req.ChannelID, channel)
 	if req.Pts < checkpoint.RetainedThroughPts || channel.Pts-req.Pts > limit {
 		messages := make([]domain.ChannelMessage, 0, domain.MaxChannelDifferenceTooLongMessages)
@@ -49,7 +39,7 @@ func (s *ChannelStore) ListChannelDifference(_ context.Context, req domain.Chann
 			if msg.Deleted {
 				continue
 			}
-			if channel.Monoforum && !isChannelAdmin(member) && msg.SavedPeer != (domain.Peer{Type: domain.PeerTypeUser, ID: req.UserID}) {
+			if channel.Monoforum && !member.CanManageDirectMessages() && msg.SavedPeer != (domain.Peer{Type: domain.PeerTypeUser, ID: req.UserID}) {
 				continue
 			}
 			if msg.ID <= member.AvailableMinID {
@@ -72,7 +62,7 @@ func (s *ChannelStore) ListChannelDifference(_ context.Context, req domain.Chann
 	events := make([]domain.ChannelUpdateEvent, 0, limit)
 	lastPts := req.Pts
 	var visibleMonoforumMessageIDs map[int]struct{}
-	if channel.Monoforum && !isChannelAdmin(member) {
+	if channel.Monoforum && !member.CanManageDirectMessages() {
 		visibleMonoforumMessageIDs = make(map[int]struct{})
 		savedPeer := domain.Peer{Type: domain.PeerTypeUser, ID: req.UserID}
 		for _, message := range s.messages[req.ChannelID] {
@@ -81,16 +71,21 @@ func (s *ChannelStore) ListChannelDifference(_ context.Context, req domain.Chann
 			}
 		}
 	}
+	scanned := 0
 	for _, event := range s.events[req.ChannelID] {
 		if event.Pts <= req.Pts {
 			continue
 		}
+		if scanned >= limit {
+			break
+		}
+		scanned++
 		lastPts = event.Pts
 		visible, ok := domain.FilterChannelUpdateEventForAvailableMinID(cloneChannelEvent(event), member.AvailableMinID)
 		if !ok {
 			continue
 		}
-		if channel.Monoforum && !isChannelAdmin(member) {
+		if channel.Monoforum && !member.CanManageDirectMessages() {
 			visible, ok = filterMonoforumEventForUser(visible, req.UserID, visibleMonoforumMessageIDs)
 			if !ok {
 				continue
@@ -106,7 +101,7 @@ func (s *ChannelStore) ListChannelDifference(_ context.Context, req domain.Chann
 			Channel: channel,
 			Self:    member,
 			Pts:     maxInt(lastPts, req.Pts),
-			Final:   true,
+			Final:   lastPts >= channel.Pts,
 			Timeout: 30,
 			Dialog:  dialog,
 		}, nil

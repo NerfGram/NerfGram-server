@@ -346,8 +346,9 @@ func (s *prefetchRecordingUsersService) ByIDsForViewers(_ context.Context, viewe
 // 回退，prefetch 同步执行）。锁定 edit 路径接入了 O(owner) 预热而非逐 viewer 投影。
 func TestChannelEditMessageFanoutInvokesPrefetch(t *testing.T) {
 	users := &prefetchRecordingUsersService{mapUsersService: mapUsersService{users: map[int64]domain.User{}}}
+	registry := newFakeUsernameRegistry()
 	cs := &captureSessions{}
-	r := New(Config{}, Deps{Sessions: cs, Users: users}, zaptest.NewLogger(t), clock.System)
+	r := New(Config{}, Deps{Sessions: cs, Users: users, Usernames: registry}, zaptest.NewLogger(t), clock.System)
 
 	res := editFanoutTestResult(5, 6)
 	r.enqueueChannelEditMessageFanout(context.Background(), 5, res)
@@ -366,6 +367,9 @@ func TestChannelEditMessageFanoutInvokesPrefetch(t *testing.T) {
 		if !gotOwners[want] {
 			t.Fatalf("prefetch owner ids %v missing %d (must equal channelEditMessageFanoutOwnerIDs)", users.gotOwnerIDs, want)
 		}
+	}
+	if registry.batchCalls != 1 || registry.peerCalls != 0 {
+		t.Fatalf("username registry reads = batch %d / peer %d, want one prefetch for all viewers", registry.batchCalls, registry.peerCalls)
 	}
 }
 

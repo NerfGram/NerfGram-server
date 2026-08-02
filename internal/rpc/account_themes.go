@@ -6,6 +6,7 @@ import (
 
 	"github.com/iamxvbaba/td/tg"
 
+	ioscompat "telesrv/internal/compat/ios"
 	"telesrv/internal/compat/tdesktop"
 	"telesrv/internal/domain"
 )
@@ -45,11 +46,43 @@ func (r *Router) onAccountGetThemes(ctx context.Context, req *tg.AccountGetTheme
 			}
 		}
 	}
-	hash := themesListHash(themes)
+	if ClientTypeFrom(ctx) == ClientTypeIOS {
+		themes = ioscompat.ProjectThemes(themes)
+	}
+	hash, err := themesListHash(themes)
+	if err != nil {
+		return nil, internalErr()
+	}
 	if req != nil && req.GetHash() == hash {
 		return &tg.AccountThemesNotModified{}, nil
 	}
 	return &tg.AccountThemes{Hash: hash, Themes: themes}, nil
+}
+
+// onAccountGetChatThemes applies the same iOS ARGB projection as account.getThemes.
+// The projected content hash is intentionally distinct from the historical
+// Android/TDesktop catalog hash, forcing clients with the transparent-color
+// response cached to fetch the corrected payload once.
+func (r *Router) onAccountGetChatThemes(ctx context.Context, hash int64) (tg.AccountThemesClass, error) {
+	if _, _, err := r.currentUserID(ctx); err != nil {
+		return nil, internalErr()
+	}
+	if ClientTypeFrom(ctx) != ClientTypeIOS {
+		return tdesktop.ChatThemes(hash), nil
+	}
+	base, ok := tdesktop.ChatThemes(0).(*tg.AccountThemes)
+	if !ok {
+		return nil, internalErr()
+	}
+	themes := ioscompat.ProjectThemes(base.Themes)
+	projectedHash, err := themesListHash(themes)
+	if err != nil {
+		return nil, internalErr()
+	}
+	if hash == projectedHash {
+		return &tg.AccountThemesNotModified{}, nil
+	}
+	return &tg.AccountThemes{Hash: projectedHash, Themes: themes}, nil
 }
 
 // onAccountUploadTheme 把客户端上传的 .attheme 文件落成可下载的 Document 并返回。
@@ -128,7 +161,7 @@ func (r *Router) onAccountCreateTheme(ctx context.Context, req *tg.AccountCreate
 		return nil, themeErr(err)
 	}
 	r.invalidateRPCProjectionForUser(userID)
-	return r.tgTheme(ctx, t, userID), nil
+	return projectThemeForClient(ctx, r.tgTheme(ctx, t, userID)), nil
 }
 
 // onAccountUpdateTheme 更新创建者自己的主题(部分字段)。
@@ -172,7 +205,7 @@ func (r *Router) onAccountUpdateTheme(ctx context.Context, req *tg.AccountUpdate
 		return nil, themeErr(err)
 	}
 	r.invalidateRPCProjectionForUser(userID)
-	return r.tgTheme(ctx, t, userID), nil
+	return projectThemeForClient(ctx, r.tgTheme(ctx, t, userID)), nil
 }
 
 // onAccountSaveTheme 把主题加入/移出用户的已存列表。
@@ -186,6 +219,12 @@ func (r *Router) onAccountSaveTheme(ctx context.Context, req *tg.AccountSaveThem
 	}
 	if userID == 0 {
 		return false, authKeyUnregisteredErr()
+	}
+	if _, ok := tdesktop.LookupDefaultTheme(req.Theme); ok {
+		// Default catalog themes are always present in account.getThemes. Saving
+		// or unsaving one is therefore an idempotent signal and must not create a
+		// synthetic custom-theme row or user install.
+		return true, nil
 	}
 	if r.deps.Themes == nil {
 		return false, notImplementedErr()
@@ -219,13 +258,19 @@ func (r *Router) onAccountInstallTheme(ctx context.Context, req *tg.AccountInsta
 	if userID == 0 {
 		return false, authKeyUnregisteredErr()
 	}
-	if r.deps.Themes == nil {
-		return false, notImplementedErr()
-	}
 	dark := req.GetDark()
 	theme, ok := req.GetTheme()
 	if !ok {
 		return true, nil // 无 theme 引用:基础主题 no-op 安装
+	}
+	if _, ok := tdesktop.LookupDefaultTheme(theme); ok {
+		// The immutable defaults were issued by account.getThemes but do not
+		// live in the custom theme store. Applying one is a successful signal;
+		// the Android client owns the active day/night choice locally.
+		return true, nil
+	}
+	if r.deps.Themes == nil {
+		return false, notImplementedErr()
 	}
 	ref, ok := themeRefFromInput(theme)
 	if !ok {
@@ -247,6 +292,9 @@ func (r *Router) onAccountGetTheme(ctx context.Context, req *tg.AccountGetThemeR
 	if err != nil {
 		return nil, internalErr()
 	}
+	if t, ok := tdesktop.LookupDefaultTheme(req.Theme); ok {
+		return projectThemeForClient(ctx, &t), nil
+	}
 	if r.deps.Themes == nil {
 		return nil, notImplementedErr()
 	}
@@ -261,5 +309,16 @@ func (r *Router) onAccountGetTheme(ctx context.Context, req *tg.AccountGetThemeR
 	if !ok {
 		return nil, themeInvalidErr()
 	}
-	return r.tgTheme(ctx, t, userID), nil
+	return projectThemeForClient(ctx, r.tgTheme(ctx, t, userID)), nil
+}
+
+func projectThemeForClient(ctx context.Context, theme *tg.Theme) *tg.Theme {
+	if theme == nil || ClientTypeFrom(ctx) != ClientTypeIOS {
+		return theme
+	}
+	projected := ioscompat.ProjectThemes([]tg.Theme{*theme})
+	if len(projected) == 0 {
+		return theme
+	}
+	return &projected[0]
 }

@@ -7,6 +7,7 @@ import (
 	"crypto/rsa"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"testing"
@@ -109,6 +110,221 @@ func TestKeyExchange(t *testing.T) {
 	}
 }
 
+type tdlibZeroHandshakeMessageIDConn struct {
+	transport.Conn
+}
+
+func (c *tdlibZeroHandshakeMessageIDConn) Send(ctx context.Context, frame *bin.Buffer) error {
+	candidate := &bin.Buffer{Buf: frame.Copy()}
+	var message tgproto.UnencryptedMessage
+	if err := message.Decode(candidate); err != nil {
+		return c.Conn.Send(ctx, frame)
+	}
+
+	payload := &bin.Buffer{Buf: message.MessageData}
+	typeID, err := payload.PeekID()
+	if err != nil {
+		return c.Conn.Send(ctx, frame)
+	}
+	switch typeID {
+	case mt.ReqPqMultiRequestTypeID,
+		mt.ReqDHParamsRequestTypeID,
+		mt.SetClientDHParamsRequestTypeID:
+		message.MessageID = 0
+	default:
+		return c.Conn.Send(ctx, frame)
+	}
+
+	// TDLib NoCryptoImpl includes 0-255 random bytes in message_data_length.
+	// Use its maximum legal alignment-plus-15-block shape so the complete
+	// permanent and temporary exchanges exercise padded bodies at every stage.
+	paddingSize := (-len(message.MessageData)) & 15
+	paddingSize += 16 * 15
+	message.MessageData = append(
+		message.MessageData,
+		bytes.Repeat([]byte{0xa5}, paddingSize)...,
+	)
+
+	var rewritten bin.Buffer
+	if err := message.Encode(&rewritten); err != nil {
+		return err
+	}
+	return c.Conn.Send(ctx, &rewritten)
+}
+
+func TestKeyExchangeAcceptsTDLibZeroMessageIDs(t *testing.T) {
+	const (
+		dc        = 2
+		expiresIn = 60
+	)
+	tests := []struct {
+		name       string
+		clientDC   int
+		temporary  bool
+		wantExpiry bool
+	}{
+		{name: "permanent key", clientDC: dc},
+		{
+			name:       "media temporary key",
+			clientDC:   -dc,
+			temporary:  true,
+			wantExpiry: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			addr, pub, srv := startTestServer(t, Options{DC: dc})
+			conn := &tdlibZeroHandshakeMessageIDConn{Conn: dialTransportOnly(t, addr)}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			exchanger := exchange.NewExchanger(conn, test.clientDC).
+				WithRand(rand.Reader).
+				WithLogger(logzap.New(zaptest.NewLogger(t).Named("tdlib-zero-msg-id-client")))
+			if test.temporary {
+				exchanger = exchanger.WithTempMode(expiresIn)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			result, err := exchanger.
+				Client([]exchange.PublicKey{pub}).
+				Run(ctx)
+			if err != nil {
+				t.Fatalf("TDLib-shaped client exchange: %v", err)
+			}
+			if result.AuthKey.ID == ([8]byte{}) {
+				t.Fatal("TDLib-shaped client exchange returned an empty auth key id")
+			}
+			if got := result.ExpiresAt > 0; got != test.wantExpiry {
+				t.Fatalf("client expiry present = %v, want %v", got, test.wantExpiry)
+			}
+
+			var (
+				saved store.AuthKeyData
+				found bool
+			)
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				saved, found, _ = srv.authKeys.Get(context.Background(), result.AuthKey.ID)
+				if found {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if !found {
+				t.Fatalf("server did not store TDLib-shaped auth key %x", result.AuthKey.ID)
+			}
+			if got := saved.ExpiresAt > 0; got != test.wantExpiry {
+				t.Fatalf("server expiry present = %v, want %v", got, test.wantExpiry)
+			}
+		})
+	}
+}
+
+func TestValidUnencryptedHandshakeMessageID(t *testing.T) {
+	encode := func(value bin.Encoder) []byte {
+		t.Helper()
+		var payload bin.Buffer
+		if err := value.Encode(&payload); err != nil {
+			t.Fatalf("encode payload: %v", err)
+		}
+		return payload.Copy()
+	}
+
+	const ordinaryClientMessageID = int64(1<<32 | 4)
+	tests := []struct {
+		name      string
+		messageID int64
+		payload   []byte
+		want      bool
+	}{
+		{
+			name:      "ordinary client id retains existing admission",
+			messageID: ordinaryClientMessageID,
+			payload:   encode(&mt.PingRequest{}),
+			want:      true,
+		},
+		{
+			name:      "probe sentinel rejects legacy req pq",
+			messageID: 1,
+			payload:   encode(&mt.ReqPqRequest{}),
+			want:      false,
+		},
+		{
+			name:      "TDLib probe req pq multi",
+			messageID: 1,
+			payload:   encode(&mt.ReqPqMultiRequest{}),
+			want:      true,
+		},
+		{
+			name:      "probe sentinel cannot carry req DH",
+			messageID: 1,
+			payload:   encode(&mt.ReqDHParamsRequest{}),
+			want:      false,
+		},
+		{
+			name:      "zero sentinel rejects legacy req pq",
+			messageID: 0,
+			payload:   encode(&mt.ReqPqRequest{}),
+			want:      false,
+		},
+		{
+			name:      "TDLib handshake req pq multi",
+			messageID: 0,
+			payload:   encode(&mt.ReqPqMultiRequest{}),
+			want:      true,
+		},
+		{
+			name:      "TDLib handshake req DH",
+			messageID: 0,
+			payload:   encode(&mt.ReqDHParamsRequest{}),
+			want:      true,
+		},
+		{
+			name:      "TDLib handshake set client DH",
+			messageID: 0,
+			payload:   encode(&mt.SetClientDHParamsRequest{}),
+			want:      true,
+		},
+		{
+			name:      "zero sentinel cannot carry ack",
+			messageID: 0,
+			payload:   encode(&mt.MsgsAck{}),
+			want:      false,
+		},
+		{
+			name:      "other invalid nonzero id remains rejected",
+			messageID: 2,
+			payload:   encode(&mt.ReqPqMultiRequest{}),
+			want:      false,
+		},
+		{
+			name:      "negative id remains rejected",
+			messageID: -4,
+			payload:   encode(&mt.ReqPqMultiRequest{}),
+			want:      false,
+		},
+		{
+			name:      "sentinel requires a complete constructor id",
+			messageID: 0,
+			payload:   []byte{1, 2, 3},
+			want:      false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validUnencryptedHandshakeMessageID(test.messageID, test.payload); got != test.want {
+				t.Fatalf(
+					"validUnencryptedHandshakeMessageID(%d) = %v, want %v",
+					test.messageID,
+					got,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
 type authKeySaveContextObservation struct {
 	hasDeadline bool
 	deadline    time.Time
@@ -143,6 +359,52 @@ type ownershipFrameConn struct {
 func (c *ownershipFrameConn) Recv(_ context.Context, b *bin.Buffer) error {
 	b.ResetTo(c.frame)
 	return nil
+}
+
+func TestReadUnencryptedAcceptsTDLibProbeMessageID(t *testing.T) {
+	nonce := bin.Int128{1, 2, 3, 4}
+	var payload bin.Buffer
+	if err := (&mt.ReqPqMultiRequest{Nonce: nonce}).Encode(&payload); err != nil {
+		t.Fatalf("encode req_pq_multi: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		padding []byte
+	}{
+		{name: "without TDLib no-crypto padding"},
+		{name: "with minimum TDLib no-crypto padding", padding: bytes.Repeat([]byte{0xa5}, 12)},
+		{name: "with maximum TDLib no-crypto padding", padding: bytes.Repeat([]byte{0x5a}, 252)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			messageData := append(payload.Copy(), test.padding...)
+			var frame bin.Buffer
+			if err := (tgproto.UnencryptedMessage{
+				MessageID:   1,
+				MessageData: messageData,
+			}).Encode(&frame); err != nil {
+				t.Fatalf("encode unencrypted probe: %v", err)
+			}
+			ex := serverExchangeCompat{
+				conn:    &ownershipFrameConn{frame: frame.Copy()},
+				timeout: time.Second,
+			}
+			var decoded compatReqPQ
+			var scratch bin.Buffer
+			if err := ex.readUnencrypted(context.Background(), &scratch, &decoded); err != nil {
+				t.Fatalf("read TDLib probe: %v", err)
+			}
+			if decoded.Type != mt.ReqPqMultiRequestTypeID || decoded.Nonce != nonce {
+				t.Fatalf(
+					"decoded probe = {type:%#x nonce:%x}, want req_pq_multi nonce %x",
+					decoded.Type,
+					decoded.Nonce,
+					nonce,
+				)
+			}
+		})
+	}
 }
 
 func TestExchangeEncryptedReplayTransfersFrameOwnership(t *testing.T) {
@@ -366,41 +628,85 @@ func TestKeyExchangeAcceptsAndroidMediaTempNegativeDC(t *testing.T) {
 	}
 }
 
-func TestKeyExchangeRejectsWrongNegativeTempDCWhenStrict(t *testing.T) {
-	ex := serverExchangeCompat{dc: 2, strictDC: true, log: zaptest.NewLogger(t)}
-	err := ex.validatePQInnerDataDC(&mt.PQInnerDataTempDC{DC: -3})
-	var exErr *exchange.ServerExchangeError
-	if !errors.As(err, &exErr) {
-		t.Fatalf("err = %T %v, want ServerExchangeError", err, err)
-	}
-	if exErr.Code != codec.CodeWrongDC {
-		t.Fatalf("error code = %d, want %d", exErr.Code, codec.CodeWrongDC)
-	}
-}
-
-// TestKeyExchangeAcceptsMismatchedDCByDefault asserts that, in the default
-// lenient mode, neither permanent nor temp key exchange requires dc_id to
-// equal the server's configured DC. telesrv is always a single physical
-// backend; the FromGram client forks deliberately alias dc_id 1..5 to it
-// (see Options.StrictDC doc), so a mismatched client-chosen dc_id must not be
-// rejected — doing so previously broke every account whose client picked a
-// starting dc_id other than the server's.
-func TestKeyExchangeAcceptsMismatchedDCByDefault(t *testing.T) {
+func TestKeyExchangeAcceptsAnyDCLabelByDefault(t *testing.T) {
 	ex := serverExchangeCompat{dc: 2, log: zaptest.NewLogger(t)}
-	if err := ex.validatePQInnerDataDC(&mt.PQInnerDataDC{DC: 3}); err != nil {
-		t.Fatalf("permanent DC mismatch: err = %v, want nil (lenient by default)", err)
+	labels := []int{
+		2,      // canonical
+		3,      // another production DC
+		0,      // no conventional DC mapping
+		-2,     // Android media-temp convention
+		10002,  // test-environment style label
+		-10002, // negative test-environment style label
+		-1 << 31,
+		1<<31 - 1,
 	}
-	if err := ex.validatePQInnerDataDC(&mt.PQInnerDataTempDC{DC: -3}); err != nil {
-		t.Fatalf("temp DC mismatch: err = %v, want nil (lenient by default)", err)
+
+	for _, label := range labels {
+		t.Run(fmt.Sprintf("permanent_%d", label), func(t *testing.T) {
+			if err := ex.validatePQInnerDataDC(&mt.PQInnerDataDC{DC: label}); err != nil {
+				t.Fatalf("validate permanent DC label %d: %v", label, err)
+			}
+		})
+		t.Run(fmt.Sprintf("temporary_%d", label), func(t *testing.T) {
+			if err := ex.validatePQInnerDataDC(&mt.PQInnerDataTempDC{DC: label, ExpiresIn: 60}); err != nil {
+				t.Fatalf("validate temporary DC label %d: %v", label, err)
+			}
+		})
 	}
 }
 
-// TestKeyExchangeRejectsMismatchedPermanentDCWhenStrict asserts that
-// strictDC=true still enforces exact DC-ID equality for permanent-key
-// exchange (kept for a hypothetical future real multi-DC deployment).
-func TestKeyExchangeRejectsMismatchedPermanentDCWhenStrict(t *testing.T) {
+func TestKeyExchangePersistsArbitraryPermanentDCLabelByDefault(t *testing.T) {
+	const clientDC = 10002
+	keys := memory.NewAuthKeyStore()
+	addr, pub, _ := startTestServer(t, Options{DC: 2, AuthKeys: keys})
+
+	_, auth, _ := dialHandshake(t, addr, clientDC, pub)
+	saved, found, err := keys.Get(context.Background(), auth.AuthKey.ID)
+	if err != nil {
+		t.Fatalf("get persisted auth key: %v", err)
+	}
+	if !found {
+		t.Fatalf("auth key %x was not persisted", auth.AuthKey.ID)
+	}
+	if saved.Value != [256]byte(auth.AuthKey.Value) {
+		t.Fatal("persisted auth key value mismatch")
+	}
+}
+
+func TestKeyExchangeStrictDCValidation(t *testing.T) {
 	ex := serverExchangeCompat{dc: 2, strictDC: true, log: zaptest.NewLogger(t)}
-	err := ex.validatePQInnerDataDC(&mt.PQInnerDataDC{DC: 3})
+	tests := []struct {
+		name    string
+		data    mt.PQInnerDataClass
+		wantErr bool
+	}{
+		{name: "permanent exact", data: &mt.PQInnerDataDC{DC: 2}},
+		{name: "permanent other", data: &mt.PQInnerDataDC{DC: 3}, wantErr: true},
+		{name: "permanent zero", data: &mt.PQInnerDataDC{DC: 0}, wantErr: true},
+		{name: "temporary positive exact", data: &mt.PQInnerDataTempDC{DC: 2}},
+		{name: "temporary negative exact", data: &mt.PQInnerDataTempDC{DC: -2}},
+		{name: "temporary other", data: &mt.PQInnerDataTempDC{DC: 3}, wantErr: true},
+		{name: "temporary negative other", data: &mt.PQInnerDataTempDC{DC: -3}, wantErr: true},
+		{name: "temporary test label", data: &mt.PQInnerDataTempDC{DC: 10002}, wantErr: true},
+		{name: "temporary min int32", data: &mt.PQInnerDataTempDC{DC: -1 << 31}, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ex.validatePQInnerDataDC(test.data)
+			if !test.wantErr {
+				if err != nil {
+					t.Fatalf("validate: %v", err)
+				}
+				return
+			}
+			assertWrongDCError(t, err)
+		})
+	}
+}
+
+func assertWrongDCError(t *testing.T, err error) {
+	t.Helper()
 	var exErr *exchange.ServerExchangeError
 	if !errors.As(err, &exErr) {
 		t.Fatalf("err = %T %v, want ServerExchangeError", err, err)
@@ -738,7 +1044,7 @@ func TestReconnectFakeReqPQThenEncryptedFrame(t *testing.T) {
 	cancel()
 
 	msgGen := tgproto.NewMessageIDGen(time.Now)
-	sendEncrypted(t, conn, cipher, auth, msgGen.New(tgproto.MessageFromClient), &mt.PingRequest{PingID: 7})
+	sendEncryptedWithSeq(t, conn, cipher, auth, msgGen.New(tgproto.MessageFromClient), 1, &mt.PingRequest{PingID: 7})
 
 	var resPQFrame bin.Buffer
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)

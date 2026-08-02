@@ -131,6 +131,7 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 			result.Gift, result.Saved, result.Balance = gift, saved, balance
 			return nil
 		},
+		projectMedia: projectPrivateStarGiftPurchase,
 		after: func(ctx context.Context, tx pgx.Tx, sent domain.SendPrivateTextResult) error {
 			msgID := sent.RecipientMessage.ID
 			if msgID <= 0 {
@@ -188,6 +189,9 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 		if err := NewChannelStore(tx).appendStarGiftAdminLogTx(ctx, tx, req.To.ID, req.BuyerUserID, id, req.Date, action); err != nil {
 			return err
 		}
+		if err := enqueueChannelStarGiftNotifications(ctx, tx, id, req.To.ID, req.Date, action.StarGift); err != nil {
+			return err
+		}
 		if err := s.insertStarGiftPurchaseCommand(ctx, tx, req, id, gift.Stars+saved.PrepaidUpgradeStars, balance.Balance); err != nil {
 			return err
 		}
@@ -202,6 +206,9 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 		}
 		return domain.StarGiftPurchaseResult{}, err
 	}
+	// The purchase remains successful once its transaction has committed. Any
+	// immediate delivery failure leaves a durable job for the lifecycle sweeper.
+	_, _ = s.dispatchChannelStarGiftNotifications(ctx, req.Date, maxChannelStarGiftNotificationRecipients, result.Saved.ID)
 	return result, nil
 }
 
@@ -278,7 +285,7 @@ last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err !=
 	}
 	saved := domain.SavedStarGift{Owner: req.To, FromUserID: req.BuyerUserID, GiftID: gift.ID, RevisionID: gift.RevisionID,
 		Date: req.Date, NameHidden: req.HideName, ConvertStars: gift.ConvertStars, PrepaidUpgradeStars: upgradePrice,
-		PrepaidUpgradeHash: prepayHash, Message: req.Message}
+		PrepaidUpgradeHash: prepayHash, Message: req.Message, Unsaved: req.RecipientUnsaved}
 	return gift, saved, balance, nil
 }
 

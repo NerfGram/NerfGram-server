@@ -81,6 +81,31 @@ func (c *CachedPrivacyStore) SetPrivacyRules(ctx context.Context, rules domain.P
 		return err
 	}
 	c.InvalidateOwners(rules.OwnerUserID)
+	// 数据写入已提交，预热失败不能伪装成写失败；LISTEN/NOTIFY 也会在每个
+	// 实例上再次失效并预热，覆盖本实例通知晚于这里到达的时序。
+	_ = c.WarmOwners(ctx, rules.OwnerUserID)
+	return nil
+}
+
+// WarmOwners 在低频写/变更通知路径一次性装入 owner 的完整规则集。调用方必须先
+// InvalidateOwners；epoch 保证预热期间若又发生失效，不会把旧快照写回。
+func (c *CachedPrivacyStore) WarmOwners(ctx context.Context, ownerUserIDs ...int64) error {
+	owners := dedupPrivacyOwnerIDs(ownerUserIDs)
+	if len(owners) == 0 || c == nil || c.cache == nil {
+		return nil
+	}
+
+	// 隐私规则变更很少、读取极热。必须重建全部 key，
+	// 不能只塞本次 key，否则会把 owner 的其它持久规则误当成默认规则。
+	loadEpoch := c.cache.LoadEpoch()
+	list, err := c.inner.ListPrivacyRules(ctx, owners, allPrivacyRuleKeys)
+	if err != nil {
+		return err
+	}
+	snapshots := buildPrivacyRulesByOwner(list, owners)
+	for _, ownerUserID := range owners {
+		c.cache.StoreIfEpoch(ownerUserID, snapshots[ownerUserID], loadEpoch)
+	}
 	return nil
 }
 
@@ -158,6 +183,40 @@ func (c *CachedPrivacyStore) FlushReadModelCache() {
 		return
 	}
 	c.cache.Flush()
+}
+
+// InvalidateOwners lets Service be registered as the single privacy read-model
+// cache group: rule snapshots and relationship facts then share one invalidation
+// lifecycle.
+func (s *Service) InvalidateOwners(ids ...int64) {
+	if s == nil || s.rules == nil {
+		return
+	}
+	if cache, ok := s.rules.(interface{ InvalidateOwners(...int64) }); ok {
+		cache.InvalidateOwners(ids...)
+	}
+}
+
+func (s *Service) WarmOwners(ctx context.Context, ids ...int64) error {
+	if s == nil || s.rules == nil {
+		return nil
+	}
+	if cache, ok := s.rules.(interface {
+		WarmOwners(context.Context, ...int64) error
+	}); ok {
+		return cache.WarmOwners(ctx, ids...)
+	}
+	return nil
+}
+
+func (s *Service) FlushReadModelCache() {
+	if s == nil {
+		return
+	}
+	if cache, ok := s.rules.(interface{ FlushReadModelCache() }); ok {
+		cache.FlushReadModelCache()
+	}
+	s.flushFactCaches()
 }
 
 // buildPrivacyRulesByOwner 把扁平规则按 owner 归组;每个 owner 都建一个条目(无规则即空 map),

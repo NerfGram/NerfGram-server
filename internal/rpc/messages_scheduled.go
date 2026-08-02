@@ -20,7 +20,9 @@ func (r *Router) onMessagesGetScheduledMessages(ctx context.Context, req *tg.Mes
 	}
 	scheduledSvc, ok := r.deps.Messages.(scheduledMessagesService)
 	if r.deps.Messages == nil || !ok {
-		return &tg.MessagesMessages{Chats: r.chatsForMessageUpdate(ctx, userID, domain.Message{Peer: peer})}, nil
+		result := &tg.MessagesMessages{Chats: r.chatsForMessageUpdate(ctx, userID, domain.Message{Peer: peer})}
+		r.applyPeerReadModelsToMessages(ctx, userID, result)
+		return result, nil
 	}
 	list, err := scheduledSvc.GetScheduledMessages(ctx, userID, domain.ScheduledMessageFilter{
 		OwnerUserID: userID,
@@ -48,7 +50,9 @@ func (r *Router) onMessagesGetScheduledHistory(ctx context.Context, req *tg.Mess
 		if req.Hash != 0 {
 			return &tg.MessagesMessagesNotModified{Count: 0}, nil
 		}
-		return &tg.MessagesMessages{Chats: r.chatsForMessageUpdate(ctx, userID, domain.Message{Peer: peer})}, nil
+		result := &tg.MessagesMessages{Chats: r.chatsForMessageUpdate(ctx, userID, domain.Message{Peer: peer})}
+		r.applyPeerReadModelsToMessages(ctx, userID, result)
+		return result, nil
 	}
 	list, err := scheduledSvc.ListScheduledMessages(ctx, userID, domain.ScheduledMessageFilter{
 		OwnerUserID: userID,
@@ -284,11 +288,13 @@ func (r *Router) tgScheduledMessages(ctx context.Context, userID int64, peer dom
 	if len(chats) == 0 && peer.Type == domain.PeerTypeChannel {
 		chats = r.chatsForMessageUpdate(ctx, userID, domain.Message{Peer: peer})
 	}
-	return &tg.MessagesMessages{
+	result := &tg.MessagesMessages{
 		Messages: out,
 		Chats:    chats,
 		Users:    r.usersForMessageUpdates(ctx, userID, messages),
 	}
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result
 }
 
 func (r *Router) tgNewScheduledMessageUpdates(ctx context.Context, userID int64, msg domain.ScheduledMessage, randomID int64, date int) *tg.Updates {

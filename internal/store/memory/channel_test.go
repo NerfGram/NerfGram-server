@@ -873,6 +873,7 @@ func TestChannelDeleteHistoryLocalClearReturnsMonotonicAvailableMinID(t *testing
 		CreatorUserID: 1,
 		Title:         "monotonic local clear",
 		Megagroup:     true,
+		MemberUserIDs: []int64{2},
 		Date:          1_700_000_250,
 	})
 	if err != nil {
@@ -911,6 +912,20 @@ func TestChannelDeleteHistoryLocalClearReturnsMonotonicAvailableMinID(t *testing
 	if high.AvailableMinID != second.Message.ID {
 		t.Fatalf("high available_min_id = %d, want %d", high.AvailableMinID, second.Message.ID)
 	}
+	if !high.AvailableMinChanged {
+		t.Fatal("high clear did not report an advanced owner-local boundary")
+	}
+	dirtyAfterClear, err := store.ListDirtyActiveChannelsForUser(ctx, 1, 1_700_000_253, 0, 10)
+	if err != nil {
+		t.Fatalf("list dirty channels after owner-local clear: %v", err)
+	}
+	if len(dirtyAfterClear) != 1 ||
+		dirtyAfterClear[0].ChannelID != created.Channel.ID ||
+		dirtyAfterClear[0].AvailableMinID != second.Message.ID ||
+		dirtyAfterClear[0].HistoryClearDate != 1_700_000_253 ||
+		dirtyAfterClear[0].ChannelUpdatesDirty {
+		t.Fatalf("dirty owner-local clear = %+v, want only absolute boundary %d at date 1700000253", dirtyAfterClear, second.Message.ID)
+	}
 
 	stale, err := store.DeleteChannelHistory(ctx, domain.DeleteChannelHistoryRequest{
 		UserID:    1,
@@ -924,13 +939,38 @@ func TestChannelDeleteHistoryLocalClearReturnsMonotonicAvailableMinID(t *testing
 	if stale.AvailableMinID != second.Message.ID {
 		t.Fatalf("stale available_min_id = %d, want monotonic %d", stale.AvailableMinID, second.Message.ID)
 	}
+	if stale.AvailableMinChanged {
+		t.Fatal("stale clear unexpectedly replaced the owner-local anchor")
+	}
+	dirtyAfterStale, err := store.ListDirtyActiveChannelsForUser(ctx, 1, 1_700_000_254, 0, 10)
+	if err != nil {
+		t.Fatalf("list dirty channels after stale owner-local clear: %v", err)
+	}
+	if len(dirtyAfterStale) != 0 {
+		t.Fatalf("stale clear refreshed recovery timestamp: %+v", dirtyAfterStale)
+	}
 
 	history, err := store.ListChannelHistory(ctx, 1, domain.ChannelHistoryFilter{ChannelID: created.Channel.ID, Limit: 10})
 	if err != nil {
 		t.Fatalf("list history: %v", err)
 	}
 	if len(history.Messages) != 0 {
-		t.Fatalf("history after stale clear = %+v, want no visible messages", history.Messages)
+		t.Fatalf("unprojected history after stale clear = %+v, want no shared messages", history.Messages)
+	}
+	history, err = store.ListChannelHistory(ctx, 1, domain.ChannelHistoryFilter{
+		ChannelID:                 created.Channel.ID,
+		Limit:                     10,
+		IncludeHistoryClearAnchor: true,
+	})
+	if err != nil {
+		t.Fatalf("list projected history: %v", err)
+	}
+	if len(history.Messages) != 1 ||
+		history.Messages[0].ID != second.Message.ID ||
+		!domain.IsChannelHistoryClearMessage(history.Messages[0]) ||
+		history.Messages[0].Body != "" ||
+		history.Messages[0].Media != nil {
+		t.Fatalf("projected history after stale clear = %+v, want sanitized history-clear anchor %d", history.Messages, second.Message.ID)
 	}
 	dialogs, err := store.GetChannelDialogs(ctx, 1, []int64{created.Channel.ID})
 	if err != nil {
@@ -939,8 +979,140 @@ func TestChannelDeleteHistoryLocalClearReturnsMonotonicAvailableMinID(t *testing
 	if len(dialogs.Dialogs) != 1 {
 		t.Fatalf("dialogs = %+v, want one dialog", dialogs.Dialogs)
 	}
-	if dialogs.Dialogs[0].TopMessage != 0 || dialogs.Dialogs[0].ReadInboxMaxID != second.Message.ID || dialogs.Dialogs[0].UnreadCount != 0 {
-		t.Fatalf("dialog after stale clear = %+v, want top=0 read=%d unread=0", dialogs.Dialogs[0], second.Message.ID)
+	if dialogs.Dialogs[0].TopMessage != second.Message.ID ||
+		dialogs.Dialogs[0].ReadInboxMaxID != second.Message.ID ||
+		dialogs.Dialogs[0].UnreadCount != 0 ||
+		len(dialogs.Messages) != 1 ||
+		!domain.IsChannelHistoryClearMessage(dialogs.Messages[0]) {
+		t.Fatalf("dialog after stale clear = %+v messages=%+v, want anchored top=%d read=%d unread=0", dialogs.Dialogs[0], dialogs.Messages, second.Message.ID, second.Message.ID)
+	}
+	otherDialogs, err := store.GetChannelDialogs(ctx, 2, []int64{created.Channel.ID})
+	if err != nil {
+		t.Fatalf("get other member dialog: %v", err)
+	}
+	if len(otherDialogs.Dialogs) != 1 ||
+		otherDialogs.Dialogs[0].TopMessage != second.Message.ID ||
+		len(otherDialogs.Messages) != 1 ||
+		otherDialogs.Messages[0].Body != "second visible" ||
+		otherDialogs.Messages[0].Action != nil {
+		t.Fatalf("other member projection changed by owner clear: dialogs=%+v messages=%+v", otherDialogs.Dialogs, otherDialogs.Messages)
+	}
+}
+
+func TestChannelDeleteHistoryLocalClearKeepsMegagroupAndBroadcastDialogs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		megagroup bool
+		broadcast bool
+	}{
+		{name: "megagroup", megagroup: true},
+		{name: "broadcast", broadcast: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := NewChannelStore()
+			created, err := store.CreateChannel(ctx, domain.CreateChannelRequest{
+				CreatorUserID: 11,
+				Title:         tc.name + " local clear",
+				Megagroup:     tc.megagroup,
+				Broadcast:     tc.broadcast,
+				Date:          1_700_000_270,
+			})
+			if err != nil {
+				t.Fatalf("create channel: %v", err)
+			}
+			sent, err := store.SendChannelMessage(ctx, domain.SendChannelMessageRequest{
+				UserID:    11,
+				ChannelID: created.Channel.ID,
+				RandomID:  31_001,
+				Message:   "clear this",
+				Date:      1_700_000_271,
+			})
+			if err != nil {
+				t.Fatalf("send channel message: %v", err)
+			}
+			channelPts := sent.Channel.Pts
+			cleared, err := store.DeleteChannelHistory(ctx, domain.DeleteChannelHistoryRequest{
+				UserID:    11,
+				ChannelID: created.Channel.ID,
+				MaxID:     sent.Message.ID,
+				Date:      1_700_000_272,
+			})
+			if err != nil {
+				t.Fatalf("clear local history: %v", err)
+			}
+			if cleared.Channel.Pts != channelPts || cleared.Event.Pts != 0 {
+				t.Fatalf("local clear changed channel pts: before=%d result=%+v", channelPts, cleared)
+			}
+			dialogs, err := store.GetChannelDialogs(ctx, 11, []int64{created.Channel.ID})
+			if err != nil {
+				t.Fatalf("get dialogs after clear: %v", err)
+			}
+			if len(dialogs.Dialogs) != 1 ||
+				dialogs.Dialogs[0].TopMessage != sent.Message.ID ||
+				len(dialogs.Messages) != 1 ||
+				!domain.IsChannelHistoryClearMessage(dialogs.Messages[0]) {
+				t.Fatalf("dialog disappeared after %s clear: dialogs=%+v messages=%+v", tc.name, dialogs.Dialogs, dialogs.Messages)
+			}
+		})
+	}
+}
+
+func TestChannelPrehistoryBoundaryDoesNotCreateHistoryClearAnchor(t *testing.T) {
+	ctx := context.Background()
+	store := NewChannelStore()
+	created, err := store.CreateChannel(ctx, domain.CreateChannelRequest{
+		CreatorUserID: 21,
+		Title:         "hidden prehistory",
+		Megagroup:     true,
+		Date:          1_700_000_280,
+	})
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	old, err := store.SendChannelMessage(ctx, domain.SendChannelMessageRequest{
+		UserID:    21,
+		ChannelID: created.Channel.ID,
+		RandomID:  32_001,
+		Message:   "prehistory",
+		Date:      1_700_000_281,
+	})
+	if err != nil {
+		t.Fatalf("send prehistory message: %v", err)
+	}
+	if _, err := store.SetPreHistoryHidden(ctx, 21, created.Channel.ID, true); err != nil {
+		t.Fatalf("hide prehistory: %v", err)
+	}
+	invited, err := store.InviteToChannel(ctx, created.Channel.ID, 21, []int64{22}, 1_700_000_282)
+	if err != nil {
+		t.Fatalf("invite member: %v", err)
+	}
+	if len(invited.Members) != 1 ||
+		invited.Members[0].AvailableMinID != old.Message.ID ||
+		invited.Members[0].HistoryClearAnchorID != 0 ||
+		invited.Members[0].HistoryClearAnchorDate != 0 {
+		t.Fatalf("invited member = %+v, want prehistory boundary without local-clear anchor", invited.Members)
+	}
+
+	history, err := store.ListChannelHistory(ctx, 22, domain.ChannelHistoryFilter{
+		ChannelID:                 created.Channel.ID,
+		Limit:                     10,
+		IncludeHistoryClearAnchor: true,
+	})
+	if err != nil {
+		t.Fatalf("list invited member history: %v", err)
+	}
+	for _, message := range history.Messages {
+		if message.ID == old.Message.ID || domain.IsChannelHistoryClearMessage(message) {
+			t.Fatalf("prehistory boundary leaked a local-clear marker: %+v", history.Messages)
+		}
+	}
+	byID, err := store.GetChannelMessages(ctx, 22, created.Channel.ID, []int{old.Message.ID})
+	if err != nil {
+		t.Fatalf("get prehistory message by id: %v", err)
+	}
+	if len(byID.Messages) != 0 {
+		t.Fatalf("prehistory message by id = %+v, want hidden without fabricated marker", byID.Messages)
 	}
 }
 

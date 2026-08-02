@@ -3,7 +3,9 @@ package account
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -26,6 +28,10 @@ const (
 	codeChannelEmailChange        = "email_change"
 	codeChannelEmailLogin         = "email_login"
 	codeChannelEmailSetupRequired = "email_setup_required"
+	codeChannelPasswordRecovery   = "password_recovery"
+	passwordRecoveryCodePrefix    = "password-recovery:"
+	passwordRecoveryCodeTTL       = 15 * time.Minute
+	passwordRecoveryCASRetries    = 32
 )
 
 // Service 提供账号安全配置查询。
@@ -411,12 +417,48 @@ func (s *Service) RequestPasswordRecovery(ctx context.Context, userID int64) (st
 	if !settings.HasPassword || settings.RecoveryEmail == "" {
 		return "", domain.ErrPasswordRecoveryNA
 	}
-	settings.RecoveryCode = recoveryCode
-	settings.RecoveryCodeExpiresAt = time.Now().Unix() + recoveryCodeTTL
-	if s.passwords != nil {
-		if err := s.passwords.Save(ctx, userID, settings); err != nil {
-			return "", err
+	// Recovery has no development-code fallback. If the server cannot both
+	// persist and deliver a fresh code, it must report the flow unavailable.
+	if s == nil || s.codes == nil || s.loginEmailSender == nil {
+		return "", domain.ErrPasswordRecoveryNA
+	}
+	code, err := randomDigits(s.loginEmailCodeLength)
+	if err != nil {
+		return "", err
+	}
+	deliveryID, err := otpdelivery.NewDeliveryID()
+	if err != nil {
+		return "", err
+	}
+	expiresAt := time.Now().Add(passwordRecoveryCodeTTL)
+	key := passwordRecoveryCodeKey(userID)
+	rec := store.PhoneCode{
+		Version:         store.PhoneCodeVersionCurrent,
+		UserID:          userID,
+		Email:           normalizeLoginEmail(settings.RecoveryEmail),
+		Code:            code,
+		DeliveryID:      deliveryID,
+		Channel:         codeChannelPasswordRecovery,
+		MaxAttempts:     s.loginEmailCodeMaxAttempts,
+		RecoveryBinding: passwordRecoveryBinding(settings),
+	}
+	if err := s.codes.Set(ctx, key, rec, passwordRecoveryCodeTTL); err != nil {
+		return "", err
+	}
+	if err := deliverOTP(ctx, s.loginEmailSender, otpdelivery.Request{
+		DeliveryID: deliveryID,
+		Purpose:    otpdelivery.PurposePasswordRecovery,
+		Channel:    otpdelivery.ChannelEmail,
+		Recipient:  settings.RecoveryEmail,
+		Code:       code,
+		ExpiresAt:  expiresAt,
+	}); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer cancel()
+		if cleanupErr := s.deletePasswordRecoveryCode(cleanupCtx, key, deliveryID); cleanupErr != nil {
+			return "", fmt.Errorf("deliver password recovery code: %w (cleanup failed: %v)", err, cleanupErr)
 		}
+		return "", fmt.Errorf("deliver password recovery code: %w", err)
 	}
 	return emailPattern(settings.RecoveryEmail), nil
 }
@@ -426,23 +468,35 @@ func (s *Service) CheckRecoveryPassword(ctx context.Context, userID int64, code 
 	if err != nil {
 		return err
 	}
-	return checkRecoveryCode(settings, code)
+	if !settings.HasPassword || settings.RecoveryEmail == "" {
+		return domain.ErrPasswordRecoveryExpired
+	}
+	return s.verifyPasswordRecoveryCode(ctx, userID, passwordRecoveryBinding(settings), code, false)
 }
 
 func (s *Service) RecoverPassword(ctx context.Context, userID int64, code string, input *domain.PasswordInputSettings) error {
 	if s == nil || s.passwords == nil || userID == 0 {
-		return nil
+		return domain.ErrPasswordRecoveryExpired
 	}
 	settings, err := s.GetPasswordWithoutRefresh(ctx, userID)
 	if err != nil {
 		return err
 	}
-	if err := checkRecoveryCode(settings, code); err != nil {
-		return err
+	if !settings.HasPassword || settings.RecoveryEmail == "" {
+		return domain.ErrPasswordRecoveryExpired
 	}
+	binding := passwordRecoveryBinding(settings)
 	if input == nil || len(input.NewPasswordHash) == 0 {
-		settings = defaultPasswordSettings()
-		return s.passwords.Save(ctx, userID, settings)
+		if err := s.verifyPasswordRecoveryCode(ctx, userID, binding, code, true); err != nil {
+			return err
+		}
+		return s.passwords.Save(ctx, userID, defaultPasswordSettings())
+	}
+	// Reject invalid proofs before doing the comparatively expensive SRP
+	// verifier/challenge work. The final consuming check below still decides
+	// the single winner if the code changes concurrently.
+	if err := s.verifyPasswordRecoveryCode(ctx, userID, binding, code, false); err != nil {
+		return err
 	}
 	if err := validateNewPasswordSettings(*input); err != nil {
 		return err
@@ -461,8 +515,9 @@ func (s *Service) RecoverPassword(ctx context.Context, userID int64, code string
 	if input.HasHint {
 		settings.Hint = input.Hint
 	}
-	settings.RecoveryCode = ""
-	settings.RecoveryCodeExpiresAt = 0
+	if err := s.verifyPasswordRecoveryCode(ctx, userID, binding, code, true); err != nil {
+		return err
+	}
 	return s.passwords.Save(ctx, userID, normalizePasswordSettings(settings))
 }
 
@@ -521,33 +576,123 @@ func (s *Service) ResendPasswordEmail(ctx context.Context, userID int64) error {
 }
 
 func (s *Service) CancelPasswordEmail(ctx context.Context, userID int64) error {
+	if s != nil && s.codes != nil && userID != 0 {
+		if err := s.codes.Del(ctx, passwordRecoveryCodeKey(userID)); err != nil {
+			return err
+		}
+	}
 	settings, err := s.GetPasswordWithoutRefresh(ctx, userID)
 	if err != nil {
 		return err
 	}
 	settings.EmailUnconfirmedPattern = ""
-	settings.RecoveryCode = ""
-	settings.RecoveryCodeExpiresAt = 0
 	if s.passwords != nil {
 		return s.passwords.Save(ctx, userID, settings)
 	}
 	return nil
 }
 
-func checkRecoveryCode(settings domain.PasswordSettings, code string) error {
-	if settings.RecoveryCode == "" {
-		if code == recoveryCode {
+func passwordRecoveryCodeKey(userID int64) string {
+	return passwordRecoveryCodePrefix + fmt.Sprint(userID)
+}
+
+func passwordRecoveryBinding(settings domain.PasswordSettings) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", settings.SRPID, normalizeLoginEmail(settings.RecoveryEmail))))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Service) deletePasswordRecoveryCode(ctx context.Context, key, deliveryID string) error {
+	for attempt := 0; attempt < passwordRecoveryCASRetries; attempt++ {
+		snapshot, found, err := s.codes.GetSnapshot(ctx, key)
+		if err != nil || !found {
+			return err
+		}
+		if snapshot.Record.Channel != codeChannelPasswordRecovery || snapshot.Record.DeliveryID != deliveryID {
 			return nil
 		}
-		return domain.ErrPasswordRecoveryNA
+		deleted, err := s.codes.CompareAndDelete(ctx, key, snapshot.Revision)
+		if err != nil {
+			return err
+		}
+		if deleted {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
-	if settings.RecoveryCodeExpiresAt > 0 && time.Now().Unix() > settings.RecoveryCodeExpiresAt {
-		return domain.ErrEmailCodeInvalid
+	return fmt.Errorf("delete password recovery code: concurrent state did not settle")
+}
+
+// verifyPasswordRecoveryCode keeps check non-consuming while making the final
+// recovery a single-winner CAS. Wrong attempts are counted atomically and the
+// code is removed at the configured threshold.
+func (s *Service) verifyPasswordRecoveryCode(ctx context.Context, userID int64, binding, code string, consume bool) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return domain.ErrRecoveryCodeEmpty
 	}
-	if subtle.ConstantTimeCompare([]byte(settings.RecoveryCode), []byte(code)) != 1 {
-		return domain.ErrEmailCodeInvalid
+	if s == nil || s.codes == nil || userID == 0 {
+		return domain.ErrPasswordRecoveryExpired
 	}
-	return nil
+	key := passwordRecoveryCodeKey(userID)
+	for attempt := 0; attempt < passwordRecoveryCASRetries; attempt++ {
+		snapshot, found, err := s.codes.GetSnapshot(ctx, key)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return domain.ErrPasswordRecoveryExpired
+		}
+		rec := snapshot.Record
+		if rec.Channel != codeChannelPasswordRecovery || rec.UserID != userID || rec.RecoveryBinding == "" || rec.RecoveryBinding != binding {
+			deleted, err := s.codes.CompareAndDelete(ctx, key, snapshot.Revision)
+			if err != nil {
+				return err
+			}
+			if deleted {
+				return domain.ErrPasswordRecoveryExpired
+			}
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(rec.Code), []byte(code)) == 1 {
+			if !consume {
+				return nil
+			}
+			deleted, err := s.codes.CompareAndDelete(ctx, key, snapshot.Revision)
+			if err != nil {
+				return err
+			}
+			if deleted {
+				return nil
+			}
+			continue
+		}
+		maxAttempts := rec.MaxAttempts
+		if maxAttempts <= 0 {
+			maxAttempts = s.loginEmailCodeMaxAttempts
+		}
+		if maxAttempts <= 0 {
+			maxAttempts = 1
+		}
+		rec.Attempts++
+		var applied bool
+		if rec.Attempts >= maxAttempts {
+			applied, err = s.codes.CompareAndDelete(ctx, key, snapshot.Revision)
+		} else {
+			applied, err = s.codes.CompareAndUpdate(ctx, key, snapshot.Revision, rec)
+		}
+		if err != nil {
+			return err
+		}
+		if applied {
+			return domain.ErrRecoveryCodeInvalid
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("verify password recovery code: concurrent state did not settle")
 }
 
 func randomBytesOrDefault(n int, fallback []byte) []byte {
@@ -580,14 +725,24 @@ func randomDigits(n int) (string, error) {
 	if n <= 0 {
 		n = 6
 	}
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
 	var out strings.Builder
 	out.Grow(n)
-	for _, v := range b {
-		out.WriteByte(byte('0') + v%10)
+	var buf [32]byte
+	for out.Len() < n {
+		if _, err := rand.Read(buf[:]); err != nil {
+			return "", err
+		}
+		for _, v := range buf {
+			// Reject the top six values so every digit has exactly 25 source
+			// byte values instead of inheriting modulo bias from 256 %% 10.
+			if v >= 250 {
+				continue
+			}
+			out.WriteByte(byte('0') + v%10)
+			if out.Len() == n {
+				break
+			}
+		}
 	}
 	return out.String(), nil
 }
@@ -1037,6 +1192,41 @@ func (s *Service) GetAccountSettings(ctx context.Context, userID int64) (domain.
 	}
 	settings.AccountTTLDays = settings.NormalizedTTLDays()
 	return settings, nil
+}
+
+// GetAccountSettingsBatch is the bounded cold loader behind the RPC read
+// model. Missing rows are returned as explicit defaults so they are negative
+// cached instead of being queried again.
+func (s *Service) GetAccountSettingsBatch(ctx context.Context, userIDs []int64) (map[int64]domain.AccountSettings, error) {
+	out := make(map[int64]domain.AccountSettings, len(userIDs))
+	for _, userID := range userIDs {
+		if userID > 0 {
+			out[userID] = domain.DefaultAccountSettings()
+		}
+	}
+	if s == nil || s.settings == nil || len(out) == 0 {
+		return out, nil
+	}
+	if batch, ok := s.settings.(store.AccountSettingsBatchStore); ok {
+		loaded, err := batch.GetAccountSettingsBatch(ctx, userIDs)
+		if err != nil {
+			return nil, err
+		}
+		for userID, settings := range loaded {
+			out[userID] = settings
+		}
+		return out, nil
+	}
+	for userID := range out {
+		settings, found, err := s.settings.GetAccountSettings(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			out[userID] = settings
+		}
+	}
+	return out, nil
 }
 
 // SetGlobalPrivacy 持久化账号全局隐私开关，返回合并后的完整设置。

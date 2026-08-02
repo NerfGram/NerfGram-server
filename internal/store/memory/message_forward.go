@@ -20,6 +20,9 @@ func (s *MessageStore) ForwardPrivateMessages(ctx context.Context, req domain.Fo
 	if req.Date == 0 {
 		req.Date = int(time.Now().Unix())
 	}
+	if s.privateNoForwardsEnabled(req.OwnerUserID, req.FromPeer.ID) {
+		return res, domain.ErrChatForwardsRestricted
+	}
 	s.mu.RLock()
 	sources := make([]domain.Message, 0, len(req.MessageIDs))
 	for _, id := range req.MessageIDs {

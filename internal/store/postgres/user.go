@@ -115,11 +115,28 @@ func (s *UserStore) ByUsername(ctx context.Context, username string) (domain.Use
 	row, err := s.q.GetUserByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.User{}, false, nil
+			// The scalar users.username column only holds the editable slot, so a
+			// collectible username resolves through the registry instead. This is a
+			// fallback rather than the primary path: the fast lookup above stays
+			// untouched for every pre-existing username.
+			return s.byCollectibleUsername(ctx, strings.ToLower(username))
 		}
 		return domain.User{}, false, fmt.Errorf("get user by username: %w", err)
 	}
 	return userFromModel(row), true, nil
+}
+
+// byCollectibleUsername resolves an active collectible username to its holder.
+// An inactive (client-hidden) name stays occupied but must not resolve.
+func (s *UserStore) byCollectibleUsername(ctx context.Context, usernameLower string) (domain.User, bool, error) {
+	owner, found, err := getPeerUsernameOwner(ctx, s.db, usernameLower, false)
+	if err != nil {
+		return domain.User{}, false, fmt.Errorf("get user by collectible username: %w", err)
+	}
+	if !found || !owner.collectible || !owner.active || owner.peerType != peerUsernameTypeUser {
+		return domain.User{}, false, nil
+	}
+	return s.ByID(ctx, owner.peerID)
 }
 
 func (s *UserStore) CheckUsername(ctx context.Context, userID int64, username string) (bool, error) {
@@ -231,7 +248,7 @@ func (s *UserStore) UpdateUsername(ctx context.Context, userID int64, username s
 		}
 		return domain.User{}, fmt.Errorf("lock user for username update: %w", err)
 	}
-	if err := replacePeerUsernameTx(ctx, tx, peerUsernameTypeUser, userID, usernameLower); err != nil {
+	if err := replacePeerUsernameTx(ctx, tx, peerUsernameTypeUser, userID, username, usernameLower); err != nil {
 		return domain.User{}, err
 	}
 	row, err := qtx.UpdateUserUsername(ctx, sqlcgen.UpdateUserUsernameParams{
@@ -302,7 +319,7 @@ func (s *UserStore) Create(ctx context.Context, u domain.User) (domain.User, err
 	}
 	usernameLower := strings.ToLower(row.Username)
 	if usernameLower != "" {
-		if err := replacePeerUsernameTx(ctx, tx, peerUsernameTypeUser, row.ID, usernameLower); err != nil {
+		if err := replacePeerUsernameTx(ctx, tx, peerUsernameTypeUser, row.ID, row.Username, usernameLower); err != nil {
 			return domain.User{}, err
 		}
 	}
@@ -341,6 +358,141 @@ func (s *UserStore) SetVerified(ctx context.Context, userID int64, verified bool
 		return domain.User{}, fmt.Errorf("set user verified: %w", err)
 	}
 	return userFromModel(row), nil
+}
+
+// SetSupport 设置/取消用户的 support 标记（官方客服账号）。
+func (s *UserStore) SetSupport(ctx context.Context, userID int64, support bool) (domain.User, error) {
+	row, err := s.q.SetUserSupport(ctx, sqlcgen.SetUserSupportParams{
+		ID:      userID,
+		Support: support,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.User{}, domain.ErrUserNotFound
+		}
+		return domain.User{}, fmt.Errorf("set user support: %w", err)
+	}
+	return userFromModel(row), nil
+}
+
+// SetScamFake 设置/取消用户的 scam 与 fake 标记（bot 复用同一路径）。
+func (s *UserStore) SetScamFake(ctx context.Context, userID int64, scam, fake bool) (domain.User, error) {
+	if scam && fake {
+		return domain.User{}, domain.ErrPeerModerationFlagsInvalid
+	}
+	beginner, ok := s.db.(txBeginner)
+	if !ok {
+		return domain.User{}, fmt.Errorf("set user scam/fake: db does not support transactions")
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return domain.User{}, fmt.Errorf("begin set user scam/fake: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	qtx := s.q.WithTx(tx)
+
+	var currentScam, currentFake bool
+	if err := tx.QueryRow(ctx, `
+SELECT scam, fake
+FROM users
+WHERE id = $1
+FOR UPDATE`, userID).Scan(&currentScam, &currentFake); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.User{}, domain.ErrUserNotFound
+		}
+		return domain.User{}, fmt.Errorf("lock user scam/fake: %w", err)
+	}
+	if currentScam == scam && currentFake == fake {
+		row, err := qtx.GetUserByID(ctx, userID)
+		if err != nil {
+			return domain.User{}, fmt.Errorf("reload unchanged user scam/fake: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return domain.User{}, fmt.Errorf("commit unchanged user scam/fake: %w", err)
+		}
+		committed = true
+		return userFromModel(row), nil
+	}
+
+	row, err := qtx.SetUserScamFake(ctx, sqlcgen.SetUserScamFakeParams{
+		ID:   userID,
+		Scam: scam,
+		Fake: fake,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.User{}, domain.ErrUserNotFound
+		}
+		return domain.User{}, fmt.Errorf("set user scam/fake: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.User{}, fmt.Errorf("commit user scam/fake: %w", err)
+	}
+	committed = true
+	return userFromModel(row), nil
+}
+
+const maxModerationFlagAudience = 4096
+
+// ModerationFlagAudience returns the bounded set of accounts that can already
+// observe the target through a direct contact or private dialog. It is used
+// only for best-effort, non-PTS updateUser fanout after the authoritative flag
+// mutation commits.
+func (s *UserStore) ModerationFlagAudience(ctx context.Context, userID int64, limit int) ([]int64, error) {
+	if limit > maxModerationFlagAudience {
+		limit = maxModerationFlagAudience
+	}
+	return moderationFlagAudience(ctx, s.db, userID, limit)
+}
+
+func moderationFlagAudience(ctx context.Context, db sqlcgen.DBTX, userID int64, limit int) ([]int64, error) {
+	if userID <= 0 || limit <= 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(ctx, `
+SELECT picked.user_id
+FROM (
+  SELECT candidates.user_id
+  FROM (
+    SELECT $1::bigint AS user_id, 0 AS priority, 2147483647::bigint AS activity
+    UNION ALL
+    SELECT contact_user_id, 1, 0 FROM contacts WHERE user_id = $1
+    UNION ALL
+    SELECT user_id, 1, 0 FROM contacts WHERE contact_user_id = $1
+    UNION ALL
+    SELECT peer_id, 2, top_message_date FROM dialogs WHERE user_id = $1 AND peer_type = 'user'
+    UNION ALL
+    SELECT user_id, 2, top_message_date FROM dialogs WHERE peer_type = 'user' AND peer_id = $1
+  ) candidates
+  JOIN users u ON u.id = candidates.user_id AND u.deleted_at IS NULL
+  GROUP BY candidates.user_id
+  ORDER BY min(candidates.priority), max(candidates.activity) DESC, candidates.user_id
+  LIMIT $2
+) picked
+ORDER BY picked.user_id`, userID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list moderation flag audience: %w", err)
+	}
+	defer rows.Close()
+	out := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan moderation flag audience: %w", err)
+		}
+		if id != 0 {
+			out = append(out, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate moderation flag audience: %w", err)
+	}
+	return out, nil
 }
 
 // SweepExpiredPremium 清空到期会员行并返回清理后的用户。
@@ -570,6 +722,8 @@ func userFromModel(r sqlcgen.User) domain.User {
 		Username:               r.Username,
 		CountryCode:            r.CountryCode,
 		Verified:               r.Verified,
+		Scam:                   r.Scam,
+		Fake:                   r.Fake,
 		Support:                r.Support,
 		Bot:                    r.IsBot,
 		BotInfoVersion:         int(r.BotInfoVersion),

@@ -267,6 +267,7 @@ func (s *ChannelStore) futureCreatorAfterLeave(ctx context.Context, db sqlcgen.D
 	member, err := scanChannelMember(db.QueryRow(ctx, `
 SELECT channel_id, user_id, inviter_user_id, role, status, joined_at, left_at,
        admin_rights::text, banned_rights::text, rank, available_min_id, available_min_pts,
+       history_clear_anchor_id, history_clear_anchor_date,
        read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
 FROM channel_members
 WHERE channel_id = $1

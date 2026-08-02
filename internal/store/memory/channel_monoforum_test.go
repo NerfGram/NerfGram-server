@@ -41,6 +41,23 @@ func TestSetPaidMessagesPriceCreatesAndReusesMonoforum(t *testing.T) {
 	if mono.TopMessageID == 0 || mono.Pts == 0 {
 		t.Fatalf("monoforum top/pts = %d/%d, want service top message", mono.TopMessageID, mono.Pts)
 	}
+	for _, userID := range []int64{1, 42} {
+		read, err := store.ReadChannelHistory(ctx, domain.ReadChannelHistoryRequest{
+			UserID: userID, ChannelID: monoID, MaxID: mono.TopMessageID, Date: 1_700_000_901,
+		})
+		if err != nil {
+			t.Fatalf("synthetic monoforum read for %d: %v", userID, err)
+		}
+		if !read.ReadOnly || read.Changed || read.MaxID != mono.TopMessageID {
+			t.Fatalf("synthetic monoforum read for %d = %+v, want read-only no-op at %d", userID, read, mono.TopMessageID)
+		}
+		if _, exists := store.members[monoID][userID]; exists {
+			t.Fatalf("synthetic monoforum read persisted member for %d", userID)
+		}
+		if _, exists := store.dialogs[userID][monoID]; exists {
+			t.Fatalf("synthetic monoforum read persisted dialog for %d", userID)
+		}
+	}
 	dialogs, err := store.ListChannelDialogs(ctx, 1, domain.DialogFilter{Limit: 100})
 	if err != nil {
 		t.Fatalf("list dialogs after enable: %v", err)

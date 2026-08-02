@@ -47,12 +47,19 @@ func newServer(cfg uiConfig, read *readStore) (*server, error) {
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleAPILogin)
-	mux.HandleFunc("POST /api/logout", s.handleAPILogout)
+	// Logout goes through the same gate as every other mutating route: a forced
+	// logout is a state change, and an invalid session is cleared by the gate
+	// itself, so nothing is stranded by protecting it.
+	mux.Handle("POST /api/logout", s.requireAuthAPI(http.HandlerFunc(s.handleAPILogout)))
 	mux.Handle("GET /api/session", s.requireAuthAPI(http.HandlerFunc(s.handleSession)))
 	mux.Handle("GET /api/accounts", s.requireAuthAPI(http.HandlerFunc(s.handleAccountsAPI)))
 	mux.Handle("GET /api/accounts/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleAccountDetailAPI)))
 	mux.Handle("GET /api/channels", s.requireAuthAPI(http.HandlerFunc(s.handleChannelsAPI)))
 	mux.Handle("GET /api/channels/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleChannelDetailAPI)))
+	mux.Handle("GET /api/bots", s.requireAuthAPI(http.HandlerFunc(s.handleBotsAPI)))
+	mux.Handle("GET /api/bots/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleBotDetailAPI)))
+	mux.Handle("GET /api/emoji", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAPI)))
+	mux.Handle("GET /api/emoji/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAnimationAPI)))
 	mux.Handle("GET /api/messages", s.requireAuthAPI(http.HandlerFunc(s.handleMessagesAPI)))
 	mux.Handle("GET /api/messages/detail", s.requireAuthAPI(http.HandlerFunc(s.handleMessageDetailAPI)))
 	mux.Handle("GET /api/messages/groups", s.requireAuthAPI(http.HandlerFunc(s.handleGroupMessagesAPI)))
@@ -63,6 +70,16 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/gifts/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftAnimationAPI)))
 	mux.Handle("GET /api/gifts/{id}/collectibles", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectiblesAPI)))
 	mux.Handle("GET /api/gifts/{id}/collectibles/{kind}/{attribute_id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectibleAnimationAPI)))
+	mux.Handle("GET /api/collectible-usernames", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernamesAPI)))
+	mux.Handle("GET /api/collectible-usernames/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernameDetailAPI)))
+	mux.Handle("GET /api/account-ratings", s.requireAuthAPI(http.HandlerFunc(s.handleAccountRatingsAPI)))
+	mux.Handle("GET /api/account-ratings/{user_id}", s.requireAuthAPI(http.HandlerFunc(s.handleAccountRatingDetailAPI)))
+	mux.Handle("GET /api/moderation/cases", s.requireAuthAPI(http.HandlerFunc(s.handleModerationCasesAPI)))
+	mux.Handle("GET /api/moderation/cases/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleModerationCaseAPI)))
+	mux.Handle("GET /api/moderation/reports/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleModerationReportAPI)))
+	mux.Handle("POST /api/moderation/cases/{id}/claim", s.requireAuthAPI(http.HandlerFunc(s.handleClaimModerationCaseAPI)))
+	mux.Handle("POST /api/moderation/cases/{id}/decide", s.requireAuthAPI(http.HandlerFunc(s.handleDecideModerationCaseAPI)))
+	mux.Handle("POST /api/moderation/cases/{id}/appeals/{appeal_id}/review", s.requireAuthAPI(http.HandlerFunc(s.handleReviewModerationAppealAPI)))
 	mux.Handle("POST /api/actions/set-frozen", s.requireAuthAPI(http.HandlerFunc(s.handleSetAccountFrozenAPI)))
 	mux.Handle("POST /api/actions/grant-premium", s.requireAuthAPI(http.HandlerFunc(s.handleGrantPremiumAPI)))
 	mux.Handle("POST /api/actions/grant-stars", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarsAPI)))
@@ -71,6 +88,18 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/remove-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleRemoveCollectibleUsernameAPI)))
 	mux.Handle("POST /api/actions/set-fake", s.requireAuthAPI(http.HandlerFunc(s.handleSetFakeAPI)))
 	mux.Handle("POST /api/actions/set-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetVerifiedAPI)))
+	mux.Handle("POST /api/actions/set-account-flags", s.requireAuthAPI(http.HandlerFunc(s.handleSetUserFlagsAPI)))
+	mux.Handle("POST /api/actions/set-channel-flags", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelFlagsAPI)))
+	mux.Handle("POST /api/actions/set-support", s.requireAuthAPI(http.HandlerFunc(s.handleSetSupportAPI)))
+	mux.Handle("POST /api/actions/set-account-username", s.requireAuthAPI(http.HandlerFunc(s.handleSetUsernameAPI)))
+	mux.Handle("POST /api/actions/set-account-color", s.requireAuthAPI(http.HandlerFunc(s.handleSetUserColorAPI)))
+	mux.Handle("POST /api/actions/set-account-emoji-status", s.requireAuthAPI(http.HandlerFunc(s.handleSetUserEmojiStatusAPI)))
+	mux.Handle("POST /api/actions/set-channel-settings", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelSettingsAPI)))
+	mux.Handle("POST /api/actions/set-channel-username", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelUsernameAPI)))
+	mux.Handle("POST /api/actions/set-channel-color", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelColorAPI)))
+	mux.Handle("POST /api/actions/set-channel-emoji-status", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelEmojiStatusAPI)))
+	mux.Handle("POST /api/actions/create-bot", s.requireAuthAPI(http.HandlerFunc(s.handleCreateBotAPI)))
+	mux.Handle("POST /api/actions/delete-bot", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteBotAPI)))
 	mux.Handle("POST /api/actions/set-channel-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelVerifiedAPI)))
 	mux.Handle("POST /api/actions/revoke-sessions", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeSessionsAPI)))
 	mux.Handle("POST /api/actions/delete-messages", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteMessagesAPI)))
@@ -80,6 +109,44 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/publish-gift-collectibles", s.requireAuthAPI(http.HandlerFunc(s.handlePublishStarGiftCollectiblesAPI)))
 	mux.Handle("POST /api/actions/set-gift-enabled", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftEnabledAPI)))
 	mux.Handle("POST /api/actions/set-gift-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftSortOrderAPI)))
+	mux.Handle("POST /api/actions/give-gift", s.requireAuthAPI(http.HandlerFunc(s.handleGiveGiftAPI)))
+	mux.Handle("POST /api/actions/mint-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleMintCollectibleUsernameAPI)))
+	mux.Handle("POST /api/actions/transfer-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleTransferCollectibleUsernameAPI)))
+	mux.Handle("POST /api/actions/revoke-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeCollectibleUsernameAPI)))
+	mux.Handle("POST /api/actions/delete-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteCollectibleUsernameAPI)))
+	mux.Handle("POST /api/actions/recompute-account-rating", s.requireAuthAPI(http.HandlerFunc(s.handleRecomputeAccountRatingAPI)))
+	mux.Handle("POST /api/actions/adjust-account-rating", s.requireAuthAPI(http.HandlerFunc(s.handleAdjustAccountRatingAPI)))
+	// Official platform verification. Every route needs verification.review;
+	// clearing an existing badge needs verification.revoke on top of it.
+	mux.Handle("GET /api/verification/applications", s.verificationRead(s.handleVerificationApplicationsAPI))
+	mux.Handle("GET /api/verification/applications/{id}", s.verificationRead(s.handleVerificationApplicationDetailAPI))
+	mux.Handle("GET /api/verification/counts", s.verificationRead(s.handleVerificationCountsAPI))
+	mux.Handle("POST /api/verification/applications/{id}/claim", s.verificationRead(s.handleClaimVerificationAPI))
+	mux.Handle("POST /api/verification/applications/{id}/approve", s.verificationRead(s.handleApproveVerificationAPI))
+	mux.Handle("POST /api/verification/applications/{id}/reject", s.verificationRead(s.handleRejectVerificationAPI))
+	mux.Handle("POST /api/actions/revoke-verification", s.requireAuthAPI(
+		s.requirePermission(permissionVerificationReview,
+			s.requirePermission(permissionVerificationRevoke, http.HandlerFunc(s.handleRevokeVerificationAPI)))))
+	// Third-party bot verification. A separate section from the official
+	// verification block above -- separate tables, separate rights, separate routes.
+	// Reads and queue decisions need botverification.review; appointing verifiers,
+	// curating the icon catalogue and stripping a granted mark need
+	// botverification.manage.
+	mux.Handle("GET /api/botverification/verifiers", s.botVerificationRead(s.handleBotVerifiersAPI))
+	mux.Handle("GET /api/botverification/icons", s.botVerificationRead(s.handleVerificationIconsAPI))
+	mux.Handle("GET /api/botverification/marks", s.botVerificationRead(s.handleCustomVerificationsAPI))
+	mux.Handle("GET /api/botverification/requests", s.botVerificationRead(s.handleCustomVerificationRequestsAPI))
+	mux.Handle("GET /api/botverification/requests/{id}", s.botVerificationRead(s.handleCustomVerificationRequestDetailAPI))
+	mux.Handle("GET /api/botverification/counts", s.botVerificationRead(s.handleCustomVerificationCountsAPI))
+	mux.Handle("POST /api/botverification/requests/{id}/approve", s.botVerificationRead(s.handleApproveBotVerificationAPI))
+	mux.Handle("POST /api/botverification/requests/{id}/reject", s.botVerificationRead(s.handleRejectBotVerificationAPI))
+	mux.Handle("POST /api/botverification/requests/{id}/revoke", s.botVerificationRead(s.handleRevokeBotVerificationAPI))
+	mux.Handle("POST /api/actions/grant-bot-verifier", s.botVerificationManage(s.handleGrantBotVerifierAPI))
+	mux.Handle("POST /api/actions/set-bot-verifier-enabled", s.botVerificationManage(s.handleSetBotVerifierEnabledAPI))
+	mux.Handle("POST /api/actions/revoke-bot-verifier", s.botVerificationManage(s.handleRevokeBotVerifierAPI))
+	mux.Handle("POST /api/actions/upsert-verification-icon", s.botVerificationManage(s.handleUpsertVerificationIconAPI))
+	mux.Handle("POST /api/actions/set-verification-icon-active", s.botVerificationManage(s.handleSetVerificationIconActiveAPI))
+	mux.Handle("POST /api/actions/revoke-custom-verification", s.botVerificationManage(s.handleRevokeCustomVerificationAPI))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "api route not found")
 	})
@@ -88,23 +155,6 @@ func (s *server) routes() http.Handler {
 }
 
 type actorKey struct{}
-
-func (s *server) requireAuthAPI(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(sessionCookieName)
-		if err != nil {
-			writeAPIError(w, http.StatusUnauthorized, "not authenticated")
-			return
-		}
-		claims, ok := verifySession(s.cfg.SessionKey, cookie.Value, time.Now())
-		if !ok {
-			clearSessionCookie(w)
-			writeAPIError(w, http.StatusUnauthorized, "not authenticated")
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), actorKey{}, claims.Actor)))
-	})
-}
 
 func actorFromContext(ctx context.Context) string {
 	if actor, ok := ctx.Value(actorKey{}).(string); ok && actor != "" {
@@ -130,7 +180,18 @@ type loginRequest struct {
 	Secret string `json:"secret"`
 }
 
+// sessionTTL bounds a signed panel session and the CSRF cookie that goes with it,
+// so the two never outlive each other.
+const sessionTTL = 12 * time.Hour
+
 func (s *server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
+	// Login is the one mutating route without a CSRF token, because no session
+	// exists yet to bind one to. The Origin check still applies, and the request
+	// carries the operator credential, which a forging page does not have.
+	if !sameOriginRequest(r) {
+		writeAPIError(w, http.StatusForbidden, "origin is not allowed")
+		return
+	}
 	var req loginRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
@@ -140,10 +201,18 @@ func (s *server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "invalid credential")
 		return
 	}
+	csrfToken, err := newCSRFToken()
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	permissions := newPanelPermissions(s.cfg.Permissions)
 	value, err := signSession(s.cfg.SessionKey, sessionClaims{
-		Actor: "admin",
-		Exp:   time.Now().Add(12 * time.Hour).Unix(),
-		Nonce: newCommandID("sess"),
+		Actor:       "admin",
+		Exp:         time.Now().Add(sessionTTL).Unix(),
+		Nonce:       newCommandID("sess"),
+		Permissions: permissions.List(),
+		CSRF:        csrfToken,
 	})
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
@@ -153,11 +222,16 @@ func (s *server) handleAPILogin(w http.ResponseWriter, r *http.Request) {
 		Name:     sessionCookieName,
 		Value:    value,
 		Path:     "/",
-		MaxAge:   int((12 * time.Hour).Seconds()),
+		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"actor": "admin"})
+	setCSRFCookie(w, csrfToken, sessionTTL)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"actor":       "admin",
+		"permissions": permissions.List(),
+		"csrf_token":  csrfToken,
+	})
 }
 
 func (s *server) validSecret(secret string) bool {
@@ -175,8 +249,14 @@ func (s *server) handleAPILogout(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleSession is what the panel asks on load. It reports the permissions the
+// session carries, so the UI can hide a section the operator may not use rather
+// than letting them walk into a 403.
 func (s *server) handleSession(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"actor": actorFromContext(r.Context())})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"actor":       actorFromContext(r.Context()),
+		"permissions": permissionsFromContext(r.Context()).List(),
+	})
 }
 
 func (s *server) handleStarGiftsAPI(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +270,73 @@ func (s *server) handleStarGiftsAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"Gifts": rows})
+}
+
+func (s *server) handleEmojiAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	q := r.URL.Query().Get("q")
+	beforeID, _ := parseInt64(r.URL.Query().Get("before_id"))
+	limit, _ := parseInt(r.URL.Query().Get("limit"))
+	rows := []EmojiRow{}
+	hasMore := false
+	var err error
+	if strings.TrimSpace(q) != "" {
+		rows, err = s.read.SearchEmoji(r.Context(), q)
+	} else {
+		rows, hasMore, err = s.read.ListEmoji(r.Context(), beforeID, limit)
+	}
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nextBeforeID := int64(0)
+	if hasMore && len(rows) > 0 {
+		nextBeforeID = rows[len(rows)-1].DocumentID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"query":          q,
+		"rows":           rows,
+		"has_more":       hasMore,
+		"next_before_id": nextBeforeID,
+		"listing":        strings.TrimSpace(q) == "",
+	})
+}
+
+func (s *server) handleEmojiAnimationAPI(w http.ResponseWriter, r *http.Request) {
+	documentID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || documentID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		fmt.Sprintf("%s/v1/emoji/%d/animation", s.cfg.AdminAPIURL, documentID), nil)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AdminAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeAPIError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
+	if err != nil || len(raw) > 4<<20 {
+		writeAPIError(w, http.StatusBadGateway, "invalid animation response")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		writeAPIError(w, resp.StatusCode, string(raw))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
 
 func (s *server) handleStarGiftAnimationAPI(w http.ResponseWriter, r *http.Request) {
@@ -260,6 +407,20 @@ func (s *server) handleStarGiftCollectibleAnimationAPI(w http.ResponseWriter, r 
 }
 
 func (s *server) proxyAdminJSON(w http.ResponseWriter, r *http.Request, apiPath string, maxBytes int64) {
+	s.proxyAdminJSONWithCache(w, r, apiPath, maxBytes, "private, max-age=30")
+}
+
+func (s *server) proxyAdminJSONNoStore(w http.ResponseWriter, r *http.Request, apiPath string, maxBytes int64) {
+	s.proxyAdminJSONWithCache(w, r, apiPath, maxBytes, "no-store")
+}
+
+func (s *server) proxyAdminJSONWithCache(
+	w http.ResponseWriter,
+	r *http.Request,
+	apiPath string,
+	maxBytes int64,
+	cacheControl string,
+) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, s.cfg.AdminAPIURL+apiPath, nil)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
@@ -282,8 +443,112 @@ func (s *server) proxyAdminJSON(w http.ResponseWriter, r *http.Request, apiPath 
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "private, max-age=30")
+	w.Header().Set("Cache-Control", cacheControl)
 	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (s *server) handleModerationCasesAPI(w http.ResponseWriter, r *http.Request) {
+	apiPath := "/v1/moderation/cases"
+	if r.URL.RawQuery != "" {
+		apiPath += "?" + r.URL.RawQuery
+	}
+	s.proxyAdminJSONNoStore(w, r, apiPath, 4<<20)
+}
+
+func (s *server) handleModerationCaseAPI(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid moderation case id")
+		return
+	}
+	s.proxyAdminJSONNoStore(w, r, fmt.Sprintf("/v1/moderation/cases/%d", id), 4<<20)
+}
+
+func (s *server) handleModerationReportAPI(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid moderation report id")
+		return
+	}
+	s.proxyAdminJSONNoStore(w, r, fmt.Sprintf("/v1/moderation/reports/%d", id), 4<<20)
+}
+
+func (s *server) handleClaimModerationCaseAPI(w http.ResponseWriter, r *http.Request) {
+	s.proxyModerationWrite(w, r, "claim", false)
+}
+
+func (s *server) handleDecideModerationCaseAPI(w http.ResponseWriter, r *http.Request) {
+	s.proxyModerationWrite(w, r, "decide", true)
+}
+
+func (s *server) handleReviewModerationAppealAPI(w http.ResponseWriter, r *http.Request) {
+	s.proxyModerationWrite(w, r, "appeals/"+r.PathValue("appeal_id")+"/review", true)
+}
+
+func (s *server) proxyModerationWrite(w http.ResponseWriter, r *http.Request, suffix string, needsCommand bool) {
+	caseID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || caseID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid moderation case id")
+		return
+	}
+	if strings.HasPrefix(suffix, "appeals/") {
+		appealID, err := strconv.ParseInt(r.PathValue("appeal_id"), 10, 64)
+		if err != nil || appealID <= 0 {
+			writeAPIError(w, http.StatusBadRequest, "invalid moderation appeal id")
+			return
+		}
+	}
+	defer r.Body.Close()
+	var payload map[string]any
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err := decoder.Decode(&payload); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	payload["actor"] = actorFromContext(r.Context())
+	if needsCommand {
+		commandID, _ := payload["command_id"].(string)
+		if strings.TrimSpace(commandID) == "" {
+			payload["command_id"] = newCommandID("moderation")
+		}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.relayAdminJSON(
+		w, r, http.MethodPost,
+		fmt.Sprintf("/v1/moderation/cases/%d/%s", caseID, suffix),
+		raw, 4<<20,
+	)
+}
+
+func (s *server) relayAdminJSON(w http.ResponseWriter, r *http.Request, method, apiPath string, body []byte, maxBytes int64) {
+	req, err := http.NewRequestWithContext(
+		r.Context(), method, s.cfg.AdminAPIURL+apiPath, bytes.NewReader(body),
+	)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AdminAPIToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeAPIError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil || int64(len(raw)) > maxBytes {
+		writeAPIError(w, http.StatusBadGateway, "invalid admin api response")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(raw)
 }
 
@@ -348,6 +613,108 @@ func (s *server) handleAccountDetailAPI(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, detail)
+}
+
+func (s *server) handleBotsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	q := r.URL.Query().Get("q")
+	beforeID, _ := parseInt64(r.URL.Query().Get("before_id"))
+	limit, _ := parseInt(r.URL.Query().Get("limit"))
+	rows := []BotRow{}
+	hasMore := false
+	var err error
+	if strings.TrimSpace(q) != "" {
+		rows, err = s.read.SearchBots(r.Context(), q)
+	} else {
+		rows, hasMore, err = s.read.ListBots(r.Context(), beforeID, limit)
+	}
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nextBeforeID := int64(0)
+	if hasMore && len(rows) > 0 {
+		nextBeforeID = rows[len(rows)-1].ID
+	}
+	if limit <= 0 {
+		limit = accountListDefaultLimit
+	}
+	if limit > accountListMaxLimit {
+		limit = accountListMaxLimit
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"query":          q,
+		"limit":          limit,
+		"rows":           rows,
+		"has_more":       hasMore,
+		"next_before_id": nextBeforeID,
+		"listing":        strings.TrimSpace(q) == "",
+	})
+}
+
+func (s *server) handleBotDetailAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	botID, err := parseInt64(r.PathValue("id"))
+	if err != nil || botID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	detail, err := s.read.BotDetail(r.Context(), botID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+type createBotAPIRequest struct {
+	CommandID   string `json:"command_id"`
+	Reason      string `json:"reason"`
+	Confirm     bool   `json:"confirm"`
+	OwnerUserID int64  `json:"owner_user_id"`
+	Name        string `json:"name"`
+	Username    string `json:"username"`
+}
+
+func (s *server) handleCreateBotAPI(w http.ResponseWriter, r *http.Request) {
+	var body createBotAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.CreateBotRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "create-bot"),
+		OwnerUserID: body.OwnerUserID,
+		Name:        body.Name,
+		Username:    body.Username,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/bots/create", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type deleteBotAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	BotUserID int64  `json:"bot_user_id"`
+}
+
+func (s *server) handleDeleteBotAPI(w http.ResponseWriter, r *http.Request) {
+	var body deleteBotAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.DeleteBotRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "delete-bot"),
+		BotUserID:   body.BotUserID,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/bots/delete", req)
+	writeCommandResultAPI(w, result, err)
 }
 
 func (s *server) handleChannelsAPI(w http.ResponseWriter, r *http.Request) {
@@ -716,6 +1083,254 @@ func (s *server) handleSetVerifiedAPI(w http.ResponseWriter, r *http.Request) {
 	writeCommandResultAPI(w, result, err)
 }
 
+type setUserFlagsAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	UserID    int64  `json:"user_id"`
+	Scam      bool   `json:"scam"`
+	Fake      bool   `json:"fake"`
+}
+
+func (s *server) handleSetUserFlagsAPI(w http.ResponseWriter, r *http.Request) {
+	var body setUserFlagsAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetUserFlagsRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-account-flags"),
+		UserID:      body.UserID,
+		Scam:        body.Scam,
+		Fake:        body.Fake,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-flags", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setChannelFlagsAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	ChannelID int64  `json:"channel_id"`
+	Scam      bool   `json:"scam"`
+	Fake      bool   `json:"fake"`
+}
+
+func (s *server) handleSetChannelFlagsAPI(w http.ResponseWriter, r *http.Request) {
+	var body setChannelFlagsAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetChannelFlagsRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-channel-flags"),
+		ChannelID:   body.ChannelID,
+		Scam:        body.Scam,
+		Fake:        body.Fake,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/channels/set-flags", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setSupportAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	UserID    int64  `json:"user_id"`
+	Support   bool   `json:"support"`
+}
+
+func (s *server) handleSetSupportAPI(w http.ResponseWriter, r *http.Request) {
+	var body setSupportAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetSupportRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-support"),
+		UserID:      body.UserID,
+		Support:     body.Support,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-support", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setUsernameAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	UserID    int64  `json:"user_id"`
+	Username  string `json:"username"`
+}
+
+func (s *server) handleSetUsernameAPI(w http.ResponseWriter, r *http.Request) {
+	var body setUsernameAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetUsernameRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-username"),
+		UserID:      body.UserID,
+		Username:    body.Username,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-username", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setUserColorAPIRequest struct {
+	CommandID         string `json:"command_id"`
+	Reason            string `json:"reason"`
+	Confirm           bool   `json:"confirm"`
+	UserID            int64  `json:"user_id"`
+	ForProfile        bool   `json:"for_profile"`
+	HasColor          bool   `json:"has_color"`
+	Color             int    `json:"color"`
+	BackgroundEmojiID int64  `json:"background_emoji_id,string"`
+}
+
+func (s *server) handleSetUserColorAPI(w http.ResponseWriter, r *http.Request) {
+	var body setUserColorAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetUserColorRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-account-color"),
+		UserID:      body.UserID,
+		PeerColorInput: admin.PeerColorInput{
+			ForProfile: body.ForProfile, HasColor: body.HasColor, Color: body.Color, BackgroundEmojiID: body.BackgroundEmojiID,
+		},
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-color", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setUserEmojiStatusAPIRequest struct {
+	CommandID  string `json:"command_id"`
+	Reason     string `json:"reason"`
+	Confirm    bool   `json:"confirm"`
+	UserID     int64  `json:"user_id"`
+	DocumentID int64  `json:"document_id,string"`
+	Until      int    `json:"until"`
+}
+
+func (s *server) handleSetUserEmojiStatusAPI(w http.ResponseWriter, r *http.Request) {
+	var body setUserEmojiStatusAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetUserEmojiStatusRequest{
+		CommandMeta:      s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-account-emoji-status"),
+		UserID:           body.UserID,
+		EmojiStatusInput: admin.EmojiStatusInput{DocumentID: body.DocumentID, Until: body.Until},
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-emoji-status", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setChannelSettingsAPIRequest struct {
+	CommandID          string `json:"command_id"`
+	Reason             string `json:"reason"`
+	Confirm            bool   `json:"confirm"`
+	ChannelID          int64  `json:"channel_id"`
+	Gigagroup          *bool  `json:"gigagroup,omitempty"`
+	AntiSpam           *bool  `json:"antispam,omitempty"`
+	ParticipantsHidden *bool  `json:"participants_hidden,omitempty"`
+	NoForwards         *bool  `json:"noforwards,omitempty"`
+	JoinToSend         *bool  `json:"join_to_send,omitempty"`
+	JoinRequest        *bool  `json:"join_request,omitempty"`
+	SlowmodeSeconds    *int   `json:"slowmode_seconds,omitempty"`
+}
+
+func (s *server) handleSetChannelSettingsAPI(w http.ResponseWriter, r *http.Request) {
+	var body setChannelSettingsAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetChannelSettingsRequest{
+		CommandMeta:        s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-channel-settings"),
+		ChannelID:          body.ChannelID,
+		Gigagroup:          body.Gigagroup,
+		AntiSpam:           body.AntiSpam,
+		ParticipantsHidden: body.ParticipantsHidden,
+		NoForwards:         body.NoForwards,
+		JoinToSend:         body.JoinToSend,
+		JoinRequest:        body.JoinRequest,
+		SlowmodeSeconds:    body.SlowmodeSeconds,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/channels/set-settings", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setChannelUsernameAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	ChannelID int64  `json:"channel_id"`
+	Username  string `json:"username"`
+}
+
+func (s *server) handleSetChannelUsernameAPI(w http.ResponseWriter, r *http.Request) {
+	var body setChannelUsernameAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetChannelUsernameRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-channel-username"),
+		ChannelID:   body.ChannelID,
+		Username:    body.Username,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/channels/set-username", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setChannelColorAPIRequest struct {
+	CommandID         string `json:"command_id"`
+	Reason            string `json:"reason"`
+	Confirm           bool   `json:"confirm"`
+	ChannelID         int64  `json:"channel_id"`
+	ForProfile        bool   `json:"for_profile"`
+	HasColor          bool   `json:"has_color"`
+	Color             int    `json:"color"`
+	BackgroundEmojiID int64  `json:"background_emoji_id,string"`
+}
+
+func (s *server) handleSetChannelColorAPI(w http.ResponseWriter, r *http.Request) {
+	var body setChannelColorAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetChannelColorRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-channel-color"),
+		ChannelID:   body.ChannelID,
+		PeerColorInput: admin.PeerColorInput{
+			ForProfile: body.ForProfile, HasColor: body.HasColor, Color: body.Color, BackgroundEmojiID: body.BackgroundEmojiID,
+		},
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/channels/set-color", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setChannelEmojiStatusAPIRequest struct {
+	CommandID  string `json:"command_id"`
+	Reason     string `json:"reason"`
+	Confirm    bool   `json:"confirm"`
+	ChannelID  int64  `json:"channel_id"`
+	DocumentID int64  `json:"document_id,string"`
+	Until      int    `json:"until"`
+}
+
+func (s *server) handleSetChannelEmojiStatusAPI(w http.ResponseWriter, r *http.Request) {
+	var body setChannelEmojiStatusAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetChannelEmojiStatusRequest{
+		CommandMeta:      s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-channel-emoji-status"),
+		ChannelID:        body.ChannelID,
+		EmojiStatusInput: admin.EmojiStatusInput{DocumentID: body.DocumentID, Until: body.Until},
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/channels/set-emoji-status", req)
+	writeCommandResultAPI(w, result, err)
+}
+
 type setChannelVerifiedAPIRequest struct {
 	CommandID string `json:"command_id"`
 	Reason    string `json:"reason"`
@@ -1039,6 +1654,405 @@ func (s *server) handleSetStarGiftSortOrderAPI(w http.ResponseWriter, r *http.Re
 	writeCommandResultAPI(w, result, err)
 }
 
+type giveGiftAPIRequest struct {
+	CommandID           string `json:"command_id"`
+	Reason              string `json:"reason"`
+	Confirm             bool   `json:"confirm"`
+	SenderUserID        int64  `json:"sender_user_id"`
+	UserID              int64  `json:"user_id"`
+	ChannelID           int64  `json:"channel_id"`
+	GiftID              int64  `json:"gift_id,string"`
+	HideName            bool   `json:"hide_name"`
+	Message             string `json:"message"`
+	Upgrade             bool   `json:"upgrade"`
+	ModelAttributeID    int64  `json:"model_attribute_id,string"`
+	PatternAttributeID  int64  `json:"pattern_attribute_id,string"`
+	BackdropAttributeID int64  `json:"backdrop_attribute_id,string"`
+}
+
+func (s *server) handleGiveGiftAPI(w http.ResponseWriter, r *http.Request) {
+	var body giveGiftAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.GiveGiftRequest{
+		CommandMeta:         s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "give-gift"),
+		SenderUserID:        body.SenderUserID,
+		UserID:              body.UserID,
+		ChannelID:           body.ChannelID,
+		GiftID:              body.GiftID,
+		HideName:            body.HideName,
+		Message:             body.Message,
+		Upgrade:             body.Upgrade,
+		ModelAttributeID:    body.ModelAttributeID,
+		PatternAttributeID:  body.PatternAttributeID,
+		BackdropAttributeID: body.BackdropAttributeID,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gifts/give", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+// flexInt64 decodes an int64 the panel may send either as a JSON number or as a
+// decimal string. Ids and nanoton amounts are sent as strings to stay exact past
+// 2^53, while a picker-supplied peer id arrives as a plain number; an empty
+// string and null both mean "unset", which is how an untouched form field looks.
+type flexInt64 int64
+
+// Int64 returns the decoded value.
+func (v flexInt64) Int64() int64 { return int64(v) }
+
+func (v *flexInt64) UnmarshalJSON(raw []byte) error {
+	text, empty := flexScalarText(raw)
+	if empty {
+		*v = 0
+		return nil
+	}
+	parsed, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid integer %s", string(raw))
+	}
+	*v = flexInt64(parsed)
+	return nil
+}
+
+// flexUnix decodes an optional timestamp as a Unix second count. A date input
+// produces an RFC3339 string and a scripted call a plain number, so both are
+// accepted; empty means "unset", which the mint command stamps with its clock.
+type flexUnix int64
+
+// Unix returns the decoded timestamp in seconds, or zero when unset.
+func (v flexUnix) Unix() int64 { return int64(v) }
+
+func (v *flexUnix) UnmarshalJSON(raw []byte) error {
+	text, empty := flexScalarText(raw)
+	if empty {
+		*v = 0
+		return nil
+	}
+	if parsed, err := strconv.ParseInt(text, 10, 64); err == nil {
+		*v = flexUnix(parsed)
+		return nil
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+		if parsed, err := time.Parse(layout, text); err == nil {
+			*v = flexUnix(parsed.UTC().Unix())
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid timestamp %s", string(raw))
+}
+
+// flexScalarText unwraps a JSON scalar to its textual form and reports whether
+// it carries no value at all (null, empty string, blank).
+func flexScalarText(raw []byte) (string, bool) {
+	text := strings.TrimSpace(string(raw))
+	if text == "" || text == "null" {
+		return "", true
+	}
+	if unquoted, err := strconv.Unquote(text); err == nil {
+		text = strings.TrimSpace(unquoted)
+	}
+	if text == "" {
+		return "", true
+	}
+	return text, false
+}
+
+type mintCollectibleUsernameAPIRequest struct {
+	CommandID      string    `json:"command_id"`
+	Reason         string    `json:"reason"`
+	Confirm        bool      `json:"confirm"`
+	Username       string    `json:"username"`
+	OwnerUserID    flexInt64 `json:"owner_user_id"`
+	OwnerChannelID flexInt64 `json:"owner_channel_id"`
+	Currency       string    `json:"currency"`
+	Amount         flexInt64 `json:"amount"`
+	CryptoCurrency string    `json:"crypto_currency"`
+	CryptoAmount   flexInt64 `json:"crypto_amount"`
+	URL            string    `json:"url"`
+	PurchaseDate   flexUnix  `json:"purchase_date"`
+}
+
+func (s *server) handleMintCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
+	var body mintCollectibleUsernameAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.MintCollectibleUsernameRequest{
+		CommandMeta:    s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "mint-collectible-username"),
+		Username:       body.Username,
+		OwnerUserID:    body.OwnerUserID.Int64(),
+		OwnerChannelID: body.OwnerChannelID.Int64(),
+		Currency:       body.Currency,
+		Amount:         body.Amount.Int64(),
+		CryptoCurrency: body.CryptoCurrency,
+		CryptoAmount:   body.CryptoAmount.Int64(),
+		URL:            body.URL,
+		PurchaseDate:   body.PurchaseDate.Unix(),
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-usernames/mint", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type transferCollectibleUsernameAPIRequest struct {
+	CommandID   string    `json:"command_id"`
+	Reason      string    `json:"reason"`
+	Confirm     bool      `json:"confirm"`
+	Username    string    `json:"username"`
+	ToUserID    flexInt64 `json:"to_user_id"`
+	ToChannelID flexInt64 `json:"to_channel_id"`
+}
+
+func (s *server) handleTransferCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
+	var body transferCollectibleUsernameAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.TransferCollectibleUsernameRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "transfer-collectible-username"),
+		Username:    body.Username,
+		ToUserID:    body.ToUserID.Int64(),
+		ToChannelID: body.ToChannelID.Int64(),
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-usernames/transfer", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type revokeCollectibleUsernameAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Username  string `json:"username"`
+	Burn      bool   `json:"burn"`
+}
+
+func (s *server) handleRevokeCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
+	var body revokeCollectibleUsernameAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	prefix := "revoke-collectible-username"
+	if body.Burn {
+		prefix = "burn-collectible-username"
+	}
+	req := admin.RevokeCollectibleUsernameRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, prefix),
+		Username:    body.Username,
+		Burn:        body.Burn,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-usernames/revoke", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type deleteCollectibleUsernameAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Username  string `json:"username"`
+}
+
+// handleDeleteCollectibleUsernameAPI erases an asset and its provenance. The
+// panel gates it behind the same reason + dry-run + confirm flow as a burn, but
+// the outcome differs: the name becomes issuable again from scratch.
+func (s *server) handleDeleteCollectibleUsernameAPI(w http.ResponseWriter, r *http.Request) {
+	var body deleteCollectibleUsernameAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.DeleteCollectibleUsernameRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "delete-collectible-username"),
+		Username:    body.Username,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-usernames/delete", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type recomputeAccountRatingAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	UserID    flexInt64 `json:"user_id"`
+}
+
+func (s *server) handleRecomputeAccountRatingAPI(w http.ResponseWriter, r *http.Request) {
+	var body recomputeAccountRatingAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.RecomputeAccountRatingRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "recompute-account-rating"),
+		UserID:      body.UserID.Int64(),
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/account-ratings/recompute", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type adjustAccountRatingAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	UserID    flexInt64 `json:"user_id"`
+	Amount    flexInt64 `json:"amount"`
+}
+
+func (s *server) handleAdjustAccountRatingAPI(w http.ResponseWriter, r *http.Request) {
+	var body adjustAccountRatingAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.AdjustAccountRatingRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "adjust-account-rating"),
+		UserID:      body.UserID.Int64(),
+		Amount:      body.Amount.Int64(),
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/account-ratings/adjust", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+// handleCollectibleUsernamesAPI pages the collectible asset table straight from
+// PostgreSQL, like every other table view, and echoes the keyset cursor as a
+// decimal string so an int64 id survives the round trip through the browser.
+func (s *server) handleCollectibleUsernamesAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	query := r.URL.Query()
+	status := strings.TrimSpace(query.Get("status"))
+	switch status {
+	case "", string(domain.CollectibleUsernameStatusVault),
+		string(domain.CollectibleUsernameStatusOwned),
+		string(domain.CollectibleUsernameStatusBurned):
+	default:
+		writeAPIError(w, http.StatusBadRequest, "invalid status")
+		return
+	}
+	ownerUserID, err := parseInt64(query.Get("owner_user_id"))
+	if err != nil || ownerUserID < 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid owner_user_id")
+		return
+	}
+	beforeID, err := parseInt64(query.Get("before_id"))
+	if err != nil || beforeID < 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid before_id")
+		return
+	}
+	limit, err := parseInt(query.Get("limit"))
+	if err != nil || limit < 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	rows, hasMore, err := s.read.ListCollectibleUsernames(r.Context(), status, ownerUserID, beforeID, query.Get("q"), limit)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nextBeforeID := ""
+	if hasMore && len(rows) > 0 {
+		nextBeforeID = strconv.FormatInt(rows[len(rows)-1].ID, 10)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rows":           rows,
+		"has_more":       hasMore,
+		"next_before_id": nextBeforeID,
+	})
+}
+
+func (s *server) handleCollectibleUsernameDetailAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	id, err := parseInt64(r.PathValue("id"))
+	if err != nil || id <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	detail, err := s.read.CollectibleUsernameDetail(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, errReadNotFound) {
+			writeAPIError(w, http.StatusNotFound, "collectible username not found")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"asset":     detail.Asset,
+		"transfers": detail.Transfers,
+	})
+}
+
+// handleAccountRatingsAPI pages the leaderboard. next_before_id is the last
+// user id: the keyset predicate resolves the full (level, stars, user_id) cursor
+// from it, so one opaque-looking value is enough to continue the page.
+func (s *server) handleAccountRatingsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	query := r.URL.Query()
+	minLevel, err := parseInt(query.Get("min_level"))
+	if err != nil || minLevel < 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid min_level")
+		return
+	}
+	userID, err := parseInt64(query.Get("user_id"))
+	if err != nil || userID < 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid user_id")
+		return
+	}
+	beforeID, err := parseInt64(query.Get("before_id"))
+	if err != nil || beforeID < 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid before_id")
+		return
+	}
+	limit, err := parseInt(query.Get("limit"))
+	if err != nil || limit < 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid limit")
+		return
+	}
+	rows, hasMore, err := s.read.ListAccountRatings(r.Context(), minLevel, userID, beforeID, limit, query.Get("q"))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nextBeforeID := ""
+	if hasMore && len(rows) > 0 {
+		nextBeforeID = strconv.FormatInt(rows[len(rows)-1].UserID, 10)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rows":           rows,
+		"has_more":       hasMore,
+		"next_before_id": nextBeforeID,
+	})
+}
+
+func (s *server) handleAccountRatingDetailAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	userID, err := parseInt64(r.PathValue("user_id"))
+	if err != nil || userID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid user_id")
+		return
+	}
+	detail, err := s.read.AccountRatingDetail(r.Context(), userID)
+	if err != nil {
+		if errors.Is(err, errReadNotFound) {
+			writeAPIError(w, http.StatusNotFound, "account rating not found")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rating": detail.Rating,
+		"events": detail.Events,
+	})
+}
+
 func (s *server) commandMetaFromAPI(r *http.Request, commandID, reason string, confirm bool, prefix string) admin.CommandMeta {
 	commandID = strings.TrimSpace(commandID)
 	if confirm && strings.HasPrefix(commandID, "dry-") {
@@ -1088,6 +2102,42 @@ func (s *server) callAdminAPI(ctx context.Context, apiPath string, payload any) 
 		return result, errors.New(result.Error)
 	}
 	return result, nil
+}
+
+// callAdminCommand is callAdminAPI with the upstream status preserved.
+//
+// callAdminAPI deliberately loses it: every caller it has answers 502 for any
+// failure. A verification decision needs the distinction, so this variant returns
+// the HTTP status alongside the result and lets the handler map it. A status of 0
+// means no HTTP answer was obtained at all.
+func (s *server) callAdminCommand(ctx context.Context, apiPath string, payload any) (admin.CommandResult, int, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return admin.CommandResult{}, 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.AdminAPIURL+apiPath, bytes.NewReader(body))
+	if err != nil {
+		return admin.CommandResult{}, 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AdminAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return admin.CommandResult{}, 0, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var result admin.CommandResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return result, 0, fmt.Errorf("admin api %s: status=%d body=%s", apiPath, resp.StatusCode, string(raw))
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if result.Error == "" {
+			result.Error = resp.Status
+		}
+		return result, resp.StatusCode, errors.New(result.Error)
+	}
+	return result, resp.StatusCode, nil
 }
 
 func (s *server) callAdminMultipart(ctx context.Context, apiPath string, metadata any, fileName string, data []byte) (admin.CommandResult, error) {

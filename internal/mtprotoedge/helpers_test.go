@@ -250,7 +250,7 @@ func encodeClientMessageForTest(t *testing.T, msg bin.Encoder) ([]byte, int32) {
 	if container, ok := msg.(*proto.MessageContainer); ok {
 		return raw, clientContainerSeqNoForTest(container)
 	}
-	if clientMessageNeedsAck(typeID) {
+	if clientMessageContentPolicyFor(typeID) == clientMessageContentRequired {
 		return raw, 1
 	}
 	return raw, 0

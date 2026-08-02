@@ -7,10 +7,73 @@ import (
 	"github.com/iamxvbaba/td/tg"
 	"go.uber.org/zap/zaptest"
 	appchannels "telesrv/internal/app/channels"
+	appupdates "telesrv/internal/app/updates"
 	"telesrv/internal/domain"
 	"telesrv/internal/store/memory"
 	"testing"
 )
+
+func TestMessagesDeleteHistoryChannelLocalClearReturnsAccountStateWithoutPTS(t *testing.T) {
+	ctx := context.Background()
+	channelStore := memory.NewChannelStore()
+	created, err := channelStore.CreateChannel(ctx, domain.CreateChannelRequest{
+		CreatorUserID: 7,
+		Title:         "local clear no pts",
+		Megagroup:     true,
+		Date:          1_700_002_100,
+	})
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	sent, err := channelStore.SendChannelMessage(ctx, domain.SendChannelMessageRequest{
+		UserID:    7,
+		ChannelID: created.Channel.ID,
+		RandomID:  210_001,
+		Message:   "clear locally",
+		Date:      1_700_002_101,
+	})
+	if err != nil {
+		t.Fatalf("send channel message: %v", err)
+	}
+	updateSvc := appupdates.NewService(memory.NewUpdateStateStore(), memory.NewUpdateEventStore())
+	stateBefore, err := updateSvc.CurrentState(ctx, 7)
+	if err != nil {
+		t.Fatalf("account state before clear: %v", err)
+	}
+	sessions := &captureSessions{}
+	r := New(Config{}, Deps{
+		Channels: appchannels.NewService(channelStore),
+		Updates:  updateSvc,
+		Sessions: sessions,
+	}, zaptest.NewLogger(t), clock.System)
+
+	affected, err := r.onMessagesDeleteHistory(WithUserID(ctx, 7), &tg.MessagesDeleteHistoryRequest{
+		Peer:  &tg.InputPeerChannel{ChannelID: created.Channel.ID, AccessHash: created.Channel.AccessHash},
+		MaxID: sent.Message.ID,
+	})
+	if err != nil {
+		t.Fatalf("messages.deleteHistory local channel: %v", err)
+	}
+	if affected.Pts != stateBefore.Pts || affected.PtsCount != 0 || affected.Offset != 0 {
+		t.Fatalf("affected history = %+v, want account pts=%d pts_count=0 offset=0", affected, stateBefore.Pts)
+	}
+	stateAfter, err := updateSvc.CurrentState(ctx, 7)
+	if err != nil {
+		t.Fatalf("account state after clear: %v", err)
+	}
+	if stateAfter.Pts != stateBefore.Pts {
+		t.Fatalf("local channel clear advanced account pts: before=%d after=%d", stateBefore.Pts, stateAfter.Pts)
+	}
+	pushed := sessions.snapshot()
+	updates, ok := pushed.message.(*tg.Updates)
+	if !ok || len(updates.Updates) != 1 {
+		t.Fatalf("pushed local clear = %T %+v, want one available update", pushed.message, pushed.message)
+	}
+	available, ok := updates.Updates[0].(*tg.UpdateChannelAvailableMessages)
+	if !ok || available.ChannelID != created.Channel.ID || available.AvailableMinID != sent.Message.ID {
+		t.Fatalf("available update = %#v, want channel=%d min=%d", updates.Updates[0], created.Channel.ID, sent.Message.ID)
+	}
+}
 
 func TestMessagesDeleteHistoryChannelReturnsOffsetForBoundedPage(t *testing.T) {
 	ctx := context.Background()
@@ -149,6 +212,8 @@ func TestMessagesDeleteHistoryPassesJustClearContext(t *testing.T) {
 			UserID:     userID,
 			MessageIDs: []int{1, 2, 3},
 			Event:      domain.UpdateEvent{Pts: 12, PtsCount: 3},
+			Pts:        14,
+			PtsCount:   5,
 		}},
 	}}
 	r := New(Config{}, Deps{Messages: messages}, zaptest.NewLogger(t), clock.System)
@@ -171,8 +236,8 @@ func TestMessagesDeleteHistoryPassesJustClearContext(t *testing.T) {
 	if !ok {
 		t.Fatalf("response = %T, want *tg.MessagesAffectedHistory", enc)
 	}
-	if got.Pts != 12 || got.PtsCount != 3 {
-		t.Fatalf("affected = %+v, want pts=12 pts_count=3", got)
+	if got.Pts != 14 || got.PtsCount != 5 {
+		t.Fatalf("affected = %+v, want aggregate pts=14 pts_count=5", got)
 	}
 	reqGot := messages.deleteHistoryReq
 	if reqGot.OwnerUserID != userID || reqGot.Peer.ID != peerID || reqGot.MaxID != 15 || !reqGot.JustClear || !reqGot.Revoke || reqGot.OriginSessionID != 88 || reqGot.OriginAuthKeyID != authKeyID {

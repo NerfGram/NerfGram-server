@@ -137,7 +137,7 @@ func (c *Conn) layerProfileRawEvidenceState() (LayerProfileSnapshot, int, int64)
 
 // freezeLayerProfileAt is the production explicit-evidence transition. The
 // positive client msg_id is the protocol ordering authority across TCP
-// reconnects and cached request replays.
+// reconnects and retained request replays.
 func (c *Conn) freezeLayerProfileAt(profile tlprofile.Profile, msgID int64) (bool, error) {
 	if c == nil {
 		return false, fmt.Errorf("nil connection layer profile")

@@ -2,7 +2,6 @@ package mtprotoedge
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/iamxvbaba/td/bin"
 	"github.com/iamxvbaba/td/clock"
+	"github.com/iamxvbaba/td/proto"
 	"github.com/iamxvbaba/td/tg"
 	"go.uber.org/zap/zaptest"
 
@@ -92,30 +92,30 @@ type countingLayerRPCAdmission struct {
 	decodeCalls atomic.Int32
 }
 
-type failingReplayLayerRPC struct {
-	LayerRPCHandler
-	err error
-}
-
-func (h *failingReplayLayerRPC) PrepareAdmittedReplay(
-	context.Context,
-	[8]byte,
-	int64,
-	int64,
-	uint64,
-	tlprofile.Admission,
-) (func() error, error) {
-	return nil, h.err
-}
-
 func (h *countingLayerRPCAdmission) AdmitLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
 	h.decodeCalls.Add(1)
 	return h.LayerRPCHandler.AdmitLayer(profile, b, limits)
 }
 
+func (h *countingLayerRPCAdmission) AdmitLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
+	h.decodeCalls.Add(1)
+	if admitter, ok := h.LayerRPCHandler.(LayerRPCOptionsAdmitter); ok {
+		return admitter.AdmitLayerWithOptions(profile, b, options)
+	}
+	return h.LayerRPCHandler.AdmitLayer(profile, b, options.Limits)
+}
+
 func (h *countingLayerRPCAdmission) AdmitUnprofiled(b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
 	h.decodeCalls.Add(1)
 	return h.LayerRPCHandler.AdmitUnprofiled(b, limits)
+}
+
+func (h *countingLayerRPCAdmission) AdmitUnprofiledWithOptions(b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
+	h.decodeCalls.Add(1)
+	if admitter, ok := h.LayerRPCHandler.(LayerRPCOptionsAdmitter); ok {
+		return admitter.AdmitUnprofiledWithOptions(b, options)
+	}
+	return h.LayerRPCHandler.AdmitUnprofiled(b, options.Limits)
 }
 
 func TestLayerRPCAdmissionCapacityRejectsBeforeDecoder(t *testing.T) {
@@ -162,6 +162,209 @@ func TestLayerRPCAdmissionCapacityRejectsBeforeDecoder(t *testing.T) {
 	}
 }
 
+func TestLayerRPCAdmissionExpandsTDLibNestedGZIPUnderTransferredBudget(t *testing.T) {
+	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
+	s := New(Options{DC: 2, LayerRPC: router, Logger: zaptest.NewLogger(t)})
+	c := &Conn{authKeyID: [8]byte{8, 21}, sessionID: 821, metrics: NopMetrics{}}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 4, time.Second)
+	defer func() {
+		c.closeInboundRPCScheduler()
+		s.rpcScheduler.stop(time.Second)
+	}()
+
+	body, expandedBytes := tdlibNestedGZIPBody(t, tlprofile.Profile228, &tg.HelpGetConfigRequest{})
+	plan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: 100, body: body}}}
+	defer plan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.items[0].kind != inboundItemRPC || plan.rpcReservation == nil || len(plan.rpcTasks) != 1 {
+		t.Fatalf("admitted nested gzip plan = kind:%d reservation:%v tasks:%d", plan.items[0].kind, plan.rpcReservation != nil, len(plan.rpcTasks))
+	}
+	wantCharge := int64(layerRPCAdmissionReservationSize(len(body) + expandedBytes))
+	if got := c.inflightRPCBytes.Load(); got != wantCharge {
+		t.Fatalf("nested gzip connection charge = %d, want %d", got, wantCharge)
+	}
+	if got := plan.rpcReservation.entries[0].size; int64(got) != wantCharge {
+		t.Fatalf("nested gzip reservation charge = %d, want %d", got, wantCharge)
+	}
+	if got := plan.gzipExpandedBytes; got != expandedBytes {
+		t.Fatalf("nested gzip cumulative expansion = %d, want %d", got, expandedBytes)
+	}
+	if got := s.frameBudget.usedBytes(); got != 0 {
+		t.Fatalf("nested gzip temporary frame budget retained after materialization: %d", got)
+	}
+}
+
+func TestLayerRPCAdmissionNestedGZIPGrowFailureRejectsWholeBatch(t *testing.T) {
+	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
+	s := New(Options{DC: 2, LayerRPC: router, Logger: zaptest.NewLogger(t)})
+	first, _ := tdlibNestedGZIPBody(t, tlprofile.Profile228, &tg.HelpGetConfigRequest{})
+	second, _ := tdlibNestedGZIPBody(t, tlprofile.Profile228, &tg.HelpGetNearestDCRequest{})
+	initialCharge := int64(layerRPCAdmissionReservationSize(len(first)) + layerRPCAdmissionReservationSize(len(second)))
+	s.rpcScheduler = newInboundRPCScheduler(1, 4, initialCharge)
+	c := &Conn{authKeyID: [8]byte{8, 22}, sessionID: 822, metrics: NopMetrics{}}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 4, time.Second)
+	defer func() {
+		c.closeInboundRPCScheduler()
+		s.rpcScheduler.stop(time.Second)
+	}()
+
+	plan := &inboundPlan{items: []inboundItem{
+		{kind: inboundItemRPC, msgID: 100, body: first},
+		{kind: inboundItemRPC, msgID: 104, body: second},
+	}}
+	defer plan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); err != nil {
+		t.Fatal(err)
+	}
+	for index := range plan.items {
+		if plan.items[index].kind != inboundItemCapacityError {
+			t.Fatalf("item %d kind = %d, want capacity error", index, plan.items[index].kind)
+		}
+	}
+	if plan.rpcReservation != nil || len(plan.rpcTasks) != 0 {
+		t.Fatalf("capacity plan retained reservation/tasks = %v/%d", plan.rpcReservation != nil, len(plan.rpcTasks))
+	}
+	if got := c.inflightRPCBytes.Load(); got != 0 {
+		t.Fatalf("grow failure leaked connection charge %d", got)
+	}
+	if tasks, bytes := s.rpcScheduler.budgetSnapshot(); tasks != 0 || bytes != 0 {
+		t.Fatalf("grow failure leaked global budget %d/%d", tasks, bytes)
+	}
+	if got := s.frameBudget.usedBytes(); got != 0 {
+		t.Fatalf("grow failure leaked temporary frame budget %d", got)
+	}
+}
+
+func TestLayerRPCAdmissionNestedGZIPSiblingsShareFrameExpansionLimit(t *testing.T) {
+	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
+	s := New(Options{DC: 2, LayerRPC: router, Logger: zaptest.NewLogger(t)})
+	c := &Conn{authKeyID: [8]byte{8, 23}, sessionID: 823, metrics: NopMetrics{}}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 4, time.Second)
+	defer func() {
+		c.closeInboundRPCScheduler()
+		s.rpcScheduler.stop(time.Second)
+	}()
+
+	first, expandedBytes := tdlibNestedGZIPBody(t, tlprofile.Profile228, &tg.HelpGetConfigRequest{})
+	second, _ := tdlibNestedGZIPBody(t, tlprofile.Profile228, &tg.HelpGetNearestDCRequest{})
+	plan := &inboundPlan{
+		gzipExpandedBytes: maxDispatchExpandedBytes - expandedBytes,
+		items: []inboundItem{
+			{kind: inboundItemRPC, msgID: 100, body: first},
+			{kind: inboundItemRPC, msgID: 104, body: second},
+		},
+	}
+	defer plan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); err != nil {
+		t.Fatal(err)
+	}
+	for index := range plan.items {
+		if plan.items[index].kind != inboundItemCapacityError {
+			t.Fatalf("item %d kind = %d, want capacity error", index, plan.items[index].kind)
+		}
+	}
+	if got := plan.gzipExpandedBytes; got != maxDispatchExpandedBytes {
+		t.Fatalf("shared cumulative expansion = %d, want %d", got, maxDispatchExpandedBytes)
+	}
+	if got := c.inflightRPCBytes.Load(); got != 0 {
+		t.Fatalf("shared-limit rejection leaked connection charge %d", got)
+	}
+	if got := s.frameBudget.usedBytes(); got != 0 {
+		t.Fatalf("shared-limit rejection leaked temporary frame budget %d", got)
+	}
+}
+
+func TestLayerRPCAdmissionNestedGZIPReDecodeReusesMaterializationCharge(t *testing.T) {
+	handler := newAdmissionOnlyLayerRPC()
+	s := New(Options{DC: 2, LayerRPC: handler, Logger: zaptest.NewLogger(t)})
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, time.Now, 8)
+	scheduler := newInboundRPCScheduler(1, 4, 1<<30)
+	s.rpcScheduler = scheduler
+	authKeyID := [8]byte{8, 24}
+	const sessionID = int64(824)
+	c225 := &Conn{authKeyID: authKeyID, sessionID: sessionID, metrics: NopMetrics{}}
+	c227 := &Conn{authKeyID: authKeyID, sessionID: sessionID, metrics: NopMetrics{}}
+	c225.startInboundRPCScheduler(scheduler, 1, 2, time.Second)
+	c227.startInboundRPCScheduler(scheduler, 1, 2, time.Second)
+	defer func() {
+		c225.closeInboundRPCScheduler()
+		c227.closeInboundRPCScheduler()
+		scheduler.stop(time.Second)
+	}()
+
+	terminal := exactOutboundLayerRPCBody(t, tlprofile.Profile225, &tg.MessagesGetHistoryRequest{
+		Peer: &tg.InputPeerSelf{}, Limit: 1,
+	})
+	body := exactLayerRPCBody(t, &tg.InvokeWithoutUpdatesRequest{Query: &proto.GZIP{Data: terminal}})
+	initialCharge := layerRPCAdmissionReservationSize(len(body))
+	reservation225, err := c225.reserveInboundRPCBatch(context.Background(), []inboundRPCSpec{{method: "messages.getHistory", size: initialCharge}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation225.abort()
+	reservation227, err := c227.reserveInboundRPCBatch(context.Background(), []inboundRPCSpec{{method: "messages.getHistory", size: initialCharge}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation227.abort()
+
+	plan225 := &inboundPlan{}
+	budget225 := &layerRPCGZIPExpansionBudget{
+		server: s, plan: plan225, reservation: reservation225,
+		baseSourceBytes: len(body), chargedSourceBytes: len(body),
+	}
+	options225 := tlprofile.AdmissionOptions{Limits: inboundLayerDecodeLimits, ExpandGZIP: budget225.expand}
+	item225 := inboundItem{msgID: 100, body: body}
+	item225.admitted, item225.method, err = s.decodeInboundLayerRPCWithOptions(
+		LayerProfileSnapshot{Profile: tlprofile.Profile225, Origin: LayerProfileInherited}, body, options225,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan227 := &inboundPlan{}
+	budget227 := &layerRPCGZIPExpansionBudget{
+		server: s, plan: plan227, reservation: reservation227,
+		baseSourceBytes: len(body), chargedSourceBytes: len(body),
+	}
+	options227 := tlprofile.AdmissionOptions{Limits: inboundLayerDecodeLimits, ExpandGZIP: budget227.expand}
+	item227 := inboundItem{msgID: 100, body: body}
+	item227.admitted, item227.method, err = s.decodeInboundLayerRPCWithOptions(
+		LayerProfileSnapshot{Profile: tlprofile.Profile227, Origin: LayerProfileInherited}, body, options227,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item225.admitted.Prepared().Identity() == item227.admitted.Prepared().Identity() {
+		t.Fatal("test request identity is invariant; need authoritative-profile re-decode")
+	}
+
+	winner, err := s.acquireAdmittedLayerRPC(c225, &item225, nil, options225, budget225)
+	if err != nil || winner.state != rpcResultAcquireOwner || winner.owner == nil {
+		t.Fatalf("winner = state:%d err:%v", winner.state, err)
+	}
+	defer winner.owner.Abort()
+	loser, err := s.acquireAdmittedLayerRPC(c227, &item227, nil, options227, budget227)
+	if err != nil || loser.state != rpcResultAcquirePending {
+		t.Fatalf("loser = state:%d err:%v", loser.state, err)
+	}
+	if got := item227.admitted.Call().Profile(); got != tlprofile.Profile225 {
+		t.Fatalf("loser re-admitted profile = %d, want 225", got)
+	}
+	wantCharge := layerRPCAdmissionReservationSize(len(body) + len(terminal))
+	if got := reservation227.entries[0].size; got != wantCharge {
+		t.Fatalf("re-decode reservation charge = %d, want single-graph maximum %d", got, wantCharge)
+	}
+	if got := plan227.gzipExpandedBytes; got != 2*len(terminal) {
+		t.Fatalf("re-decode cumulative work = %d, want %d", got, 2*len(terminal))
+	}
+	if got := s.frameBudget.usedBytes(); got != 0 {
+		t.Fatalf("re-decode leaked temporary frame budget %d", got)
+	}
+}
+
 func TestLayerRPCAdmissionTransfersOriginalReservationToFreshOwner(t *testing.T) {
 	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
 	s := New(Options{DC: 2, LayerRPC: router})
@@ -205,6 +408,25 @@ func TestLayerRPCAdmissionTransfersOriginalReservationToFreshOwner(t *testing.T)
 	if globalTasks != 0 || globalBytes != 0 {
 		t.Fatalf("plan abort leaked global budget %d/%d", globalTasks, globalBytes)
 	}
+}
+
+func tdlibNestedGZIPBody(t *testing.T, profile tlprofile.Profile, terminal bin.Object) ([]byte, int) {
+	t.Helper()
+	terminalWire := exactOutboundLayerRPCBody(t, profile, terminal)
+	request := &tg.InvokeWithLayerRequest{
+		Layer: int(profile),
+		Query: &tg.InitConnectionRequest{
+			APIID:          1,
+			DeviceModel:    "android",
+			SystemVersion:  "test",
+			AppVersion:     "1.0",
+			SystemLangCode: "en",
+			LangPack:       "",
+			LangCode:       "en",
+			Query:          &proto.GZIP{Data: terminalWire},
+		},
+	}
+	return exactLayerRPCBody(t, request), len(terminalWire)
 }
 
 func TestLayerRPCAdmissionPendingReplayReleasesProvisionalEntry(t *testing.T) {
@@ -270,7 +492,7 @@ func TestLayerRPCAdmissionCompletedReplayReleasesWholeProvisionalBatch(t *testin
 	if !claim.owner.CompleteExecution(true) {
 		t.Fatal("complete replay business outcome failed")
 	}
-	s.rpcResults.Put(c.authKeyID, c.sessionID, 100, &encodedOutboundMessage{body: []byte{1, 2, 3, 4}})
+	storeLogicalRPCResultForTest(t, s, c, 100, &encodedOutboundMessage{body: []byte{1, 2, 3, 4}})
 
 	plan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: 100, body: body}}}
 	defer plan.close()
@@ -288,54 +510,6 @@ func TestLayerRPCAdmissionCompletedReplayReleasesWholeProvisionalBatch(t *testin
 	s.rpcScheduler.budgetMu.Unlock()
 	if globalTasks != 0 || globalBytes != 0 {
 		t.Fatalf("completed replay leaked global budget %d/%d", globalTasks, globalBytes)
-	}
-}
-
-func TestLayerRPCAdmissionReplayPreparationErrorIsNotSilentlyDelivered(t *testing.T) {
-	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
-	prepareErr := errors.New("invalid replay wrapper metadata")
-	s := New(Options{DC: 2, LayerRPC: &failingReplayLayerRPC{
-		LayerRPCHandler: router,
-		err:             prepareErr,
-	}})
-	c := &Conn{authKeyID: [8]byte{8, 9}, sessionID: 89, metrics: NopMetrics{}}
-	c.startInboundRPCScheduler(s.rpcScheduler, 1, 2, time.Second)
-	if err := c.FreezeLayerProfile(tlprofile.Profile225); err != nil {
-		t.Fatal(err)
-	}
-	body := exactOutboundLayerRPCBody(t, tlprofile.Profile225, &tg.HelpGetConfigRequest{})
-	identityBuffer := &bin.Buffer{Buf: append([]byte(nil), body...)}
-	request, err := router.AdmitLayer(tlprofile.Profile225, identityBuffer, tlprofile.Limits{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	claim, err := s.rpcResults.AcquireIdentified(c.authKeyID, c.sessionID, 100, request.Prepared().Identity())
-	if err != nil || claim.owner == nil {
-		t.Fatalf("completed replay owner = %v, %v", claim.owner, err)
-	}
-	if !claim.owner.CompleteExecution(true) {
-		t.Fatal("complete replay business outcome failed")
-	}
-	s.rpcResults.Put(c.authKeyID, c.sessionID, 100, &encodedOutboundMessage{body: []byte{1, 2, 3, 4}})
-
-	plan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: 100, body: body}}}
-	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); !errors.Is(err, prepareErr) {
-		plan.close()
-		t.Fatalf("replay preparation error = %v, want %v", err, prepareErr)
-	}
-	if plan.items[0].kind == inboundItemReplayRPC {
-		plan.close()
-		t.Fatal("invalid replay metadata was converted into a deliverable cached result")
-	}
-	plan.close()
-	if got := c.inflightRPCBytes.Load(); got != 0 || c.rpcReserved != 0 {
-		t.Fatalf("failed replay preparation leaked connection budget bytes:%d tasks:%d", got, c.rpcReserved)
-	}
-	s.rpcScheduler.budgetMu.Lock()
-	globalTasks, globalBytes := s.rpcScheduler.tasks, s.rpcScheduler.bytes
-	s.rpcScheduler.budgetMu.Unlock()
-	if globalTasks != 0 || globalBytes != 0 {
-		t.Fatalf("failed replay preparation leaked global budget %d/%d", globalTasks, globalBytes)
 	}
 }
 

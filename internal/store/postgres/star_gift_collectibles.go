@@ -149,21 +149,41 @@ UPDATE star_gift_catalog SET collectible_revision_id=$2, updated_at=now() WHERE 
 }
 
 func (s *StarGiftStore) ActiveCollectibleRevision(ctx context.Context, giftID int64) (domain.StarGiftCollectibleRevision, bool, error) {
-	var revisionID int64
-	err := s.db.QueryRow(ctx, `
-SELECT collectible_revision_id FROM star_gift_catalog
-WHERE gift_id=$1 AND collectible_revision_id IS NOT NULL`, giftID).Scan(&revisionID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.StarGiftCollectibleRevision{}, false, nil
-	}
-	if err != nil {
-		return domain.StarGiftCollectibleRevision{}, false, fmt.Errorf("get active collectible revision: %w", err)
+	revisionID, ok, err := activeCollectibleRevisionID(ctx, s.db, giftID)
+	if err != nil || !ok {
+		return domain.StarGiftCollectibleRevision{}, ok, err
 	}
 	revision, err := collectibleRevisionByID(ctx, s.db, revisionID)
 	if err != nil {
 		return domain.StarGiftCollectibleRevision{}, false, err
 	}
 	return revision, true, nil
+}
+
+func (s *StarGiftStore) ActiveCollectibleProjection(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {
+	revisionID, ok, err := activeCollectibleRevisionID(ctx, s.db, giftID)
+	if err != nil || !ok {
+		return domain.StarGiftCollectibleRevision{}, ok, err
+	}
+	revision, err := collectibleRevisionProjectionByID(ctx, s.db, revisionID, samplePerKind)
+	if err != nil {
+		return domain.StarGiftCollectibleRevision{}, false, err
+	}
+	return revision, true, nil
+}
+
+func activeCollectibleRevisionID(ctx context.Context, db sqlcgen.DBTX, giftID int64) (int64, bool, error) {
+	var revisionID int64
+	err := db.QueryRow(ctx, `
+SELECT collectible_revision_id FROM star_gift_catalog
+WHERE gift_id=$1 AND collectible_revision_id IS NOT NULL`, giftID).Scan(&revisionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("get active collectible revision: %w", err)
+	}
+	return revisionID, true, nil
 }
 
 func (s *StarGiftStore) CollectibleAvailability(ctx context.Context, giftIDs []int64) (map[int64]domain.StarGiftCollectibleAvailability, error) {
@@ -195,6 +215,19 @@ WHERE c.gift_id=ANY($1) AND r.status='published'`, giftIDs)
 }
 
 func collectibleRevisionByID(ctx context.Context, db sqlcgen.DBTX, revisionID int64) (domain.StarGiftCollectibleRevision, error) {
+	return readCollectibleRevisionByID(ctx, db, revisionID, collectibleRevisionReadOptions{includeAnimationJSON: true})
+}
+
+func collectibleRevisionProjectionByID(ctx context.Context, db sqlcgen.DBTX, revisionID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, error) {
+	return readCollectibleRevisionByID(ctx, db, revisionID, collectibleRevisionReadOptions{samplePerKind: samplePerKind})
+}
+
+type collectibleRevisionReadOptions struct {
+	includeAnimationJSON bool
+	samplePerKind        int
+}
+
+func readCollectibleRevisionByID(ctx context.Context, db sqlcgen.DBTX, revisionID int64, options collectibleRevisionReadOptions) (domain.StarGiftCollectibleRevision, error) {
 	var revision domain.StarGiftCollectibleRevision
 	var status string
 	var publishedAt pgtype.Timestamptz
@@ -213,40 +246,67 @@ FROM star_gift_collectible_revisions WHERE id=$1`, revisionID).Scan(
 		revision.PublishedAt = publishedAt.Time
 	}
 	var err error
-	if revision.Models, err = listAnimatedCollectibleAttributes(ctx, db, revisionID, domain.StarGiftCollectibleModel); err != nil {
+	if revision.Models, err = listAnimatedCollectibleAttributes(ctx, db, revisionID, domain.StarGiftCollectibleModel, options); err != nil {
 		return domain.StarGiftCollectibleRevision{}, err
 	}
-	if revision.Patterns, err = listAnimatedCollectibleAttributes(ctx, db, revisionID, domain.StarGiftCollectiblePattern); err != nil {
+	if revision.Patterns, err = listAnimatedCollectibleAttributes(ctx, db, revisionID, domain.StarGiftCollectiblePattern, options); err != nil {
 		return domain.StarGiftCollectibleRevision{}, err
 	}
-	if revision.Backdrops, err = listCollectibleBackdrops(ctx, db, revisionID); err != nil {
+	if revision.Backdrops, err = listCollectibleBackdrops(ctx, db, revisionID, options); err != nil {
 		return domain.StarGiftCollectibleRevision{}, err
 	}
 	return revision, nil
 }
 
-func listAnimatedCollectibleAttributes(ctx context.Context, db sqlcgen.DBTX, revisionID int64, kind domain.StarGiftCollectibleAttributeKind) ([]domain.StarGiftCollectibleAttribute, error) {
+func listAnimatedCollectibleAttributes(ctx context.Context, db sqlcgen.DBTX, revisionID int64, kind domain.StarGiftCollectibleAttributeKind, options collectibleRevisionReadOptions) ([]domain.StarGiftCollectibleAttribute, error) {
 	table := "star_gift_collectible_models"
 	if kind == domain.StarGiftCollectiblePattern {
 		table = "star_gift_collectible_patterns"
 	} else if kind != domain.StarGiftCollectibleModel {
 		return nil, domain.ErrStarGiftCollectibleInvalid
 	}
+	craftedExpression := "false"
+	if kind == domain.StarGiftCollectibleModel {
+		craftedExpression = "a.crafted"
+	}
+	animationJSONExpression := "''::text"
+	if options.includeAnimationJSON {
+		animationJSONExpression = "a.animation_json::text"
+	}
+	prefix := ""
+	from := fmt.Sprintf("%s a JOIN documents d ON d.id=a.document_id", table)
+	args := []any{revisionID}
+	if options.samplePerKind > 0 {
+		extra := ""
+		if kind == domain.StarGiftCollectibleModel {
+			extra = " AND NOT crafted"
+		}
+		prefix = fmt.Sprintf(`WITH picked AS MATERIALIZED (
+    SELECT id FROM %s
+    WHERE collectible_revision_id=$1 AND rarity_kind='permille' AND rarity_permille > 0%s
+    ORDER BY random()
+    LIMIT $2
+)`, table, extra)
+		from = fmt.Sprintf("picked p JOIN %s a ON a.id=p.id JOIN documents d ON d.id=a.document_id", table)
+		args = append(args, options.samplePerKind)
+	}
 	rows, err := db.Query(ctx, fmt.Sprintf(`
+%s
 SELECT a.id, a.collectible_revision_id, a.name, a.rarity_kind, COALESCE(a.rarity_permille,0),
        %s, COALESCE(a.official_document_id,0), a.sort_order,
-       a.animation_json::text, a.animation_sha256, a.source_name, a.source_format,
+       %s, a.animation_sha256, a.source_name, a.source_format,
        a.width, a.height, a.frame_rate, a.in_point, a.out_point,
        d.id, d.access_hash, d.file_reference, d.date, d.mime_type, d.size, d.dc_id,
        d.attributes::text, d.thumbs::text
-FROM %s a JOIN documents d ON d.id=a.document_id
-WHERE a.collectible_revision_id=$1 ORDER BY a.sort_order, a.id`,
+FROM %s
+%s
+ORDER BY a.sort_order, a.id`, prefix, craftedExpression, animationJSONExpression, from,
 		func() string {
-			if kind == domain.StarGiftCollectibleModel {
-				return "a.crafted"
+			if options.samplePerKind > 0 {
+				return ""
 			}
-			return "false"
-		}(), table), revisionID)
+			return "WHERE a.collectible_revision_id=$1"
+		}()), args...)
 	if err != nil {
 		return nil, fmt.Errorf("list collectible %s attributes: %w", kind, err)
 	}
@@ -275,11 +335,29 @@ WHERE a.collectible_revision_id=$1 ORDER BY a.sort_order, a.id`,
 	return out, rows.Err()
 }
 
-func listCollectibleBackdrops(ctx context.Context, db sqlcgen.DBTX, revisionID int64) ([]domain.StarGiftCollectibleAttribute, error) {
-	rows, err := db.Query(ctx, `
-SELECT id, collectible_revision_id, name, backdrop_id, center_color, edge_color, pattern_color,
-       text_color, rarity_kind, COALESCE(rarity_permille,0), sort_order
-FROM star_gift_collectible_backdrops WHERE collectible_revision_id=$1 ORDER BY sort_order, id`, revisionID)
+func listCollectibleBackdrops(ctx context.Context, db sqlcgen.DBTX, revisionID int64, options collectibleRevisionReadOptions) ([]domain.StarGiftCollectibleAttribute, error) {
+	prefix := ""
+	from := "star_gift_collectible_backdrops a"
+	where := "WHERE a.collectible_revision_id=$1"
+	args := []any{revisionID}
+	if options.samplePerKind > 0 {
+		prefix = `WITH picked AS MATERIALIZED (
+    SELECT id FROM star_gift_collectible_backdrops
+    WHERE collectible_revision_id=$1 AND rarity_kind='permille' AND rarity_permille > 0
+    ORDER BY random()
+    LIMIT $2
+)`
+		from = "picked p JOIN star_gift_collectible_backdrops a ON a.id=p.id"
+		where = ""
+		args = append(args, options.samplePerKind)
+	}
+	rows, err := db.Query(ctx, fmt.Sprintf(`
+%s
+SELECT a.id, a.collectible_revision_id, a.name, a.backdrop_id, a.center_color, a.edge_color, a.pattern_color,
+       a.text_color, a.rarity_kind, COALESCE(a.rarity_permille,0), a.sort_order
+FROM %s
+%s
+ORDER BY a.sort_order, a.id`, prefix, from, where), args...)
 	if err != nil {
 		return nil, fmt.Errorf("list collectible backdrops: %w", err)
 	}
@@ -690,6 +768,9 @@ func (s *StarGiftStore) ReorderCollections(ctx context.Context, owner domain.Pee
 }
 
 func (s *StarGiftStore) SetPinned(ctx context.Context, owner domain.Peer, savedGiftIDs []int64) error {
+	if len(savedGiftIDs) > domain.MaxPinnedStarGifts {
+		return domain.ErrStarGiftCollectibleInvalid
+	}
 	return withTx(ctx, s.db, "set pinned star gifts", func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, starGiftCollectionLockKey(owner)); err != nil {
 			return err
@@ -698,11 +779,14 @@ func (s *StarGiftStore) SetPinned(ctx context.Context, owner domain.Peer, savedG
 		if err != nil {
 			return err
 		}
+		if len(ids) != len(savedGiftIDs) {
+			return domain.ErrStarGiftCollectibleInvalid
+		}
 		if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET pinned_order=0 WHERE owner_peer_type=$1 AND owner_peer_id=$2 AND pinned_order<>0`, string(owner.Type), owner.ID); err != nil {
 			return err
 		}
 		for order, id := range ids {
-			if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET pinned_order=$2 WHERE id=$1`, id, order+1); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET pinned_order=$2,unsaved=false WHERE id=$1`, id, order+1); err != nil {
 				return err
 			}
 		}

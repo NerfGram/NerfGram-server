@@ -6,24 +6,27 @@ import (
 )
 
 var (
-	ErrPasswordHashInvalid    = errors.New("password hash invalid")
-	ErrSRPIDInvalid           = errors.New("srp id invalid")
-	ErrSRPPasswordChanged     = errors.New("srp password changed")
-	ErrNewSettingsInvalid     = errors.New("new password settings invalid")
-	ErrNewSaltInvalid         = errors.New("new password salt invalid")
-	ErrPasswordRecoveryNA     = errors.New("password recovery not available")
-	ErrEmailCodeInvalid       = errors.New("email code invalid")
-	ErrEmailInvalid           = errors.New("email invalid")
-	ErrEmailNotAllowed        = errors.New("email not allowed")
-	ErrEmailOccupied          = errors.New("email occupied")
-	ErrSessionPasswordNeeded  = errors.New("session password needed")
-	ErrPhoneNumberInvalid     = errors.New("phone number invalid")
-	ErrPhoneNumberOccupied    = errors.New("phone number occupied")
-	ErrPhoneCodeEmpty         = errors.New("phone code empty")
-	ErrPhoneCodeInvalid       = errors.New("phone code invalid")
-	ErrPhoneCodeExpired       = errors.New("phone code expired")
-	ErrPhoneChangeAuthInvalid = errors.New("phone change auth invalid")
-	ErrPhoneChangeForbidden   = errors.New("phone change forbidden")
+	ErrPasswordHashInvalid     = errors.New("password hash invalid")
+	ErrSRPIDInvalid            = errors.New("srp id invalid")
+	ErrSRPPasswordChanged      = errors.New("srp password changed")
+	ErrNewSettingsInvalid      = errors.New("new password settings invalid")
+	ErrNewSaltInvalid          = errors.New("new password salt invalid")
+	ErrPasswordRecoveryNA      = errors.New("password recovery not available")
+	ErrRecoveryCodeEmpty       = errors.New("recovery code empty")
+	ErrRecoveryCodeInvalid     = errors.New("recovery code invalid")
+	ErrPasswordRecoveryExpired = errors.New("password recovery expired")
+	ErrEmailCodeInvalid        = errors.New("email code invalid")
+	ErrEmailInvalid            = errors.New("email invalid")
+	ErrEmailNotAllowed         = errors.New("email not allowed")
+	ErrEmailOccupied           = errors.New("email occupied")
+	ErrSessionPasswordNeeded   = errors.New("session password needed")
+	ErrPhoneNumberInvalid      = errors.New("phone number invalid")
+	ErrPhoneNumberOccupied     = errors.New("phone number occupied")
+	ErrPhoneCodeEmpty          = errors.New("phone code empty")
+	ErrPhoneCodeInvalid        = errors.New("phone code invalid")
+	ErrPhoneCodeExpired        = errors.New("phone code expired")
+	ErrPhoneChangeAuthInvalid  = errors.New("phone change auth invalid")
+	ErrPhoneChangeForbidden    = errors.New("phone change forbidden")
 )
 
 type AuthCodeDeliveryKind string
@@ -115,9 +118,6 @@ type PasswordSettings struct {
 	// Server-only SRP fields. They are persisted but never exposed to rpc/tg conversion.
 	SRPVerifier []byte
 	SRPBSecret  []byte
-
-	RecoveryCode          string
-	RecoveryCodeExpiresAt int64
 }
 
 // ReactionNotifyFrom stores one account-level reaction notification scope.

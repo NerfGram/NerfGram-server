@@ -349,6 +349,35 @@ func (e *dispatchBadMsgError) Error() string {
 	return fmt.Sprintf("bad client message %d/%d: code %d", e.msgID, e.seqNo, e.code)
 }
 
+var errGZIPExpansionLimit = errors.New("gzip expansion limit exceeded")
+
+type gzipExpansionWorkError struct {
+	expanded int
+	cause    error
+}
+
+func (e *gzipExpansionWorkError) Error() string {
+	if e == nil || e.cause == nil {
+		return "gzip expansion failed"
+	}
+	return e.cause.Error()
+}
+
+func (e *gzipExpansionWorkError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func gzipExpansionWork(err error) int {
+	var work *gzipExpansionWorkError
+	if errors.As(err, &work) && work.expanded > 0 {
+		return work.expanded
+	}
+	return 0
+}
+
 // decodeGZIPWithGlobalBudget reserves the maximum single-wrapper output before
 // decompression starts. Once the actual size is known the excess reservation is
 // returned, while the actual output remains charged until the inbound plan is
@@ -356,6 +385,16 @@ func (e *dispatchBadMsgError) Error() string {
 // This closes the gap where every connection read goroutine could otherwise hold
 // an unaccounted 10 MiB expansion before the shared RPC scheduler saw the body.
 func (s *Server) decodeGZIPWithGlobalBudget(b *bin.Buffer) ([]byte, func(), error) {
+	return s.decodeGZIPWithGlobalBudgetLimit(b, maxSingleGZIPExpandedBytes)
+}
+
+// decodeGZIPWithGlobalBudgetLimit is the caller-bounded form used by exact
+// Layer admission. limit is also capped by the protocol's single-wrapper
+// ceiling; the returned bytes remain charged until release is called.
+func (s *Server) decodeGZIPWithGlobalBudgetLimit(b *bin.Buffer, limit int) ([]byte, func(), error) {
+	if limit <= 0 || limit > maxSingleGZIPExpandedBytes {
+		return nil, func() {}, fmt.Errorf("invalid gzip expansion limit %d", limit)
+	}
 	compressed, err := gzipPackedBytesView(b)
 	if err != nil {
 		return nil, func() {}, err
@@ -368,7 +407,7 @@ func (s *Server) decodeGZIPWithGlobalBudget(b *bin.Buffer) ([]byte, func(), erro
 		}
 	}
 	if s.frameBudget != nil {
-		reserved, err = s.frameBudget.reserve(maxSingleGZIPExpandedBytes, 0)
+		reserved, err = s.frameBudget.reserve(int64(limit), 0)
 		if err != nil {
 			return nil, func() {}, err
 		}
@@ -379,19 +418,22 @@ func (s *Server) decodeGZIPWithGlobalBudget(b *bin.Buffer) ([]byte, func(), erro
 		release()
 		return nil, func() {}, err
 	}
-	data, readErr := io.ReadAll(io.LimitReader(r, maxSingleGZIPExpandedBytes+1))
+	data, readErr := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	closeErr := r.Close()
 	if readErr != nil {
 		release()
-		return nil, func() {}, readErr
+		return nil, func() {}, &gzipExpansionWorkError{expanded: len(data), cause: readErr}
 	}
 	if closeErr != nil {
 		release()
-		return nil, func() {}, closeErr
+		return nil, func() {}, &gzipExpansionWorkError{expanded: len(data), cause: closeErr}
 	}
-	if len(data) > maxSingleGZIPExpandedBytes {
+	if len(data) > limit {
 		release()
-		return nil, func() {}, fmt.Errorf("gzip expansion %d exceeds %d", len(data), maxSingleGZIPExpandedBytes)
+		return nil, func() {}, &gzipExpansionWorkError{
+			expanded: len(data),
+			cause:    fmt.Errorf("%w: expansion %d exceeds %d", errGZIPExpansionLimit, len(data), limit),
+		}
 	}
 	if reserved > int64(len(data)) {
 		s.frameBudget.release(reserved - int64(len(data)))
@@ -674,10 +716,7 @@ func (s *Server) handleInboundRPCAdmissionError(ctx context.Context, c *Conn, ms
 			zap.String("auth_key_id", c.authKeyHex),
 			zap.Int64("session_id", c.sessionID),
 		)
-		return s.sendResult(ctx, c, msgID, &mt.RPCError{
-			ErrorCode:    420,
-			ErrorMessage: "FLOOD_WAIT_1",
-		})
+		return s.sendResult(ctx, c, msgID, rpcWorkerBusyError())
 	}
 	return err
 }
@@ -811,9 +850,9 @@ var errRPCResultRetentionHandoff = errors.New("mtproto rpc result retention hand
 type rpcResultRetentionHandoff func(*encodedOutboundMessage, error) error
 
 // publishRPCResult ends the inbound worker's ownership at bounded egress
-// admission. Physical delivery is thereafter owned either by the single
-// outbound actor or, under retained-byte saturation, by a fenced completed-cache
-// entry that the replacement connection can replay without rerunning business.
+// admission. Physical delivery is thereafter owned by the logical-session
+// outbox. Under retained-byte saturation the Conn is fenced and the receipt
+// ledger records an unavailable tombstone so business cannot rerun.
 func (s *Server) publishRPCResult(
 	c *Conn,
 	reqMsgID int64,
@@ -851,23 +890,13 @@ func (s *Server) publishRPCResult(
 		return priority, visible
 	}
 
-	// A successful business result may never leave the encode slot as an
-	// unaccounted []byte. If the primary 512MiB retained-body budget is full, make
-	// overload terminal for this physical generation and publish the exact result
-	// into the independently bounded completed cache before releasing the slot.
+	// If the sole logical-outbox body budget cannot admit a completed result,
+	// fence this physical generation and publish only an execution tombstone.
+	// There is deliberately no fallback payload cache/spool and no business
+	// re-execution hidden behind a local capacity error.
 	retainForReplay := func(encoded *encodedOutboundMessage, admissionErr error) error {
 		if s == nil || s.rpcResults == nil || c == nil || encoded == nil || reqMsgID == 0 {
-			return errors.New("rpc result completed cache is unavailable")
-		}
-		if int64(len(encoded.body)) > s.rpcResults.completedBytes.max {
-			// Every transport-legal result fits the production completed cache by the
-			// compile-time invariant in rpc_result_cache.go. A test/custom cache that
-			// violates it cannot safely complete this flight, so fail fast while the
-			// body is still confined to the encode slot.
-			panic(fmt.Sprintf(
-				"mtprotoedge: encoded rpc result exceeds completed-cache budget: body=%d max=%d",
-				len(encoded.body), s.rpcResults.completedBytes.max,
-			))
+			return errors.New("rpc result receipt ledger is unavailable")
 		}
 		priority, visible := prepareEncoded(encoded)
 		if owner != nil && !owner.HandOff() {
@@ -875,10 +904,10 @@ func (s *Server) publishRPCResult(
 		}
 		started := time.Now()
 		encoded.markReplayable()
-		// Put may expose a completed result only after the old logical connection
+		// Complete may expose terminal execution only after the old connection
 		// is irreversibly unable to accept another same-generation request.
 		c.fenceUndeliveredRPCResult()
-		s.storeRPCResult(c, reqMsgID, encoded)
+		s.completeRPCResult(c, reqMsgID, encoded, false)
 		latency := time.Since(started)
 		if metrics, ok := s.metrics.(RPCResultMetrics); ok {
 			metrics.RPCResultDelivered(method, latency, len(encoded.body), admissionErr)
@@ -887,7 +916,7 @@ func (s *Server) publishRPCResult(
 		if visible {
 			resultLogLevel = zap.InfoLevel
 		}
-		if checked := s.log.Check(resultLogLevel, "RPC result retained for replay after egress saturation"); checked != nil {
+		if checked := s.log.Check(resultLogLevel, "RPC result execution fenced after egress saturation"); checked != nil {
 			checked.Write(
 				zap.String("method", method), zap.Int64("req_msg_id", reqMsgID),
 				zap.Int64("delivered_req_msg_id", encoded.writtenRequestID()),
@@ -952,7 +981,7 @@ func (s *Server) publishRPCResult(
 		if deliveryErr != nil {
 			encoded.markReplayable()
 			c.fenceUndeliveredRPCResult()
-			s.storeRPCResult(c, reqMsgID, encoded)
+			s.completeRPCResult(c, reqMsgID, encoded, true)
 			if checked := s.log.Check(resultLogLevel, "RPC result delivery fenced for replay"); checked != nil {
 				checked.Write(
 					zap.String("method", method), zap.Int64("req_msg_id", reqMsgID),
@@ -964,7 +993,7 @@ func (s *Server) publishRPCResult(
 			return
 		}
 		encoded.markDelivered()
-		s.storeRPCResult(c, reqMsgID, encoded)
+		s.completeRPCResult(c, reqMsgID, encoded, true)
 		if checked := s.log.Check(resultLogLevel, "RPC result delivered"); checked != nil {
 			checked.Write(
 				zap.String("method", method), zap.Int64("req_msg_id", reqMsgID),
@@ -1017,24 +1046,24 @@ func (s *Server) sendResult(ctx context.Context, c *Conn, reqMsgID int64, result
 		// same-Conn duplicate would be ACKed while no result can ever arrive.
 		c.fenceUndeliveredRPCResult()
 		encoded.markReplayable()
-		s.storeRPCResult(c, reqMsgID, encoded)
+		s.completeRPCResult(c, reqMsgID, encoded, true)
 		return err
 	}
 	encoded.markDelivered()
 	// On a live Conn, completed means the rpc_result has reached the reliable byte
 	// stream. Same-physical duplicates can therefore be ACK-only without data loss.
-	s.storeRPCResult(c, reqMsgID, encoded)
+	s.completeRPCResult(c, reqMsgID, encoded, true)
 	return nil
 }
 
-// sendCachedRPCResult preserves the delivery half of the rpc_result invariant
-// for completed-flight replays: either the cached result reaches this physical
+// sendReplayedRPCResult preserves the delivery half of the rpc_result invariant
+// for completed-flight replays: either the logical outbox result reaches this physical
 // byte stream, or this logical Conn is fenced so a replacement may retry it.
-func (s *Server) sendCachedRPCResult(ctx context.Context, c *Conn, encoded *encodedOutboundMessage) error {
-	return s.sendCachedRPCResultWithHook(ctx, c, encoded, nil)
+func (s *Server) sendReplayedRPCResult(ctx context.Context, c *Conn, encoded *encodedOutboundMessage) error {
+	return s.sendReplayedRPCResultWithHook(ctx, c, encoded, nil)
 }
 
-func (s *Server) sendCachedRPCResultWithHook(
+func (s *Server) sendReplayedRPCResultWithHook(
 	ctx context.Context,
 	c *Conn,
 	encoded *encodedOutboundMessage,
@@ -1042,7 +1071,7 @@ func (s *Server) sendCachedRPCResultWithHook(
 ) error {
 	if encoded == nil {
 		c.fenceUndeliveredRPCResult()
-		return errors.New("nil cached rpc_result")
+		return errors.New("nil replayed rpc_result")
 	}
 	attempt, reserved, err := c.cloneRPCResultForRequestReserved(encoded, encoded.reqMsgID, false)
 	if err != nil {
@@ -1059,7 +1088,7 @@ func (s *Server) sendCachedRPCResultWithHook(
 		finishRestore = c.beginRPCReplayRestore()
 		defer finishRestore()
 	}
-	// Cached replay owns its delivery-gated state synchronously. Calling the
+	// Outbox replay owns its delivery-gated state synchronously. Calling the
 	// lower send primitive avoids reserving the process-wide asynchronous hook
 	// executor; the logical hook is claimed only after this physical write wins.
 	if err := c.sendOutboundWithTerminalReserved(
@@ -1080,10 +1109,10 @@ func (s *Server) sendCachedRPCResultWithHook(
 		// the sticky deferral). Fence before the deferred barrier is released; a
 		// later physical generation may wait for Done and replay the same bytes.
 		c.fenceUndeliveredRPCResult()
-		return fmt.Errorf("wait for cached rpc_result logical restore: %w", claimErr)
+		return fmt.Errorf("wait for replayed rpc_result logical restore: %w", claimErr)
 	}
 	return s.runBoundedRPCReplayRestore(
-		restoreCtx, c, "cached rpc_result", logicalRestore, afterSuccessfulDelivery,
+		restoreCtx, c, "replayed rpc_result", logicalRestore, afterSuccessfulDelivery,
 	)
 }
 
@@ -1209,8 +1238,9 @@ func (s *Server) encodeRPCResultReservedWithHandoffContext(
 			}
 			retained = true
 			// The handoff owns the only surviving pointer. Do not return a second
-			// producer reference after the encode slot releases; the completed cache
-			// may independently evict the entry under its bounded policy.
+			// producer reference after the encode slot releases. Production handoff
+			// either transferred the body to the logical outbox or retained only an
+			// unavailable receipt tombstone.
 			encoded = nil
 			return admissionErr
 		}
@@ -1282,11 +1312,11 @@ func (s *Server) encodeRPCResultWithoutSlot(ctx context.Context, c *Conn, reqMsg
 	}, nil
 }
 
-func (s *Server) cachedRPCResult(c *Conn, reqMsgID int64) (*encodedOutboundMessage, bool) {
+func (s *Server) replayableRPCResult(c *Conn, reqMsgID int64) (*encodedOutboundMessage, bool) {
 	if s == nil || s.rpcResults == nil || c == nil {
 		return nil, false
 	}
-	return s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgID)
+	return s.rpcResults.Replay(c.authKeyID, c.sessionID, reqMsgID)
 }
 
 func (s *Server) replayRPCResultByRequest(ctx context.Context, c *Conn, reqMsgID int64) error {
@@ -1297,23 +1327,26 @@ func (s *Server) replayRPCResultByRequest(ctx context.Context, c *Conn, reqMsgID
 		c.fenceUndeliveredRPCResult()
 		return err
 	} else if resent {
-		s.log.Debug("Resent connection cached rpc_result for duplicate msg_id", zap.Int64("msg_id", reqMsgID))
+		s.log.Debug("Resent connection-retained rpc_result for duplicate msg_id", zap.Int64("msg_id", reqMsgID))
 		return nil
 	}
-	if cached, ok := s.cachedRPCResult(c, reqMsgID); ok {
-		if err := s.sendCachedRPCResult(ctx, c, cached); err != nil {
+	if replayed, ok := s.replayableRPCResult(c, reqMsgID); ok {
+		if err := s.sendReplayedRPCResult(ctx, c, replayed); err != nil {
 			return err
 		}
-		s.log.Debug("Resent session cached rpc_result for duplicate msg_id", zap.Int64("msg_id", reqMsgID))
+		s.log.Debug("Resent logical-outbox rpc_result for duplicate msg_id", zap.Int64("msg_id", reqMsgID))
 	}
 	return nil
 }
 
-func (s *Server) storeRPCResult(c *Conn, reqMsgID int64, encoded *encodedOutboundMessage) {
+func (s *Server) completeRPCResult(c *Conn, reqMsgID int64, encoded *encodedOutboundMessage, replayable bool) {
 	if s == nil || s.rpcResults == nil || c == nil {
 		return
 	}
-	s.rpcResults.Put(c.authKeyID, c.sessionID, reqMsgID, encoded)
+	if s.conns != nil {
+		s.conns.adoptLogicalSession(c)
+	}
+	s.rpcResults.Complete(c.authKeyID, c.sessionID, reqMsgID, encoded, replayable)
 }
 
 // sendPong 回复 mt.PingRequest / mt.PingDelayDisconnectRequest。
@@ -1439,15 +1472,15 @@ func validateClientEnvelope(now time.Time, msgID int64, seqNo int32, typeID uint
 	if msgTime.After(now.Add(30 * time.Second)) {
 		return badMsgIDTooHigh
 	}
-	if clientMessageAllowsEitherSeqParity(typeID) {
-		return 0
-	}
-	if clientMessageNeedsAck(typeID) {
+	switch clientMessageContentPolicyFor(typeID) {
+	case clientMessageContentRequired:
 		if seqNo%2 == 0 {
 			return badMsgSeqNotOdd
 		}
-	} else if seqNo%2 != 0 {
-		return badMsgSeqNotEven
+	case clientMessageContentForbidden:
+		if seqNo%2 != 0 {
+			return badMsgSeqNotEven
+		}
 	}
 	return 0
 }
@@ -1456,48 +1489,68 @@ func validateClientContainerEnvelope(msgID int64, seqNo int32, typeID uint32) in
 	if !validClientMessageIDBits(msgID) {
 		return badMsgIDInvalidBits
 	}
-	if clientMessageAllowsEitherSeqParity(typeID) {
-		return 0
-	}
-	if clientMessageNeedsAck(typeID) {
+	switch clientMessageContentPolicyFor(typeID) {
+	case clientMessageContentRequired:
 		if seqNo%2 == 0 {
 			return badMsgSeqNotOdd
 		}
-	} else if seqNo%2 != 0 {
-		return badMsgSeqNotEven
+	case clientMessageContentForbidden:
+		if seqNo%2 != 0 {
+			return badMsgSeqNotEven
+		}
 	}
 	return 0
 }
 
-func clientMessageAllowsEitherSeqParity(typeID uint32) bool {
-	switch typeID {
-	case mt.PingDelayDisconnectRequestTypeID,
-		// get_future_salts 的 seqno 奇偶在客户端间不一致：部分客户端按内容消息发奇数，
-		// gotd 按服务消息发偶数。两者都合法（官方服务器都接受），故不在此卡奇偶，避免
-		// 误判 bad_msg 触发客户端重连风暴。ack/content 行为仍由 clientMessageNeedsAck 决定。
-		mt.GetFutureSaltsRequestTypeID:
-		return true
-	default:
-		return false
-	}
-}
+type clientMessageContentPolicy uint8
 
-func clientMessageNeedsAck(typeID uint32) bool {
+const (
+	clientMessageContentRequired clientMessageContentPolicy = iota + 1
+	clientMessageContentForbidden
+	clientMessageContentOptional
+)
+
+// clientMessageContentPolicyFor classifies the client envelope, not merely the
+// constructor's usual sending convention. MTProto requires API RPCs to be
+// content-related and requires containers/acknowledgements to be irrelevant,
+// but clients may mark the other service constructors as either. TDLib uses
+// even sequence numbers for its reconnect state/resend/cancel service batch,
+// while gotd and DrKLO use odd sequence numbers for some of the same requests.
+func clientMessageContentPolicyFor(typeID uint32) clientMessageContentPolicy {
 	switch typeID {
 	case proto.MessageContainerTypeID,
 		mt.MsgsAckTypeID,
+		mt.MsgCopyTypeID:
+		return clientMessageContentForbidden
+	case mt.PingRequestTypeID,
 		mt.PingDelayDisconnectRequestTypeID,
-		mt.DestroySessionRequestTypeID,
-		mt.HTTPWaitRequestTypeID,
-		mt.BadMsgNotificationTypeID,
-		mt.BadServerSaltTypeID,
+		mt.GetFutureSaltsRequestTypeID,
+		mt.MsgsStateReqTypeID,
+		mt.MsgResendReqTypeID,
 		mt.MsgsAllInfoTypeID,
 		mt.MsgsStateInfoTypeID,
+		mt.DestroySessionRequestTypeID,
+		mt.HTTPWaitRequestTypeID,
+		mt.RPCDropAnswerRequestTypeID,
+		mt.BadMsgNotificationTypeID,
+		mt.BadServerSaltTypeID,
 		mt.MsgDetailedInfoTypeID,
-		mt.MsgNewDetailedInfoTypeID:
-		return false
+		mt.MsgNewDetailedInfoTypeID,
+		destroyAuthKeyRequestTypeID:
+		return clientMessageContentOptional
 	default:
+		return clientMessageContentRequired
+	}
+}
+
+func clientMessageIsContentRelated(typeID uint32, seqNo int32) bool {
+	switch clientMessageContentPolicyFor(typeID) {
+	case clientMessageContentRequired:
 		return true
+	case clientMessageContentOptional:
+		return seqNo%2 != 0
+	default:
+		return false
 	}
 }
 

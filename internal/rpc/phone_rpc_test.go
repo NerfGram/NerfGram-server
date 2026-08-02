@@ -25,6 +25,7 @@ import (
 // phonePushRecord 记录一次定向推送（目标用户、被排除的 session、载荷）。
 type phonePushRecord struct {
 	userID         int64
+	rawAuthKeyID   [8]byte
 	targetSession  int64
 	excludeSession int64
 	msg            bin.Encoder
@@ -32,8 +33,9 @@ type phonePushRecord struct {
 
 // phoneCaptureSessions 是带完整推送日志的 SessionBinder fake（captureSessions 只留最后一条）。
 type phoneCaptureSessions struct {
-	mu  sync.Mutex
-	log []phonePushRecord
+	mu      sync.Mutex
+	log     []phonePushRecord
+	pushErr error
 }
 
 func (s *phoneCaptureSessions) BindAuthKeyForSession([8]byte, int64, [8]byte) {}
@@ -47,11 +49,11 @@ func (s *phoneCaptureSessions) UserIDResolvedForAuthKey([8]byte, int64) (int64, 
 func (s *phoneCaptureSessions) UnbindAuthKey([8]byte) int                         { return 0 }
 func (s *phoneCaptureSessions) SetReceivesUpdatesForAuthKey([8]byte, int64, bool) {}
 
-func (s *phoneCaptureSessions) PushToSessionForAuthKey(_ context.Context, _ [8]byte, sessionID int64, _ proto.MessageType, msg tg.UpdatesClass) error {
+func (s *phoneCaptureSessions) PushToSessionForAuthKey(_ context.Context, rawAuthKeyID [8]byte, sessionID int64, _ proto.MessageType, msg tg.UpdatesClass) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.log = append(s.log, phonePushRecord{targetSession: sessionID, msg: msg})
-	return nil
+	s.log = append(s.log, phonePushRecord{rawAuthKeyID: rawAuthKeyID, targetSession: sessionID, msg: msg})
+	return s.pushErr
 }
 
 func (s *phoneCaptureSessions) PushToUserExceptAuthKeySession(_ context.Context, userID int64, _ [8]byte, excludeSessionID int64, _ proto.MessageType, msg tg.UpdatesClass) (int, error) {
@@ -71,6 +73,12 @@ func (s *phoneCaptureSessions) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.log = nil
+}
+
+func (s *phoneCaptureSessions) setPushError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pushErr = err
 }
 
 // stubPrivacy 只为 CanSee 服务；其余接口方法不在通话链路使用。
@@ -104,8 +112,15 @@ type phoneFixture struct {
 }
 
 const (
-	phoneCallerSession = int64(101)
-	phoneCalleeSession = int64(202)
+	phoneCallerSession      = int64(101)
+	phoneCalleeSession      = int64(202)
+	phoneOtherCalleeSession = int64(303)
+)
+
+var (
+	phoneCallerRawAuthKey      = [8]byte{0x11, 0x01}
+	phoneCalleeRawAuthKey      = [8]byte{0x22, 0x02}
+	phoneOtherCalleeRawAuthKey = [8]byte{0x33, 0x03}
 )
 
 func newPhoneFixture(t *testing.T, privacy PrivacyService) *phoneFixture {
@@ -133,11 +148,16 @@ func newPhoneFixture(t *testing.T, privacy PrivacyService) *phoneFixture {
 }
 
 func (f *phoneFixture) callerCtx() context.Context {
-	return WithSessionID(WithUserID(f.ctx, f.caller.ID), phoneCallerSession)
+	return WithSessionID(WithRawAuthKeyID(WithUserID(f.ctx, f.caller.ID), phoneCallerRawAuthKey), phoneCallerSession)
 }
 
 func (f *phoneFixture) calleeCtx() context.Context {
-	return WithSessionID(WithUserID(f.ctx, f.callee.ID), phoneCalleeSession)
+	return WithSessionID(WithRawAuthKeyID(WithUserID(f.ctx, f.callee.ID), phoneCalleeRawAuthKey), phoneCalleeSession)
+
+}
+
+func (f *phoneFixture) otherCalleeCtx() context.Context {
+	return WithSessionID(WithRawAuthKeyID(WithUserID(f.ctx, f.callee.ID), phoneOtherCalleeRawAuthKey), phoneOtherCalleeSession)
 }
 
 func phoneTestProtocol() tg.PhoneCallProtocol {
@@ -226,16 +246,22 @@ func TestPhoneCallRPCHappyPath(t *testing.T) {
 		t.Fatalf("receivedCall = %v err=%v", ok, err)
 	}
 	pushes = f.sessions.records()
-	// ⚠ ringing(receive_date) 只定向到【发起呼叫的那台设备】(CallerDevice=主叫
-	// requestCall 的 session)，绝不广播到主叫账号所有会话——否则同账号登录在被叫手机上
-	// 时会覆写来电 g_a_hash。See memory: call-ga-hash-multiaccount-clobber。
-	if len(pushes) != 1 || pushes[0].targetSession != phoneCallerSession {
-		t.Fatalf("receivedCall pushes = %+v, want one to caller device (session %d)", pushes, phoneCallerSession)
+	if len(pushes) != 1 || pushes[0].rawAuthKeyID != phoneCallerRawAuthKey || pushes[0].targetSession != phoneCallerSession {
+		t.Fatalf("receivedCall pushes = %+v, want caller device %x/%d", pushes, phoneCallerRawAuthKey, phoneCallerSession)
 	}
 	ringing, ok := phoneCallPayload(t, pushes[0]).(*tg.PhoneCallWaiting)
 	if !ok || ringing.ReceiveDate == 0 {
 		// ⚠ P1-2：缺 receive_date 推送时主叫只有 20s 接听窗口。
 		t.Fatalf("caller payload = %+v, want waiting with receive_date", phoneCallPayload(t, pushes[0]))
+	}
+	f.sessions.reset()
+
+	// 其它被叫设备晚到的 receivedCall 幂等成功，但不得再次推 ringing。
+	if ok, err := f.router.onPhoneReceivedCall(f.otherCalleeCtx(), tg.InputPhoneCall{ID: callID, AccessHash: accessHash}); err != nil || !ok {
+		t.Fatalf("duplicate receivedCall = %v err=%v", ok, err)
+	}
+	if pushes := f.sessions.records(); len(pushes) != 0 {
+		t.Fatalf("duplicate receivedCall pushes = %+v, want none", pushes)
 	}
 	f.sessions.reset()
 
@@ -388,6 +414,35 @@ func TestPhoneCallRPCHappyPath(t *testing.T) {
 		Peer: tg.InputPhoneCall{ID: callID, AccessHash: accessHash}, Debug: tg.DataJSON{Data: "{}"},
 	}); err != nil || !ok {
 		t.Fatalf("saveCallDebug = %v err=%v", ok, err)
+	}
+}
+
+func TestPhoneReceivedCallDevicePushFailureDoesNotBroadcast(t *testing.T) {
+	f := newPhoneFixture(t, stubPrivacy{})
+	_, gaHash, _ := phoneTestKeys()
+
+	res, err := f.router.onPhoneRequestCall(f.callerCtx(), &tg.PhoneRequestCallRequest{
+		UserID:   &tg.InputUser{UserID: f.callee.ID, AccessHash: f.callee.AccessHash},
+		RandomID: 43,
+		GAHash:   gaHash,
+		Protocol: phoneTestProtocol(),
+	})
+	if err != nil {
+		t.Fatalf("requestCall: %v", err)
+	}
+	waiting := res.PhoneCall.(*tg.PhoneCallWaiting)
+	f.sessions.reset()
+	f.sessions.setPushError(errors.New("caller session gone"))
+
+	if ok, err := f.router.onPhoneReceivedCall(f.calleeCtx(), tg.InputPhoneCall{ID: waiting.ID, AccessHash: waiting.AccessHash}); err != nil || !ok {
+		t.Fatalf("receivedCall = %v err=%v", ok, err)
+	}
+	pushes := f.sessions.records()
+	if len(pushes) != 1 || pushes[0].rawAuthKeyID != phoneCallerRawAuthKey || pushes[0].targetSession != phoneCallerSession {
+		t.Fatalf("receivedCall pushes = %+v, want one failed attempt to caller device", pushes)
+	}
+	if pushes[0].userID != 0 {
+		t.Fatalf("receivedCall failure fell back to user broadcast: %+v", pushes)
 	}
 }
 
@@ -724,6 +779,55 @@ func TestPhoneExpiryDispatcherMissedCall(t *testing.T) {
 	}
 	if sent[0].Media.ServiceAction.Call.CallID != waiting.ID {
 		t.Fatalf("missed history call id = %d, want %d", sent[0].Media.ServiceAction.Call.CallID, waiting.ID)
+	}
+}
+
+func TestPhoneExpiryDispatcherPreservesConfirmedCallPastRingTimeout(t *testing.T) {
+	clk := &phoneTestClock{now: time.Unix(1_700_000_000, 0)}
+	messages := &phoneCaptureMessages{}
+	f := newPhoneFixtureFull(t, clk, messages)
+	peer := establishPhoneCall(t, f)
+
+	// 回归旧的 registry GC：2×RingTimeout 后触发 dispatcher 时，已建立通话
+	// 仍须可供后续 signaling/discard 寻址，不能返回 CALL_PEER_INVALID。
+	clk.Advance(181 * time.Second)
+	dispatcher := NewPhoneExpiryDispatcher(f.router, zaptest.NewLogger(t), time.Second)
+	dispatcher.DispatchOnce(f.ctx)
+	if pushes := f.sessions.records(); len(pushes) != 0 {
+		t.Fatalf("confirmed call expiry pushes = %+v, want none", pushes)
+	}
+	if sent := messages.records(); len(sent) != 0 {
+		t.Fatalf("confirmed call expiry history = %+v, want none", sent)
+	}
+
+	ok, err := f.router.onPhoneSendSignalingData(f.callerCtx(), &tg.PhoneSendSignalingDataRequest{
+		Peer: peer,
+		Data: []byte("after-ring-timeout"),
+	})
+	if err != nil || !ok {
+		t.Fatalf("sendSignalingData after 2×RingTimeout = %v err=%v", ok, err)
+	}
+	pushes := f.sessions.records()
+	if len(pushes) != 1 || pushes[0].rawAuthKeyID != phoneCalleeRawAuthKey || pushes[0].targetSession != phoneCalleeSession {
+		t.Fatalf("signaling pushes = %+v, want callee accepted session", pushes)
+	}
+	updates, ok := pushes[0].msg.(*tg.Updates)
+	if !ok || len(updates.Updates) != 1 {
+		t.Fatalf("signaling payload = %T %+v, want single-update tg.Updates", pushes[0].msg, pushes[0].msg)
+	}
+	signal, ok := updates.Updates[0].(*tg.UpdatePhoneCallSignalingData)
+	if !ok || signal.PhoneCallID != peer.ID || string(signal.Data) != "after-ring-timeout" {
+		t.Fatalf("signaling payload = %+v", updates.Updates[0])
+	}
+	f.sessions.reset()
+
+	if _, err := f.router.onPhoneDiscardCall(f.callerCtx(), &tg.PhoneDiscardCallRequest{
+		Peer: peer, Duration: 181, Reason: &tg.PhoneCallDiscardReasonHangup{},
+	}); err != nil {
+		t.Fatalf("discardCall after 2×RingTimeout: %v", err)
+	}
+	if sent := messages.records(); len(sent) != 1 {
+		t.Fatalf("discard history = %d, want 1", len(sent))
 	}
 }
 

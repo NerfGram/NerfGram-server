@@ -62,9 +62,12 @@ func TestRPCGetConfig(t *testing.T) {
 	if cfg.ThisDC != dc {
 		t.Fatalf("config.ThisDC = %d, want %d", cfg.ThisDC, dc)
 	}
-	// 不下发 DCOptions：客户端使用写死的 static DC 地址（空列表令其保留本地地址）。
-	if len(cfg.DCOptions) != 0 {
-		t.Fatalf("config.DCOptions = %+v, want empty (client uses pinned static address)", cfg.DCOptions)
+	if len(cfg.DCOptions) != 1 {
+		t.Fatalf("config.DCOptions = %+v, want one reconnect route", cfg.DCOptions)
+	}
+	option := cfg.DCOptions[0]
+	if option.ID != dc || option.IPAddress != advIP || option.Port != advPort {
+		t.Fatalf("config.DCOptions[0] = %+v, want dc=%d at %s:%d", option, dc, advIP, advPort)
 	}
 }
 
@@ -118,7 +121,7 @@ func TestLayerRPCGetConfigUsesExactAdmittedProfile(t *testing.T) {
 	}
 }
 
-func TestInboundRPCQueueFullReturnsFloodWait(t *testing.T) {
+func TestInboundRPCQueueFullReturnsWorkerBusy(t *testing.T) {
 	const dc = 2
 	handler := &blockingRPC{
 		started: make(chan struct{}, 1),
@@ -152,8 +155,8 @@ func TestInboundRPCQueueFullReturnsFloodWait(t *testing.T) {
 	if err := rpcErr.Decode(&bin.Buffer{Buf: result.Result}); err != nil {
 		t.Fatalf("decode rpc_error: %v", err)
 	}
-	if rpcErr.ErrorCode != 420 || rpcErr.ErrorMessage != "FLOOD_WAIT_1" {
-		t.Fatalf("rpc_error = %d %q, want 420 FLOOD_WAIT_1", rpcErr.ErrorCode, rpcErr.ErrorMessage)
+	if rpcErr.ErrorCode != rpcWorkerBusyErrorCode || rpcErr.ErrorMessage != rpcWorkerBusyErrorMessage {
+		t.Fatalf("rpc_error = %d %q, want %d %s", rpcErr.ErrorCode, rpcErr.ErrorMessage, rpcWorkerBusyErrorCode, rpcWorkerBusyErrorMessage)
 	}
 	close(handler.release)
 }

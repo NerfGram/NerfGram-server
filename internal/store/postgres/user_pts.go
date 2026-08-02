@@ -30,15 +30,16 @@ ON CONFLICT (user_id) DO NOTHING`, userID)
 
 func reserveUserPts(ctx context.Context, db sqlcgen.DBTX, userID int64, count int) (int, error) {
 	count = normalizePtsCount(count)
-	if err := ensureUserUpdateWatermark(ctx, db, userID); err != nil {
-		return 0, err
+	if userID == 0 {
+		return 0, fmt.Errorf("user pts: missing user id")
 	}
 	var pts int
 	if err := db.QueryRow(ctx, `
-UPDATE user_update_watermarks
-SET contiguous_pts = contiguous_pts + $2,
+INSERT INTO user_update_watermarks (user_id, contiguous_pts)
+VALUES ($1, $2)
+ON CONFLICT (user_id) DO UPDATE
+SET contiguous_pts = user_update_watermarks.contiguous_pts + EXCLUDED.contiguous_pts,
     updated_at = now()
-WHERE user_id = $1
 RETURNING contiguous_pts`, userID, count).Scan(&pts); err != nil {
 		return 0, fmt.Errorf("reserve user pts: %w", err)
 	}

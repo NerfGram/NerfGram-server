@@ -112,7 +112,7 @@ func (s *CommunityStore) viewLocked(userID, id int64) (domain.CommunityView, err
 			cm, ok := s.channels.members[l.Peer.ID][userID]
 			joined = ok && cm.Status == domain.ChannelMemberActive
 			if channel, ok := s.channels.channels[l.Peer.ID]; ok {
-				inherentlyViewable = publicPreviewableChannel(channel)
+				inherentlyViewable = s.channels.publicPreviewableChannelLocked(channel)
 			}
 			s.channels.mu.RUnlock()
 		} else if l.Peer.Type == domain.PeerTypeUser && s.dialogs != nil {

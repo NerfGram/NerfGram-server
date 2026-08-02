@@ -1,6 +1,7 @@
 package mtprotoedge
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -44,6 +45,14 @@ type admissionOnlyLayerRPC struct {
 	dispatcher *tlprofile.Dispatcher
 	mu         sync.Mutex
 	published  []publishedLayerEvidence
+}
+
+// legacyAdmissionOnlyLayerRPC intentionally exposes only the original
+// Limits-based admission interfaces. It guards source and runtime compatibility
+// for implementations compiled before caller-owned AdmissionOptions existed.
+type legacyAdmissionOnlyLayerRPC struct {
+	dispatcher    *tlprofile.Dispatcher
+	lastRemaining int
 }
 
 type orderedAdmissionOnlyLayerRPC struct {
@@ -221,6 +230,10 @@ func newAdmissionOnlyLayerRPC() *admissionOnlyLayerRPC {
 	return &admissionOnlyLayerRPC{dispatcher: tlprofile.NewDispatcher()}
 }
 
+func newLegacyAdmissionOnlyLayerRPC() *legacyAdmissionOnlyLayerRPC {
+	return &legacyAdmissionOnlyLayerRPC{dispatcher: tlprofile.NewDispatcher()}
+}
+
 func newOrderedAdmissionOnlyLayerRPC() *orderedAdmissionOnlyLayerRPC {
 	return &orderedAdmissionOnlyLayerRPC{
 		admissionOnlyLayerRPC: newAdmissionOnlyLayerRPC(),
@@ -265,12 +278,46 @@ func (h *admissionOnlyLayerRPC) AdmitLayer(profile tlprofile.Profile, b *bin.Buf
 	return h.dispatcher.Admit(profile, b, limits)
 }
 
+func (h *admissionOnlyLayerRPC) AdmitLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
+	return h.dispatcher.AdmitWithOptions(profile, b, options)
+}
+
 func (h *admissionOnlyLayerRPC) AdmitDefaultLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
 	return h.dispatcher.AdmitDefault(profile, b, limits)
 }
 
+func (h *admissionOnlyLayerRPC) AdmitDefaultLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
+	return h.dispatcher.AdmitDefaultWithOptions(profile, b, options)
+}
+
 func (h *admissionOnlyLayerRPC) AdmitUnprofiled(b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
 	return h.dispatcher.AdmitUnprofiled(b, limits)
+}
+
+func (h *admissionOnlyLayerRPC) AdmitUnprofiledWithOptions(b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
+	return h.dispatcher.AdmitUnprofiledWithOptions(b, options)
+}
+
+func (h *legacyAdmissionOnlyLayerRPC) AdmitLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
+	request, err := h.dispatcher.Admit(profile, b, limits)
+	h.lastRemaining = b.Len()
+	return request, err
+}
+
+func (h *legacyAdmissionOnlyLayerRPC) AdmitDefaultLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
+	request, err := h.dispatcher.AdmitDefault(profile, b, limits)
+	h.lastRemaining = b.Len()
+	return request, err
+}
+
+func (h *legacyAdmissionOnlyLayerRPC) AdmitUnprofiled(b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
+	request, err := h.dispatcher.AdmitUnprofiled(b, limits)
+	h.lastRemaining = b.Len()
+	return request, err
+}
+
+func (*legacyAdmissionOnlyLayerRPC) DispatchAdmitted(context.Context, [8]byte, int64, int64, uint64, tlprofile.Admission) (tlprofile.Result, string, error) {
+	return nil, "", fmt.Errorf("admission-only handler")
 }
 
 func (*admissionOnlyLayerRPC) DispatchAdmitted(context.Context, [8]byte, int64, int64, uint64, tlprofile.Admission) (tlprofile.Result, string, error) {
@@ -299,6 +346,99 @@ func (h *admissionOnlyLayerRPC) publications() []publishedLayerEvidence {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]publishedLayerEvidence(nil), h.published...)
+}
+
+func TestLegacyLayerRPCAdmissionInterfacesRemainCompatible(t *testing.T) {
+	t.Run("inherited default accepts explicit correction", func(t *testing.T) {
+		handler := newLegacyAdmissionOnlyLayerRPC()
+		s := New(Options{DC: 2, LayerRPC: handler})
+		body := exactLayerRPCBody(t, &tg.InvokeWithLayerRequest{
+			Layer: 225,
+			Query: &tg.HelpGetConfigRequest{},
+		})
+
+		request, method, err := s.decodeInboundLayerRPCWithOptions(
+			LayerProfileSnapshot{Profile: tlprofile.Profile228, Origin: LayerProfileInherited},
+			body,
+			tlprofile.AdmissionOptions{
+				Limits: inboundLayerDecodeLimits,
+				ExpandGZIP: func([]byte, int) ([]byte, func(), error) {
+					t.Fatal("plain legacy admission unexpectedly requested gzip expansion")
+					return nil, nil, nil
+				},
+			},
+		)
+		if err != nil {
+			t.Fatalf("legacy default admission: %v", err)
+		}
+		if method != "help.getConfig" {
+			t.Fatalf("method = %q, want help.getConfig", method)
+		}
+		if request.Call().Profile() != tlprofile.Profile225 {
+			t.Fatalf("call profile = %d, want 225", request.Call().Profile())
+		}
+		if profile, ok := request.ProfileEvidence(); !ok || profile != tlprofile.Profile225 {
+			t.Fatalf("profile evidence = %d/%v, want 225/true", profile, ok)
+		}
+		if handler.lastRemaining != 0 {
+			t.Fatalf("successful legacy admission left %d bytes", handler.lastRemaining)
+		}
+	})
+
+	t.Run("unprofiled selector remains supported", func(t *testing.T) {
+		handler := newLegacyAdmissionOnlyLayerRPC()
+		s := New(Options{DC: 2, LayerRPC: handler})
+		body := exactLayerRPCBody(t, &tg.InvokeWithLayerRequest{
+			Layer: 225,
+			Query: &tg.HelpGetNearestDCRequest{},
+		})
+
+		request, method, err := s.decodeInboundLayerRPCWithOptions(
+			LayerProfileSnapshot{},
+			body,
+			tlprofile.AdmissionOptions{Limits: inboundLayerDecodeLimits},
+		)
+		if err != nil {
+			t.Fatalf("legacy unprofiled admission: %v", err)
+		}
+		if method != "help.getNearestDc" {
+			t.Fatalf("method = %q, want help.getNearestDc", method)
+		}
+		if request.Call().Profile() != tlprofile.Profile225 {
+			t.Fatalf("call profile = %d, want 225", request.Call().Profile())
+		}
+	})
+
+	t.Run("nested gzip requires explicit optional capability", func(t *testing.T) {
+		handler := newLegacyAdmissionOnlyLayerRPC()
+		s := New(Options{DC: 2, LayerRPC: handler})
+		body, _ := tdlibNestedGZIPBody(t, tlprofile.Profile228, &tg.HelpGetConfigRequest{})
+		original := append([]byte(nil), body...)
+
+		_, _, err := s.decodeInboundLayerRPCWithOptions(
+			LayerProfileSnapshot{},
+			body,
+			tlprofile.AdmissionOptions{
+				Limits: inboundLayerDecodeLimits,
+				ExpandGZIP: func([]byte, int) ([]byte, func(), error) {
+					t.Fatal("legacy handler unexpectedly received options-only gzip expander")
+					return nil, nil, nil
+				},
+			},
+		)
+		if !errors.Is(err, errLayerRPCAdmissionCapability) {
+			t.Fatalf("nested gzip error = %v, want admission capability error", err)
+		}
+		if !errors.Is(err, tlprofile.ErrGZIPExpanderMissing) {
+			t.Fatalf("nested gzip error = %v, want generated missing-expander cause", err)
+		}
+		if handler.lastRemaining != len(body) {
+			t.Fatalf("failed legacy admission retained %d/%d input bytes", handler.lastRemaining, len(body))
+		}
+		if !bytes.Equal(body, original) {
+			t.Fatal("failed legacy admission mutated caller wire bytes")
+		}
+	})
 }
 
 func TestNestedExplicitLayerAdmissionErrorsAreNotDefaultFailures(t *testing.T) {
@@ -401,7 +541,7 @@ func TestBatchProvisionalCursorKeepsRegistryWatermarkAcrossOldReplay(t *testing.
 		t.Fatalf("old owner err=%v", err)
 	}
 	oldClaim.owner.CompleteExecution(true)
-	s.rpcResults.Put(authKeyID, sessionID, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
+	storeLogicalRPCResultForTest(t, s, c, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
 
 	nakedBody := exactOutboundLayerRPCBody(t, tlprofile.Profile227, &tg.MessagesGetHistoryRequest{
 		Peer: &tg.InputPeerSelf{}, Limit: 1,
@@ -419,6 +559,131 @@ func TestBatchProvisionalCursorKeepsRegistryWatermarkAcrossOldReplay(t *testing.
 	}
 	if profile, ok := s.rpcResults.ExactAdmissionProfile(authKeyID, sessionID, 108); !ok || profile != tlprofile.Profile227 {
 		t.Fatalf("following naked admission profile = (%d,%v), want registry Layer 227", profile, ok)
+	}
+}
+
+func TestAcknowledgedExactRPCReleasesReplayReceipt(t *testing.T) {
+	handler := &replayProfileCaptureLayerRPC{admissionOnlyLayerRPC: newAdmissionOnlyLayerRPC()}
+	s := New(Options{DC: 2, LayerRPC: handler})
+	authKeyID := [8]byte{0x31, 0xa1}
+	const sessionID, reqMsgID = int64(3191), int64(100)
+	body := exactLayerRPCBody(t, &tg.InvokeWithLayerRequest{
+		Layer: 225, Query: &tg.HelpGetConfigRequest{},
+	})
+	admitted, _, err := s.decodeInboundLayerRPC(
+		LayerProfileSnapshot{Profile: tlprofile.Profile225, Origin: LayerProfileExplicit}, body,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := s.rpcResults.AcquireLayerIdentified(
+		authKeyID, sessionID, reqMsgID,
+		admitted.Call().Profile(), admitted.Prepared().Identity(),
+	)
+	if err != nil || owner.state != rpcResultAcquireOwner {
+		t.Fatalf("owner = %#v, err=%v", owner, err)
+	}
+	owner.owner.CompleteExecution(true)
+	logical := &Conn{authKeyID: authKeyID, sessionID: sessionID}
+	storeLogicalRPCResultForTest(t, s, logical, reqMsgID, &encodedOutboundMessage{
+		body: make([]byte, 32), reqMsgID: reqMsgID,
+	})
+	acknowledgeLogicalRPCResultForTest(t, s, logical, reqMsgID)
+
+	replacement := &Conn{authKeyID: authKeyID, sessionID: sessionID, metrics: NopMetrics{}}
+	replacement.startInboundRPCScheduler(s.rpcScheduler, 1, 8, time.Second)
+	defer replacement.Close()
+	plan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: reqMsgID, body: body}}}
+	defer plan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), replacement, plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.items[0].kind != inboundItemRPC || plan.items[0].payload == nil {
+		t.Fatalf("post-ACK request = kind:%d payload:%T", plan.items[0].kind, plan.items[0].payload)
+	}
+	if len(plan.rpcTasks) != 1 || len(plan.rpcOwners) != 1 || len(plan.rewrapAliases) != 0 || plan.rpcReservation == nil {
+		t.Fatalf("post-ACK request scheduling: tasks=%d owners=%d aliases=%d reservation=%v",
+			len(plan.rpcTasks), len(plan.rpcOwners), len(plan.rewrapAliases), plan.rpcReservation != nil)
+	}
+	if profiles, known := handler.capturedProfiles(); len(profiles) != 0 || len(known) != 0 {
+		t.Fatalf("ACKed duplicate ran replay side effects: profiles=%v known=%v", profiles, known)
+	}
+	claim, err := s.rpcResults.AcquireLayerIdentified(
+		authKeyID, sessionID, reqMsgID,
+		admitted.Call().Profile(), admitted.Prepared().Identity(),
+	)
+	if err != nil || claim.state != rpcResultAcquirePending || claim.admissionSeq == owner.admissionSeq {
+		t.Fatalf("post-ACK claim after preflight = %#v, err=%v", claim, err)
+	}
+}
+
+func TestAcknowledgedExactInitRewrapReleasesReplayReceipt(t *testing.T) {
+	handler := &replayProfileCaptureLayerRPC{admissionOnlyLayerRPC: newAdmissionOnlyLayerRPC()}
+	s := New(Options{DC: 2, LayerRPC: handler})
+	authKeyID := [8]byte{0x31, 0xa2}
+	const sessionID, oldReqID, newReqID = int64(3192), int64(100), int64(104)
+	c := &Conn{authKeyID: authKeyID, sessionID: sessionID, metrics: NopMetrics{}}
+	if err := c.SeedInheritedLayerProfile(tlprofile.Profile227); err != nil {
+		t.Fatal(err)
+	}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 8, time.Second)
+	defer c.Close()
+
+	inner := exactOutboundLayerRPCBody(t, tlprofile.Profile227, &tg.HelpGetConfigRequest{})
+	oldPlan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: oldReqID, body: inner}}}
+	defer oldPlan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, oldPlan); err != nil {
+		t.Fatal(err)
+	}
+	if len(oldPlan.rpcOwners) != 1 || s.rpcRewrap.total != 1 {
+		t.Fatalf("old exact candidate = owners:%d candidates:%d", len(oldPlan.rpcOwners), s.rpcRewrap.total)
+	}
+
+	wrapped := exactLayerRPCBody(t, &tg.InvokeWithLayerRequest{
+		Layer: 227,
+		Query: &tg.InitConnectionRequest{
+			APIID: 6, DeviceModel: "Pixel", SystemVersion: "SDK 36", AppVersion: "12.8.1",
+			SystemLangCode: "en", LangPack: "android", LangCode: "en",
+			Query: &tg.HelpGetConfigRequest{},
+		},
+	})
+	admitted, _, err := s.decodeInboundLayerRPC(
+		LayerProfileSnapshot{Profile: tlprofile.Profile227, Origin: LayerProfileExplicit}, wrapped,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newOwner, err := s.rpcResults.AcquireLayerIdentified(
+		authKeyID, sessionID, newReqID,
+		admitted.Call().Profile(), admitted.Prepared().Identity(),
+	)
+	if err != nil || newOwner.state != rpcResultAcquireOwner {
+		t.Fatalf("new exact receipt owner = %#v, err=%v", newOwner, err)
+	}
+	newOwner.owner.CompleteExecution(true)
+	storeLogicalRPCResultForTest(t, s, c, newReqID, &encodedOutboundMessage{
+		body: make([]byte, 32), reqMsgID: newReqID,
+	})
+	acknowledgeLogicalRPCResultForTest(t, s, c, newReqID)
+	// In the real delivery path a successful rewrap commits its source candidate.
+	// Clear the synthetic pending candidate before observing post-ACK admission.
+	s.rpcRewrap.clearSession(c)
+
+	newPlan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: newReqID, body: wrapped}}}
+	defer newPlan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, newPlan); err != nil {
+		t.Fatal(err)
+	}
+	if newPlan.items[0].kind != inboundItemRPC || newPlan.items[0].payload == nil ||
+		len(newPlan.rpcTasks) != 1 || len(newPlan.rpcOwners) != 1 || len(newPlan.rewrapAliases) != 0 {
+		t.Fatalf("post-ACK init request scheduling: kind=%d tasks=%d owners=%d aliases=%d",
+			newPlan.items[0].kind, len(newPlan.rpcTasks), len(newPlan.rpcOwners), len(newPlan.rewrapAliases))
+	}
+	if s.rpcRewrap.total != 0 {
+		t.Fatalf("ACKed exact init rewrap left %d candidates", s.rpcRewrap.total)
+	}
+	if profiles, known := handler.capturedProfiles(); len(profiles) != 0 || len(known) != 0 {
+		t.Fatalf("ACKed exact init rewrap ran replay side effects: profiles=%v known=%v", profiles, known)
 	}
 }
 
@@ -701,7 +966,7 @@ func TestDurabilityOutageInitializesOnlyCurrentConnection(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, msgID); !ok {
+	if _, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, msgID); !ok {
 		t.Fatal("successful outage-local init did not publish its exact RPC result")
 	}
 	if layer, found, err := router.ResolveInheritedAuthKeyLayer(ctx, c.authKeyID); err != nil || found || layer != 0 {
@@ -781,7 +1046,7 @@ func TestInvariantReplayNeverCachesInternalCanonicalProfile(t *testing.T) {
 	}
 
 	owner.CompleteExecution(true)
-	s.rpcResults.Put(authKeyID, sessionID, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
+	storeLogicalRPCResultForTest(t, s, original, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
 	if profile, ok := s.rpcResults.ExactAdmissionProfile(authKeyID, sessionID, 100); ok || profile != 0 {
 		t.Fatalf("completed invariant cached profile=(%d,%v)", profile, ok)
 	}
@@ -806,7 +1071,7 @@ func TestInvariantReplayNeverCachesInternalCanonicalProfile(t *testing.T) {
 func TestSameMsgIDNakedReplayUsesWinnerAdmissionProfile(t *testing.T) {
 	handler := newAdmissionOnlyLayerRPC()
 	s := New(Options{DC: 2, LayerRPC: handler})
-	s.rpcResults = newRPCResultCacheWithFlightLimit(time.Now, 8)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, time.Now, 8)
 	authKeyID := [8]byte{0x22, 0x99}
 	const sessionID = int64(2299)
 	body := exactOutboundLayerRPCBody(t, tlprofile.Profile225, &tg.MessagesGetHistoryRequest{
@@ -833,11 +1098,12 @@ func TestSameMsgIDNakedReplayUsesWinnerAdmissionProfile(t *testing.T) {
 	}
 	c220 := &Conn{authKeyID: authKeyID, sessionID: sessionID}
 	c227 := &Conn{authKeyID: authKeyID, sessionID: sessionID}
-	winner, err := s.acquireAdmittedLayerRPC(c220, &item220, nil)
+	options := tlprofile.AdmissionOptions{Limits: inboundLayerDecodeLimits}
+	winner, err := s.acquireAdmittedLayerRPC(c220, &item220, nil, options, nil)
 	if err != nil || winner.state != rpcResultAcquireOwner || winner.owner == nil {
 		t.Fatalf("winner = state:%d err:%v", winner.state, err)
 	}
-	loser, err := s.acquireAdmittedLayerRPC(c227, &item227, nil)
+	loser, err := s.acquireAdmittedLayerRPC(c227, &item227, nil, options, nil)
 	if err != nil || loser.state != rpcResultAcquirePending || loser.admissionSeq != winner.admissionSeq {
 		t.Fatalf("loser join = state:%d seq:%d err:%v, winner seq:%d", loser.state, loser.admissionSeq, err, winner.admissionSeq)
 	}
@@ -852,7 +1118,7 @@ func TestSameMsgIDNakedReplayUsesWinnerAdmissionProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.acquireAdmittedLayerRPC(c220, &changed, nil); !errors.Is(err, ErrRPCResultIdentityMismatch) {
+	if _, err := s.acquireAdmittedLayerRPC(c220, &changed, nil, options, nil); !errors.Is(err, ErrRPCResultIdentityMismatch) {
 		t.Fatalf("same-msg_id changed body err=%v, want identity mismatch", err)
 	}
 	winner.owner.Abort()
@@ -935,7 +1201,7 @@ func TestLayerEvidencePublicationBelongsOnlyToFreshFlightOwner(t *testing.T) {
 func TestLayerEvidenceNotPublishedWhenBatchFlightCapacityRollsBack(t *testing.T) {
 	handler := newAdmissionOnlyLayerRPC()
 	s := New(Options{DC: 2, LayerRPC: handler})
-	s.rpcResults = newRPCResultCacheWithFlightLimit(time.Now, 1)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, time.Now, 1)
 	c := &Conn{authKeyID: [8]byte{0x22, 0x97}, sessionID: 2297, metrics: NopMetrics{}}
 	c.startInboundRPCScheduler(s.rpcScheduler, 1, 8, time.Second)
 	defer c.Close()
@@ -980,7 +1246,7 @@ func TestOldCompletedLayerRequestCannotRollBackCorrectedSession(t *testing.T) {
 		t.Fatal("old request did not acquire owner")
 	}
 	oldOwner.CompleteExecution(true)
-	s.rpcResults.Put(authKeyID, sessionID, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
+	storeLogicalRPCResultForTest(t, s, c, 100, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 100})
 
 	correctPlan := &inboundPlan{items: []inboundItem{{
 		kind: inboundItemRPC, msgID: 104,
@@ -1019,7 +1285,7 @@ func TestLogicalSessionLayerWatermarkSurvivesResultExpiryAndOldContainer(t *test
 	now := newExpiryTestClock(time.Unix(1_900_000_000, 0))
 	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), now)
 	s := New(Options{DC: 2, LayerRPC: router, Clock: now})
-	s.rpcResults = newRPCResultCacheWithFlightLimit(now.Now, 8)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, now.Now, 8)
 	authKeyID := [8]byte{0x22, 0x95}
 	const sessionID = int64(2295)
 	newConn := func() *Conn {
@@ -1046,7 +1312,7 @@ func TestLogicalSessionLayerWatermarkSurvivesResultExpiryAndOldContainer(t *test
 	if oldOwner == nil || !oldOwner.CompleteExecution(true) {
 		t.Fatal("old Layer 225 request did not establish a completed owner")
 	}
-	s.rpcResults.Put(authKeyID, sessionID, oldMsgID, &encodedOutboundMessage{body: []byte{1}, reqMsgID: oldMsgID})
+	storeLogicalRPCResultForTest(t, s, original, oldMsgID, &encodedOutboundMessage{body: []byte{1}, reqMsgID: oldMsgID})
 
 	correctPlan := &inboundPlan{items: []inboundItem{{
 		kind: inboundItemRPC, msgID: correctedMsgID,
@@ -1065,7 +1331,7 @@ func TestLogicalSessionLayerWatermarkSurvivesResultExpiryAndOldContainer(t *test
 	// inherited default remains Layer 227, while an old inner request may execute
 	// request-bound but cannot recreate or roll back the exact-session watermark.
 	now.Advance(10 * time.Minute)
-	if _, ok := s.rpcResults.Get(authKeyID, sessionID, oldMsgID); ok {
+	if _, ok := s.rpcResults.Replay(authKeyID, sessionID, oldMsgID); ok {
 		t.Fatal("old completed result did not expire")
 	}
 
@@ -1712,7 +1978,7 @@ func TestUnprofiledInvariantBindKeepsProfileUnknownAndReturnsExactBool(t *testin
 func TestLayerRPCBatchCapacityKeepsExistingPendingReplay(t *testing.T) {
 	router := rpc.New(rpc.Config{DC: 2, IP: "127.0.0.1", Port: 2398}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
 	s := New(Options{DC: 2, LayerRPC: router})
-	s.rpcResults = newRPCResultCacheWithFlightLimit(time.Now, 1)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, time.Now, 1)
 	c := &Conn{
 		authKeyID: [8]byte{7, 7, 1},
 		sessionID: 771,
@@ -1767,7 +2033,7 @@ func TestLayerRPCBatchCapacityKeepsExistingPendingReplay(t *testing.T) {
 }
 
 func TestLayerRPCBatchCapacityAbortsRejectedRewrapOwner(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 1)
+	cache := newRPCExecutionLedgerForTest(time.Now, 1)
 	authKeyID := [8]byte{7, 7, 9}
 	const (
 		sessionID = int64(779)

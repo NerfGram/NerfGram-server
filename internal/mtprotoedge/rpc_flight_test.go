@@ -32,25 +32,23 @@ func rpcFlightExactIdentity(t *testing.T, profile tlprofile.Profile, request bin
 	return admitted.Prepared().Identity()
 }
 
-func newRPCResultSubscriberTestCache(global, auth, session, perFlight int) *rpcResultCache {
-	return newRPCResultCacheWithFairCapacity(time.Now, rpcResultCacheCapacity{
+func newRPCExecutionSubscriberTestLedger(global, auth, session, perFlight int) *rpcExecutionLedger {
+	return newRPCExecutionLedger(time.Now, rpcExecutionLedgerCapacity{
 		maxPending:             64,
 		maxPendingPerAuth:      64,
-		globalMaxBytes:         rpcResultCacheMaxBytes,
-		globalMaxEntries:       rpcResultCacheMaxEntries,
-		authMaxBytes:           rpcResultCacheAuthMaxBytes,
-		authMaxEntries:         rpcResultCacheAuthMaxEntries,
-		sessionMaxBytes:        rpcResultCacheSessionMaxBytes,
-		sessionMaxEntries:      rpcResultCacheSessionMaxEntries,
+		globalMaxEntries:       rpcExecutionMaxEntries,
+		authMaxEntries:         rpcExecutionAuthMaxEntries,
+		sessionMaxEntries:      rpcExecutionSessionMaxEntries,
 		subscriberMaxGlobal:    global,
 		subscriberMaxAuth:      auth,
 		subscriberMaxSession:   session,
 		subscriberMaxPerFlight: perFlight,
+		replayStore:            newRPCReplayStoreForTest(),
 	})
 }
 
 func TestRPCResultFlightSubscriberPairCapacityFailureIsAtomic(t *testing.T) {
-	cache := newRPCResultSubscriberTestCache(8, 8, 8, 1)
+	cache := newRPCExecutionSubscriberTestLedger(8, 8, 8, 1)
 	authKeyID := rpcFlightTestAuthID(70)
 	claim, err := cache.Acquire(authKeyID, 70, 700)
 	if err != nil || claim.owner == nil {
@@ -64,7 +62,7 @@ func TestRPCResultFlightSubscriberPairCapacityFailureIsAtomic(t *testing.T) {
 	if !errors.Is(err, ErrRPCResultSubscriberCapacity) {
 		t.Fatalf("pair subscription err=%v, want %v", err, ErrRPCResultSubscriberCapacity)
 	}
-	s := cache.shard(rpcResultCacheKey{authKeyID: authKeyID, sessionID: 70, reqMsgID: 700})
+	s := cache.shard(rpcExecutionKey{authKeyID: authKeyID, sessionID: 70, reqMsgID: 700})
 	s.mu.Lock()
 	if got := claim.owner.flight.subscriberSlots; got != 0 {
 		t.Fatalf("failed pair retained %d subscriber slots", got)
@@ -74,7 +72,7 @@ func TestRPCResultFlightSubscriberPairCapacityFailureIsAtomic(t *testing.T) {
 	}
 	s.mu.Unlock()
 	claim.owner.CompleteExecution(true)
-	cache.Put(authKeyID, 70, 700, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 700})
+	cache.completeReplayableForTest(authKeyID, 70, 700, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 700})
 	if resultCalls != 0 || executionCalls != 0 {
 		t.Fatalf("failed pair callbacks ran: result=%d execution=%d", resultCalls, executionCalls)
 	}
@@ -84,7 +82,7 @@ func TestRPCResultFlightSubscriberPairCapacityFailureIsAtomic(t *testing.T) {
 }
 
 func TestRPCResultFlightSubscriberBudgetsIsolateSessionAndAuth(t *testing.T) {
-	cache := newRPCResultSubscriberTestCache(3, 2, 1, 4)
+	cache := newRPCExecutionSubscriberTestLedger(3, 2, 1, 4)
 	authA := rpcFlightTestAuthID(71)
 	authB := rpcFlightTestAuthID(72)
 	type ownerKey struct {
@@ -149,7 +147,7 @@ func TestRPCResultFlightSubscriberBudgetsIsolateSessionAndAuth(t *testing.T) {
 }
 
 func TestRPCResultFlightSubscriberSlotsReleasePerTerminalHalf(t *testing.T) {
-	cache := newRPCResultSubscriberTestCache(4, 4, 4, 4)
+	cache := newRPCExecutionSubscriberTestLedger(4, 4, 4, 4)
 	authKeyID := rpcFlightTestAuthID(73)
 	claim, err := cache.Acquire(authKeyID, 73, 730)
 	if err != nil || claim.owner == nil {
@@ -175,7 +173,7 @@ func TestRPCResultFlightSubscriberSlotsReleasePerTerminalHalf(t *testing.T) {
 	if got := cache.subscriberBudget.sessionSnapshot(authKeyID, 73); got != 1 {
 		t.Fatalf("post-execution subscriber usage=%d, want 1", got)
 	}
-	cache.Put(authKeyID, 73, 730, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 730})
+	cache.completeReplayableForTest(authKeyID, 73, 730, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 730})
 	if ok := <-result; !ok {
 		t.Fatal("result callback reported failure")
 	}
@@ -185,7 +183,7 @@ func TestRPCResultFlightSubscriberSlotsReleasePerTerminalHalf(t *testing.T) {
 }
 
 func TestRPCResultFlightRepeatedReplayJoinsStayBoundedAndPutCleansExecution(t *testing.T) {
-	cache := newRPCResultSubscriberTestCache(2, 2, 2, 2)
+	cache := newRPCExecutionSubscriberTestLedger(2, 2, 2, 2)
 	authKeyID := rpcFlightTestAuthID(74)
 	claim, err := cache.Acquire(authKeyID, 74, 740)
 	if err != nil || claim.owner == nil {
@@ -212,7 +210,7 @@ func TestRPCResultFlightRepeatedReplayJoinsStayBoundedAndPutCleansExecution(t *t
 			t.Fatalf("join %d err=%v, want capacity", i, err)
 		}
 	}
-	cache.Put(authKeyID, 74, 740, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 740})
+	cache.completeReplayableForTest(authKeyID, 74, 740, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 740})
 	if resultCalls != 1 || executionCalls != 1 {
 		t.Fatalf("terminal callback counts result=%d execution=%d", resultCalls, executionCalls)
 	}
@@ -222,7 +220,7 @@ func TestRPCResultFlightRepeatedReplayJoinsStayBoundedAndPutCleansExecution(t *t
 }
 
 func TestRPCResultFlightExactIdentityGuardsPendingAndCompletedReuse(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 2)
+	cache := newRPCExecutionLedgerForTest(time.Now, 2)
 	authKeyID := rpcFlightTestAuthID(90)
 	firstIdentity := rpcFlightExactIdentity(t, tlprofile.Profile225, &tg.HelpGetConfigRequest{})
 	otherIdentity := rpcFlightExactIdentity(t, tlprofile.Profile225, &tg.HelpGetNearestDCRequest{})
@@ -240,7 +238,7 @@ func TestRPCResultFlightExactIdentityGuardsPendingAndCompletedReuse(t *testing.T
 	}
 
 	want := &encodedOutboundMessage{body: []byte{1, 2, 3, 4}, reqMsgID: 900}
-	cache.Put(authKeyID, 90, 900, want)
+	cache.completeReplayableForTest(authKeyID, 90, 900, want)
 	if _, err := cache.AcquireIdentified(authKeyID, 90, 900, otherIdentity); !errors.Is(err, ErrRPCResultIdentityMismatch) {
 		t.Fatalf("completed mismatched Acquire err = %v, want %v", err, ErrRPCResultIdentityMismatch)
 	}
@@ -254,7 +252,7 @@ func TestRPCResultFlightExactIdentityGuardsPendingAndCompletedReuse(t *testing.T
 }
 
 func TestRPCResultFlightAdmissionSequenceAllocatedOnceAndReplayed(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 4)
+	cache := newRPCExecutionLedgerForTest(time.Now, 4)
 	authKeyID := rpcFlightTestAuthID(89)
 	identity := rpcFlightExactIdentity(t, tlprofile.Profile225, &tg.HelpGetConfigRequest{})
 	owner, err := cache.AcquireLayerIdentified(authKeyID, 89, 890, tlprofile.Profile225, identity)
@@ -267,7 +265,7 @@ func TestRPCResultFlightAdmissionSequenceAllocatedOnceAndReplayed(t *testing.T) 
 	}
 	owner.owner.CompleteExecution(true)
 	encoded := &encodedOutboundMessage{body: []byte{1}, reqMsgID: 890}
-	cache.Put(authKeyID, 89, 890, encoded)
+	cache.completeReplayableForTest(authKeyID, 89, 890, encoded)
 	completed, err := cache.AcquireLayerIdentified(authKeyID, 89, 890, tlprofile.Profile225, identity)
 	if err != nil || completed.state != rpcResultAcquireCompleted || completed.admissionSeq != owner.admissionSeq {
 		t.Fatalf("completed = state:%d seq:%d err:%v, want seq:%d", completed.state, completed.admissionSeq, err, owner.admissionSeq)
@@ -285,7 +283,7 @@ func TestRPCResultFlightAdmissionSequenceAllocatedOnceAndReplayed(t *testing.T) 
 }
 
 func TestRPCAdmissionSafeFloorTracksOwnersUntilPutOrAbort(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 4)
+	cache := newRPCExecutionLedgerForTest(time.Now, 4)
 	authKeyID := rpcFlightTestAuthID(86)
 	identity := rpcFlightExactIdentity(t, tlprofile.Profile225, &tg.HelpGetConfigRequest{})
 	first, err := cache.AcquireLayerIdentified(authKeyID, 86, 860, tlprofile.Profile225, identity)
@@ -306,14 +304,14 @@ func TestRPCAdmissionSafeFloorTracksOwnersUntilPutOrAbort(t *testing.T) {
 		t.Fatalf("post-abort safe floor=%d, want %d", floor, second.admissionSeq)
 	}
 	second.owner.CompleteExecution(true)
-	cache.Put(authKeyID, 86, 864, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 864})
+	cache.completeReplayableForTest(authKeyID, 86, 864, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 864})
 	if floor := cache.stableAdmissionSafeFloor(); floor != second.admissionSeq+1 {
 		t.Fatalf("terminal safe floor=%d, want %d", floor, second.admissionSeq+1)
 	}
 }
 
 func TestRPCAdmissionSequenceExhaustionCannotWrap(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 2)
+	cache := newRPCExecutionLedgerForTest(time.Now, 2)
 	cache.nextAdmissionSeq.Store(^uint64(0) - 1)
 	authKeyID := rpcFlightTestAuthID(85)
 	identity := rpcFlightExactIdentity(t, tlprofile.Profile225, &tg.HelpGetConfigRequest{})
@@ -331,7 +329,7 @@ func TestRPCAdmissionSequenceExhaustionCannotWrap(t *testing.T) {
 }
 
 func TestRPCIdentityMismatchCarriesWinnerProfileAcrossAbort(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 2)
+	cache := newRPCExecutionLedgerForTest(time.Now, 2)
 	authKeyID := rpcFlightTestAuthID(88)
 	request := &tg.MessagesGetHistoryRequest{Peer: &tg.InputPeerSelf{}, Limit: 1}
 	winnerIdentity := rpcFlightExactIdentity(t, tlprofile.Profile225, request)
@@ -357,7 +355,7 @@ func TestRPCIdentityMismatchCarriesWinnerProfileAcrossAbort(t *testing.T) {
 
 func TestRPCAdmissionProfileHintSurvivesCompletedEvictionWindow(t *testing.T) {
 	now := time.Unix(1_900_000_000, 0)
-	cache := newRPCResultCacheWithFlightLimit(func() time.Time { return now }, 2)
+	cache := newRPCExecutionLedgerForTest(func() time.Time { return now }, 2)
 	authKeyID := rpcFlightTestAuthID(87)
 	identity := rpcFlightExactIdentity(t, tlprofile.Profile225, &tg.MessagesGetHistoryRequest{
 		Peer: &tg.InputPeerSelf{}, Limit: 1,
@@ -367,7 +365,7 @@ func TestRPCAdmissionProfileHintSurvivesCompletedEvictionWindow(t *testing.T) {
 		t.Fatalf("owner err=%v", err)
 	}
 	claim.owner.CompleteExecution(true)
-	cache.Put(authKeyID, 87, 870, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 870})
+	cache.completeReplayableForTest(authKeyID, 87, 870, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 870})
 	profile, ok := cache.ExactAdmissionProfile(authKeyID, 87, 870)
 	if !ok || profile != tlprofile.Profile225 {
 		t.Fatalf("profile hint = (%d,%v)", profile, ok)
@@ -375,7 +373,7 @@ func TestRPCAdmissionProfileHintSurvivesCompletedEvictionWindow(t *testing.T) {
 	// Admission already copied the hint into its local decoder cursor. Expiry
 	// between that probe and the atomic claim must not make it fall back to the
 	// connection's newer default; it simply becomes a fresh owner under 225.
-	now = now.Add(rpcResultCacheTTL + time.Second)
+	now = now.Add(rpcExecutionReceiptTTL + time.Second)
 	replacement, err := cache.AcquireLayerIdentified(authKeyID, 87, 870, profile, identity)
 	if err != nil || replacement.state != rpcResultAcquireOwner || replacement.owner == nil {
 		t.Fatalf("post-eviction owner = state:%d err:%v", replacement.state, err)
@@ -384,7 +382,7 @@ func TestRPCAdmissionProfileHintSurvivesCompletedEvictionWindow(t *testing.T) {
 }
 
 func TestRPCInvariantIdentityDoesNotExposeCanonicalProfileHint(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 2)
+	cache := newRPCExecutionLedgerForTest(time.Now, 2)
 	authKeyID := rpcFlightTestAuthID(84)
 	identity := rpcFlightExactIdentity(t, tlprofile.Profile227, &tg.AuthBindTempAuthKeyRequest{
 		PermAuthKeyID: 1, Nonce: 2, ExpiresAt: 3, EncryptedMessage: []byte("bind"),
@@ -397,14 +395,14 @@ func TestRPCInvariantIdentityDoesNotExposeCanonicalProfileHint(t *testing.T) {
 		t.Fatalf("pending invariant profile hint=(%d,%v), want absent", profile, ok)
 	}
 	claim.owner.CompleteExecution(true)
-	cache.Put(authKeyID, 84, 840, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 840})
+	cache.completeReplayableForTest(authKeyID, 84, 840, &encodedOutboundMessage{body: []byte{1}, reqMsgID: 840})
 	if profile, ok := cache.ExactAdmissionProfile(authKeyID, 84, 840); ok || profile != 0 {
 		t.Fatalf("completed invariant profile hint=(%d,%v), want absent", profile, ok)
 	}
 }
 
 func TestRPCResultExecutionCompletionIsExactlyOnceAndDurable(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 2)
+	cache := newRPCExecutionLedgerForTest(time.Now, 2)
 	authKeyID := rpcFlightTestAuthID(91)
 	claim, err := cache.Acquire(authKeyID, 91, 910)
 	if err != nil || claim.state != rpcResultAcquireOwner || claim.owner == nil {
@@ -436,7 +434,7 @@ func TestRPCResultExecutionCompletionIsExactlyOnceAndDurable(t *testing.T) {
 	}
 
 	want := &encodedOutboundMessage{body: []byte{9, 1, 0, 0}, reqMsgID: 910}
-	cache.Put(authKeyID, 91, 910, want)
+	cache.completeReplayableForTest(authKeyID, 91, 910, want)
 	dependency, ok := cache.ObserveDependency(authKeyID, 91, 910)
 	if !ok || !dependency.completed || !dependency.success || dependency.waiter != nil {
 		t.Fatalf("completed dependency = %#v ok:%v", dependency, ok)
@@ -451,7 +449,7 @@ func TestRPCResultExecutionCompletionIsExactlyOnceAndDurable(t *testing.T) {
 }
 
 func TestRPCResultExecutionAbortPublishesFailure(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 1)
+	cache := newRPCExecutionLedgerForTest(time.Now, 1)
 	authKeyID := rpcFlightTestAuthID(92)
 	claim, err := cache.Acquire(authKeyID, 92, 920)
 	if err != nil || claim.owner == nil {
@@ -474,7 +472,7 @@ func TestRPCResultExecutionAbortPublishesFailure(t *testing.T) {
 
 func TestRPCResultFlightConcurrentAcquireHasUniqueOwner(t *testing.T) {
 	const callers = 64
-	cache := newRPCResultCacheWithFlightLimit(time.Now, callers)
+	cache := newRPCExecutionLedgerForTest(time.Now, callers)
 	authKeyID := rpcFlightTestAuthID(1)
 	start := make(chan struct{})
 	results := make(chan rpcResultAcquire, callers)
@@ -535,7 +533,7 @@ func TestRPCResultFlightConcurrentAcquireHasUniqueOwner(t *testing.T) {
 
 func TestRPCResultFlightPutPublishesAndWakesAllWaiters(t *testing.T) {
 	const waiters = 24
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 32)
+	cache := newRPCExecutionLedgerForTest(time.Now, 32)
 	authKeyID := rpcFlightTestAuthID(10)
 	owner, err := cache.Acquire(authKeyID, 20, 200)
 	if err != nil || owner.state != rpcResultAcquireOwner || owner.owner == nil {
@@ -563,13 +561,13 @@ func TestRPCResultFlightPutPublishesAndWakesAllWaiters(t *testing.T) {
 	for _, waiter := range waiterClaims {
 		go func(w *rpcResultWaiter) {
 			encoded, ok, waitErr := w.Wait(ctx)
-			cached, _ := cache.Get(authKeyID, 20, 200)
+			cached, _ := cache.Replay(authKeyID, 20, 200)
 			results <- waiterResult{encoded: encoded, cached: cached, ok: ok, err: waitErr}
 		}(waiter)
 	}
 
 	want := &encodedOutboundMessage{body: []byte{1, 2, 3, 4}, typeID: 42, reqMsgID: 200}
-	cache.Put(authKeyID, 20, 200, want)
+	cache.completeReplayableForTest(authKeyID, 20, 200, want)
 	for i := 0; i < waiters; i++ {
 		got := <-results
 		if got.err != nil || !got.ok {
@@ -592,7 +590,7 @@ func TestRPCResultFlightPutPublishesAndWakesAllWaiters(t *testing.T) {
 }
 
 func TestRPCResultFlightAbortWakesAndAllowsReclaim(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 2)
+	cache := newRPCExecutionLedgerForTest(time.Now, 2)
 	authKeyID := rpcFlightTestAuthID(20)
 	first, err := cache.Acquire(authKeyID, 30, 300)
 	if err != nil || first.state != rpcResultAcquireOwner {
@@ -627,22 +625,17 @@ func TestRPCResultFlightAbortWakesAndAllowsReclaim(t *testing.T) {
 	}
 }
 
-func TestRPCResultFlightCompletedCachePressureDoesNotEvictPending(t *testing.T) {
+func TestRPCResultFlightReceiptLifecycleDoesNotEvictPending(t *testing.T) {
 	now := time.Unix(1_000, 0)
-	cache := newRPCResultCacheWithFlightLimit(func() time.Time { return now }, 4)
+	cache := newRPCExecutionLedgerForTest(func() time.Time { return now }, 4)
 	authKeyID := rpcFlightTestAuthID(30)
 	pending, err := cache.Acquire(authKeyID, 40, 400)
 	if err != nil || pending.state != rpcResultAcquireOwner {
 		t.Fatalf("pending Acquire = state:%d err:%v", pending.state, err)
 	}
 
-	key := rpcResultCacheKey{authKeyID: authKeyID, sessionID: 40, reqMsgID: 400}
-	shard := cache.shard(key)
-	shard.mu.Lock()
-	shard.maxEntries = 2
-	shard.mu.Unlock()
 	for i := int64(0); i < 16; i++ {
-		cache.Put(authKeyID, 40, 500+i, &encodedOutboundMessage{body: []byte{byte(i)}})
+		cache.completeReplayableForTest(authKeyID, 40, 500+i, &encodedOutboundMessage{body: []byte{byte(i)}})
 	}
 	if got := cache.flightLimit.snapshot(); got != 1 {
 		t.Fatalf("completed trim changed pending count to %d", got)
@@ -652,9 +645,9 @@ func TestRPCResultFlightCompletedCachePressureDoesNotEvictPending(t *testing.T) 
 		t.Fatalf("Acquire after completed trim = state:%d err:%v", joined.state, err)
 	}
 
-	// Expire the independent completed cache and prove the pending owner remains.
-	now = now.Add(rpcResultCacheTTL + time.Second)
-	_, _ = cache.Get(authKeyID, 40, 515)
+	// Expire independent completed receipts and prove the pending owner remains.
+	now = now.Add(rpcExecutionReceiptTTL + time.Second)
+	_, _ = cache.Replay(authKeyID, 40, 515)
 	joinedAfterTTL, err := cache.Acquire(authKeyID, 40, 400)
 	if err != nil || joinedAfterTTL.state != rpcResultAcquirePending {
 		t.Fatalf("Acquire after completed TTL = state:%d err:%v", joinedAfterTTL.state, err)
@@ -665,7 +658,7 @@ func TestRPCResultFlightCompletedCachePressureDoesNotEvictPending(t *testing.T) 
 }
 
 func TestRPCResultFlightCapacityAndCountReturn(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 2)
+	cache := newRPCExecutionLedgerForTest(time.Now, 2)
 	authKeyID := rpcFlightTestAuthID(40)
 	first, err := cache.Acquire(authKeyID, 50, 501)
 	if err != nil || first.state != rpcResultAcquireOwner {
@@ -687,7 +680,7 @@ func TestRPCResultFlightCapacityAndCountReturn(t *testing.T) {
 	}
 
 	want := &encodedOutboundMessage{body: []byte{9}, reqMsgID: 501}
-	cache.Put(authKeyID, 50, 501, want)
+	cache.completeReplayableForTest(authKeyID, 50, 501, want)
 	if got := cache.flightLimit.snapshot(); got != 1 {
 		t.Fatalf("pending count after Put = %d, want 1", got)
 	}
@@ -710,8 +703,8 @@ func TestRPCResultFlightCapacityAndCountReturn(t *testing.T) {
 	}
 }
 
-func TestRPCResultFlightLargePutPublishesCompletedBeforeResolvingWaiters(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 1)
+func TestRPCResultFlightLargeCompletionDoesNotChargeLedgerBodyBytes(t *testing.T) {
+	cache := newRPCExecutionLedgerForTest(time.Now, 1)
 	authKeyID := rpcFlightTestAuthID(50)
 	owner, err := cache.Acquire(authKeyID, 60, 600)
 	if err != nil || owner.state != rpcResultAcquireOwner {
@@ -722,22 +715,22 @@ func TestRPCResultFlightLargePutPublishesCompletedBeforeResolvingWaiters(t *test
 		t.Fatalf("joined Acquire = state:%d err:%v", joined.state, err)
 	}
 
-	// This is larger than the removed 4 MiB per-shard partition but remains a
-	// legal outbound result and fits the global/auth/session fair byte budgets.
-	largeSize := rpcResultCacheMaxBytes/rpcResultCacheShards + 1
+	// Large file results remain owned by the replay store. The ledger retains
+	// only one fixed-shape receipt regardless of payload size.
+	largeSize := 8 << 20
 	want := &encodedOutboundMessage{body: make([]byte, largeSize), reqMsgID: 600}
-	cache.Put(authKeyID, 60, 600, want)
+	cache.completeReplayableForTest(authKeyID, 60, 600, want)
 	if encoded, ok, waitErr := joined.waiter.Wait(context.Background()); waitErr != nil || !ok || encoded != want {
 		t.Fatalf("large Wait = encoded:%p ok:%v err:%v", encoded, ok, waitErr)
 	}
-	if got, ok := cache.Get(authKeyID, 60, 600); !ok || got != want {
-		t.Fatalf("large completed Get = encoded:%p ok:%v", got, ok)
+	if got, ok := cache.Replay(authKeyID, 60, 600); !ok || got != want {
+		t.Fatalf("large completed Replay = encoded:%p ok:%v", got, ok)
 	}
 	if got := cache.flightLimit.snapshot(); got != 0 {
 		t.Fatalf("large Put leaked pending count %d", got)
 	}
 	if owner.owner.Abort() {
-		t.Fatal("large Put left its old owner abortable")
+		t.Fatal("large completion left its old owner abortable")
 	}
 	completed, err := cache.Acquire(authKeyID, 60, 600)
 	if err != nil || completed.state != rpcResultAcquireCompleted || completed.encoded != want {
@@ -746,13 +739,13 @@ func TestRPCResultFlightLargePutPublishesCompletedBeforeResolvingWaiters(t *test
 	if completed.owner != nil {
 		t.Fatal("large completed result incorrectly returned a new owner")
 	}
-	if got := cache.completedBytes.snapshot(); got != int64(largeSize) {
-		t.Fatalf("completed byte budget = %d, want %d", got, largeSize)
+	if got := cache.receiptBudgetBytes(); got != rpcExecutionReceiptBudgetBytes {
+		t.Fatalf("receipt budget bytes = %d, want %d", got, rpcExecutionReceiptBudgetBytes)
 	}
 }
 
 func TestRPCResultFlightWaitContextDoesNotReleaseOwner(t *testing.T) {
-	cache := newRPCResultCacheWithFlightLimit(time.Now, 1)
+	cache := newRPCExecutionLedgerForTest(time.Now, 1)
 	authKeyID := rpcFlightTestAuthID(60)
 	owner, err := cache.Acquire(authKeyID, 70, 700)
 	if err != nil {
@@ -780,7 +773,7 @@ func TestRPCResultFlightConcurrentCapacityReturnsAllSlots(t *testing.T) {
 		limit   = 32
 		callers = 512
 	)
-	cache := newRPCResultCacheWithFlightLimit(time.Now, limit)
+	cache := newRPCExecutionLedgerForTest(time.Now, limit)
 	authKeyID := rpcFlightTestAuthID(70)
 	start := make(chan struct{})
 	errs := make(chan error, callers)
@@ -804,7 +797,7 @@ func TestRPCResultFlightConcurrentCapacityReturnsAllSlots(t *testing.T) {
 				return
 			}
 			if i%2 == 0 {
-				cache.Put(authKeyID, 80+int64(i%4), 1_000+int64(i), &encodedOutboundMessage{body: []byte{1}})
+				cache.completeReplayableForTest(authKeyID, 80+int64(i%4), 1_000+int64(i), &encodedOutboundMessage{body: []byte{1}})
 			} else if !claim.owner.Abort() {
 				errs <- errors.New("owner Abort lost")
 			}

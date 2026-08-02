@@ -2,10 +2,15 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/iamxvbaba/td/bin"
 	"github.com/iamxvbaba/td/clock"
 	"github.com/iamxvbaba/td/tg"
+	"github.com/iamxvbaba/td/tgerr"
+	"github.com/iamxvbaba/td/tlprofile"
 	"go.uber.org/zap/zaptest"
 
 	appchannels "telesrv/internal/app/channels"
@@ -248,6 +253,108 @@ func TestRichMessageOrderedListNumsNormalized(t *testing.T) {
 	assertOrderedListNums(t, "new input", got.Blocks, "1", "2")
 }
 
+func TestBotAPIRichHTMLParsesBedolagaMenuStructures(t *testing.T) {
+	r := &Router{}
+	rich, err := r.domainRichMessageFromInput(context.Background(), &tg.InputRichMessageHTML{
+		Rtl:        true,
+		Noautolink: true,
+		HTML: `<h4>Admin</h4>
+		<table bordered striped><tr><th>Status</th><td align="right" valign="bottom"><tg-time unix="1700000000" format="R">now</tg-time></td></tr></table>
+		<details open><summary>More</summary><p><blockquote><code>healthy</code></blockquote></p></details>
+		<footer>Choose an option</footer>`,
+	})
+	if err != nil {
+		t.Fatalf("parse Bedolaga rich HTML: %v", err)
+	}
+	decoded, err := tgRichMessage(rich)
+	if err != nil {
+		t.Fatalf("decode rich HTML: %v", err)
+	}
+	if !decoded.Rtl {
+		t.Fatal("rich HTML lost is_rtl")
+	}
+	var heading, table, details, footer bool
+	for _, block := range decoded.Blocks {
+		switch value := block.(type) {
+		case *tg.PageBlockHeading4:
+			heading = true
+		case *tg.PageBlockTable:
+			table = true
+			if !value.Bordered || !value.Striped || len(value.Rows) != 1 || len(value.Rows[0].Cells) != 2 {
+				t.Fatalf("table shape = %+v", value)
+			}
+			cell := value.Rows[0].Cells[1]
+			if !cell.AlignRight || !cell.ValignBottom || !richTextContainsDate(cell.Text, 1700000000) {
+				t.Fatalf("table date/alignment = %+v", cell)
+			}
+		case *tg.PageBlockDetails:
+			details = value.Open && len(value.Blocks) != 0
+		case *tg.PageBlockFooter:
+			footer = true
+		}
+	}
+	if !heading || !table || !details || !footer {
+		t.Fatalf("parsed blocks heading=%v table=%v details=%v footer=%v: %#v", heading, table, details, footer, decoded.Blocks)
+	}
+	var projected struct {
+		RTL    bool `json:"is_rtl"`
+		Blocks []struct {
+			Type string `json:"type"`
+		} `json:"blocks"`
+	}
+	if err := json.Unmarshal(rich.BotAPIProjection, &projected); err != nil {
+		t.Fatalf("decode Bot API projection: %v", err)
+	}
+	if !projected.RTL || len(projected.Blocks) != len(decoded.Blocks) {
+		t.Fatalf("Bot API projection = %s", rich.BotAPIProjection)
+	}
+
+	if _, err := r.domainRichMessageFromInput(context.Background(), &tg.InputRichMessageHTML{
+		HTML: `<h4>Admin</h4><img src="https://example.test/logo.png">`,
+	}); err == nil || !tgerr.Is(err, "WEBPAGE_MEDIA_EMPTY") {
+		t.Fatalf("HTML media err = %v, want WEBPAGE_MEDIA_EMPTY for Bedolaga no-logo retry", err)
+	}
+}
+
+func TestBotAPIRichMarkdownParsesAndProjects(t *testing.T) {
+	r := &Router{}
+	rich, err := r.domainRichMessageFromInput(context.Background(), &tg.InputRichMessageMarkdown{
+		Markdown: "# Bedolaga\n\n**Subscription:** active",
+	})
+	if err != nil {
+		t.Fatalf("parse rich Markdown: %v", err)
+	}
+	decoded, err := tgRichMessage(rich)
+	if err != nil {
+		t.Fatalf("decode rich Markdown: %v", err)
+	}
+	if len(decoded.Blocks) < 2 || len(rich.BotAPIProjection) == 0 || !strings.Contains(string(rich.BotAPIProjection), "Bedolaga") {
+		t.Fatalf("Markdown decoded=%#v projection=%s", decoded.Blocks, rich.BotAPIProjection)
+	}
+}
+
+func richTextContainsDate(text tg.RichTextClass, want int) bool {
+	switch value := text.(type) {
+	case *tg.TextDate:
+		return value.Date == want
+	case *tg.TextConcat:
+		for _, child := range value.Texts {
+			if richTextContainsDate(child, want) {
+				return true
+			}
+		}
+	case *tg.TextBold:
+		return richTextContainsDate(value.Text, want)
+	case *tg.TextItalic:
+		return richTextContainsDate(value.Text, want)
+	case *tg.TextFixed:
+		return richTextContainsDate(value.Text, want)
+	case *tg.TextURL:
+		return richTextContainsDate(value.Text, want)
+	}
+	return false
+}
+
 func TestRichMessageRejectsResourcesWithoutBlocks(t *testing.T) {
 	ctx := context.Background()
 	r := &Router{}
@@ -391,7 +498,17 @@ func TestRichMessageBlockFormatsEncodeDecode(t *testing.T) {
 		&tg.PageBlockUnsupported{},
 	}
 	ctx := context.Background()
-	r := &Router{}
+	r, _, _ := newMediaTestRouter(t)
+	files := r.deps.Files.(*fakeFiles)
+	for _, id := range []int64{1, 3, 4} {
+		files.photos[id] = domain.Photo{
+			ID: id, AccessHash: id + 100, DCID: 2,
+			Sizes: []domain.PhotoSize{{Kind: domain.PhotoSizeKindDefault, Type: "x", W: 32, H: 32, Size: 64}},
+		}
+	}
+	for _, id := range []int64{2, 5, 6} {
+		files.docs[id] = domain.Document{ID: id, AccessHash: id + 100, DCID: 2, MimeType: "application/octet-stream", Size: 64}
+	}
 	rich, err := r.domainRichMessageFromInput(ctx, &tg.InputRichMessage{Blocks: blocks})
 	if err != nil {
 		t.Fatalf("domain rich message: %v", err)
@@ -417,7 +534,7 @@ func TestSendMessageRichMessageTextBlocksRoundTrip(t *testing.T) {
 
 	updates, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), &tg.MessagesSendMessageRequest{
 		Peer:     &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
-		Message:  "rich",
+		Message:  "",
 		RandomID: 7001,
 		RichMessage: &tg.InputRichMessage{
 			Rtl:    true,
@@ -642,7 +759,7 @@ func TestGetRichMessageWrongPeerReturnsEmpty(t *testing.T) {
 
 	updates, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), &tg.MessagesSendMessageRequest{
 		Peer:        &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
-		Message:     "rich",
+		Message:     "",
 		RandomID:    7002,
 		RichMessage: &tg.InputRichMessage{Rtl: true, Blocks: richTextBlocks()},
 	})
@@ -681,10 +798,13 @@ func TestSendMessageRichMessageEmbeddedPhoto(t *testing.T) {
 
 	updates, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), &tg.MessagesSendMessageRequest{
 		Peer:     &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
-		Message:  "rich+photo",
+		Message:  "",
 		RandomID: 7003,
 		RichMessage: &tg.InputRichMessage{
-			Blocks: []tg.PageBlockClass{&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "see photo"}}},
+			Blocks: []tg.PageBlockClass{
+				&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "see photo"}},
+				&tg.PageBlockPhoto{PhotoID: 889, Caption: richEmptyCaption()},
+			},
 			Photos: []tg.InputPhotoClass{&tg.InputPhoto{ID: 889, AccessHash: 42}},
 		},
 	})
@@ -706,6 +826,179 @@ func TestSendMessageRichMessageEmbeddedPhoto(t *testing.T) {
 	if photo.ID != 889 {
 		t.Errorf("rich photo id = %d, want 889", photo.ID)
 	}
+	block, ok := rich.Blocks[1].(*tg.PageBlockPhoto)
+	if !ok || block.PhotoID != photo.ID {
+		t.Fatalf("rich photo block = %#v, photo id = %d", rich.Blocks[1], photo.ID)
+	}
+}
+
+// TestRichMessageMediaClosureResolvesBlockReferences verifies the server builds the
+// output resource tables from the PageBlock graph. The input resource vector is
+// optional on the wire; its absence must not leave a dangling block that Web cannot
+// render when the referenced upload already exists.
+func TestRichMessageMediaClosureResolvesBlockReferences(t *testing.T) {
+	ctx := context.Background()
+	r, _, _ := newMediaTestRouter(t)
+	files := r.deps.Files.(*fakeFiles)
+	for _, id := range []int64{889, 890, 891} {
+		files.photos[id] = domain.Photo{
+			ID: id, AccessHash: id + 100, DCID: 2,
+			Sizes: []domain.PhotoSize{{Kind: domain.PhotoSizeKindDefault, Type: "x", W: 800, H: 600, Size: 123}},
+		}
+	}
+	files.docs[990] = domain.Document{ID: 990, AccessHash: 1090, DCID: 2, MimeType: "video/mp4", Size: 456}
+	files.docs[991] = domain.Document{ID: 991, AccessHash: 1091, DCID: 2, MimeType: "audio/mpeg", Size: 789}
+
+	embed := &tg.PageBlockEmbed{Caption: richEmptyCaption()}
+	embed.SetPosterPhotoID(890)
+	article := tg.PageRelatedArticle{URL: "https://example.test/article", WebpageID: 1}
+	article.SetPhotoID(891)
+	blocks := []tg.PageBlockClass{
+		&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "media closure"}},
+		&tg.PageBlockCollage{
+			Items: []tg.PageBlockClass{
+				&tg.PageBlockPhoto{PhotoID: 889, Caption: richEmptyCaption()},
+				&tg.PageBlockVideo{VideoID: 990, Caption: richEmptyCaption()},
+			},
+			Caption: richEmptyCaption(),
+		},
+		&tg.PageBlockDetails{
+			Title: &tg.TextPlain{Text: "nested"},
+			Blocks: []tg.PageBlockClass{
+				&tg.PageBlockAudio{AudioID: 991, Caption: richEmptyCaption()},
+				embed,
+				&tg.PageBlockRelatedArticles{
+					Title:    &tg.TextPlain{Text: "related"},
+					Articles: []tg.PageRelatedArticle{article},
+				},
+				&tg.PageBlockEmbedPost{
+					URL:           "https://example.test/post",
+					WebpageID:     2,
+					AuthorPhotoID: 890,
+					Author:        "author",
+					Blocks: []tg.PageBlockClass{
+						&tg.PageBlockPhoto{PhotoID: 889, Caption: richEmptyCaption()},
+					},
+					Caption: richEmptyCaption(),
+				},
+			},
+		},
+	}
+
+	rich, err := r.domainRichMessageFromInput(ctx, &tg.InputRichMessage{Blocks: blocks})
+	if err != nil {
+		t.Fatalf("resolve block media closure: %v", err)
+	}
+	if got := []int64{rich.Photos[0].ID, rich.Photos[1].ID, rich.Photos[2].ID}; !slicesEqual(got, []int64{889, 890, 891}) {
+		t.Fatalf("photo closure = %v, want [889 890 891]", got)
+	}
+	if got := []int64{rich.Documents[0].ID, rich.Documents[1].ID}; !slicesEqual(got, []int64{990, 991}) {
+		t.Fatalf("document closure = %v, want [990 991]", got)
+	}
+}
+
+func TestRichMessageMediaClosureRejectsUnknownReference(t *testing.T) {
+	r, _, _ := newMediaTestRouter(t)
+	_, err := r.domainRichMessageFromInput(context.Background(), &tg.InputRichMessage{
+		Blocks: []tg.PageBlockClass{
+			&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "missing photo"}},
+			&tg.PageBlockPhoto{PhotoID: 999, Caption: richEmptyCaption()},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "PHOTO_INVALID") {
+		t.Fatalf("unknown rich photo error = %v, want PHOTO_INVALID", err)
+	}
+}
+
+func TestChannelRichPhotoHistoryExactLayerRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	r, owner, channel := newRichChannelTestRouter(t)
+	files := r.deps.Files.(*fakeFiles)
+	files.photos[889] = domain.Photo{
+		ID: 889, AccessHash: 42, FileReference: []byte{1, 2, 3}, Date: 1700000000, DCID: 2,
+		Sizes: []domain.PhotoSize{{Kind: domain.PhotoSizeKindDefault, Type: "x", W: 800, H: 600, Size: 123}},
+	}
+	peer := &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}
+	updates, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), &tg.MessagesSendMessageRequest{
+		Peer:     peer,
+		RandomID: 7202,
+		RichMessage: &tg.InputRichMessage{
+			Blocks: []tg.PageBlockClass{
+				&tg.PageBlockParagraph{Text: &tg.TextPlain{Text: "Android full-screen photo"}},
+				&tg.PageBlockPhoto{PhotoID: 889, Caption: richEmptyCaption()},
+			},
+			// Deliberately omit Photos: the PageBlock graph is the authoritative
+			// selection and the uploaded server object completes the output closure.
+		},
+	})
+	if err != nil {
+		t.Fatalf("send channel rich photo: %v", err)
+	}
+	assertRichPhotoReference(t, "channel echo", newMessageFromUpdates(t, updates), 889)
+
+	historyList, err := r.deps.Channels.GetHistory(ctx, owner.ID, domain.ChannelHistoryFilter{
+		ChannelID: channel.ID,
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("channel history: %v", err)
+	}
+	history := r.tgChannelHistoryMessages(WithUserID(ctx, owner.ID), owner.ID, historyList)
+	stored := singleChannelStoredMessage(t, history)
+	assertRichPhotoReference(t, "channel history", stored, 889)
+
+	for _, profile := range []tlprofile.Profile{tlprofile.Profile227, tlprofile.Profile228} {
+		var encoded bin.Buffer
+		if err := tlprofile.EncodeObject(profile, stored, &encoded); err != nil {
+			t.Fatalf("layer %d encode: %v", profile, err)
+		}
+		decoded, err := tlprofile.DecodeObject(profile, &bin.Buffer{Buf: encoded.Copy()}, tlprofile.Limits{})
+		if err != nil {
+			t.Fatalf("layer %d decode: %v", profile, err)
+		}
+		message, ok := decoded.(*tg.Message)
+		if !ok {
+			t.Fatalf("layer %d decoded %T, want *tg.Message", profile, decoded)
+		}
+		assertRichPhotoReference(t, "exact layer", message, 889)
+	}
+}
+
+func assertRichPhotoReference(t *testing.T, label string, message *tg.Message, photoID int64) {
+	t.Helper()
+	rich, ok := message.GetRichMessage()
+	if !ok {
+		t.Fatalf("%s: missing rich_message", label)
+	}
+	var referenced bool
+	for _, block := range rich.Blocks {
+		if photo, ok := block.(*tg.PageBlockPhoto); ok && photo.PhotoID == photoID {
+			referenced = true
+			break
+		}
+	}
+	if !referenced {
+		t.Fatalf("%s: missing pageBlockPhoto(%d)", label, photoID)
+	}
+	if len(rich.Photos) != 1 {
+		t.Fatalf("%s: photos = %d, want 1", label, len(rich.Photos))
+	}
+	photo, ok := rich.Photos[0].(*tg.Photo)
+	if !ok || photo.ID != photoID {
+		t.Fatalf("%s: photo = %#v, want id %d", label, rich.Photos[0], photoID)
+	}
+}
+
+func slicesEqual(got, want []int64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // singleStoredMessage 从 messages.messages 取出唯一一条非空 *tg.Message。

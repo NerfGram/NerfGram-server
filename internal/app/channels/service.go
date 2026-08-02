@@ -216,6 +216,21 @@ func (s *Service) GetChannels(ctx context.Context, userID int64, channelIDs []in
 	return s.channels.GetChannels(ctx, userID, ids)
 }
 
+// GetChannelsAuthoritative bypasses the app-level versioned read model for a
+// durable channel_state refresh. PostgreSQL GetChannels is a bounded direct
+// projection query, so the returned flag snapshot cannot be the pre-commit
+// value that the event is intended to invalidate.
+func (s *Service) GetChannelsAuthoritative(ctx context.Context, userID int64, channelIDs []int64) ([]domain.ChannelView, error) {
+	if s == nil || s.channels == nil || userID == 0 {
+		return nil, domain.ErrChannelInvalid
+	}
+	ids := uniqueNonZero(channelIDs)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return s.channels.GetChannels(ctx, userID, ids)
+}
+
 // GetJoinableChannel returns a channel shell so RPC can verify access hash before join.
 func (s *Service) GetJoinableChannel(ctx context.Context, userID, channelID int64) (domain.Channel, error) {
 	if s == nil || s.channels == nil || userID == 0 || channelID == 0 {
@@ -500,6 +515,49 @@ func (s *Service) SetVerified(ctx context.Context, channelID int64, verified boo
 	return s.channels.SetChannelVerified(ctx, channelID, verified)
 }
 
+// SetScamFake sets or clears the channel/supergroup scam and fake flags through the internal admin path.
+func (s *Service) SetScamFake(ctx context.Context, channelID int64, scam, fake bool) (domain.Channel, error) {
+	if s == nil || s.channels == nil || channelID == 0 {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	if scam && fake {
+		return domain.Channel{}, domain.ErrPeerModerationFlagsInvalid
+	}
+	return s.channels.SetChannelScamFake(ctx, channelID, scam, fake)
+}
+
+// AdminSetSettings applies a moderation-settings patch through the admin path (no permission checks).
+func (s *Service) AdminSetSettings(ctx context.Context, channelID int64, patch domain.ChannelAdminSettings) (domain.Channel, error) {
+	if s == nil || s.channels == nil || channelID == 0 {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	return s.channels.SetChannelAdminSettings(ctx, channelID, patch)
+}
+
+// AdminSetUsername force-sets or clears a channel username through the admin path.
+func (s *Service) AdminSetUsername(ctx context.Context, channelID int64, username string) (domain.Channel, error) {
+	if s == nil || s.channels == nil || channelID == 0 {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	return s.channels.SetChannelUsernameAdmin(ctx, channelID, username)
+}
+
+// AdminSetColor force-sets a channel name/profile color through the admin path.
+func (s *Service) AdminSetColor(ctx context.Context, channelID int64, forProfile bool, color domain.ChannelPeerColor) (domain.Channel, error) {
+	if s == nil || s.channels == nil || channelID == 0 {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	return s.channels.SetChannelColorAdmin(ctx, channelID, forProfile, color)
+}
+
+// AdminSetEmojiStatus force-sets or clears a channel emoji status through the admin path.
+func (s *Service) AdminSetEmojiStatus(ctx context.Context, channelID int64, status domain.ChannelEmojiStatus) (domain.Channel, error) {
+	if s == nil || s.channels == nil || channelID == 0 {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	return s.channels.SetChannelEmojiStatusAdmin(ctx, channelID, status)
+}
+
 // ListAdminedPublicChannels returns public channels/supergroups administered by user.
 func (s *Service) ListAdminedPublicChannels(ctx context.Context, userID int64) ([]domain.Channel, error) {
 	if s == nil || s.channels == nil || userID == 0 {
@@ -539,7 +597,10 @@ func (s *Service) ResolvePublicUsername(ctx context.Context, userID int64, usern
 		return domain.Channel{}, false, domain.ErrChannelInvalid
 	}
 	username = normalizeChannelUsername(username)
-	if !validChannelUsername(username) {
+	// Public resolution also covers Fragment-style collectible usernames,
+	// whose protocol minimum is four characters. Channel username mutation
+	// remains on the ordinary 5..32 validation path above.
+	if !domain.ValidCollectibleUsername(username) {
 		return domain.Channel{}, false, domain.ErrUsernameInvalid
 	}
 	return s.channels.ResolvePublicChannelUsername(ctx, userID, username)
@@ -988,6 +1049,29 @@ func (s *Service) ListMessageReactions(ctx context.Context, userID int64, req do
 	return s.channels.ListChannelMessageReactions(ctx, req)
 }
 
+type messageReactionLookupStore interface {
+	FindChannelMessageReaction(ctx context.Context, req domain.ChannelMessageReactionLookupRequest) (domain.ChannelMessageReactionLookup, bool, error)
+}
+
+func (s *Service) FindMessageReaction(ctx context.Context, userID int64, req domain.ChannelMessageReactionLookupRequest) (domain.ChannelMessageReactionLookup, bool, error) {
+	if s == nil || s.channels == nil || userID == 0 || req.ChannelID == 0 ||
+		req.MessageID <= 0 || req.MessageID > domain.MaxMessageBoxID ||
+		req.ReactorUserID == 0 {
+		return domain.ChannelMessageReactionLookup{}, false, domain.ErrChannelInvalid
+	}
+	if req.ViewerUserID == 0 {
+		req.ViewerUserID = userID
+	}
+	if req.ViewerUserID != userID {
+		return domain.ChannelMessageReactionLookup{}, false, domain.ErrChannelInvalid
+	}
+	lookup, ok := s.channels.(messageReactionLookupStore)
+	if !ok {
+		return domain.ChannelMessageReactionLookup{}, false, domain.ErrChannelInvalid
+	}
+	return lookup.FindChannelMessageReaction(ctx, req)
+}
+
 type messageReactionUsageStore interface {
 	RecordMessageReactionUse(ctx context.Context, userID int64, reactions []domain.MessageReaction, addToRecent bool, date int) error
 }
@@ -1082,34 +1166,6 @@ func (s *Service) ClearRecentReactions(ctx context.Context, userID int64) error 
 		return domain.ErrChannelInvalid
 	}
 	return s.channels.ClearRecentMessageReactions(ctx, userID)
-}
-
-// SavedReactionTags returns account-level saved-message reaction tag titles.
-func (s *Service) SavedReactionTags(ctx context.Context, userID int64, limit int) ([]domain.SavedReactionTag, error) {
-	if s == nil || s.channels == nil || userID == 0 {
-		return nil, domain.ErrChannelInvalid
-	}
-	if limit <= 0 {
-		return []domain.SavedReactionTag{}, nil
-	}
-	if limit > domain.MaxSavedReactionTags {
-		limit = domain.MaxSavedReactionTags
-	}
-	return s.channels.ListSavedReactionTags(ctx, userID, limit)
-}
-
-// UpdateSavedReactionTag stores the account-level custom title for one saved-message reaction tag.
-func (s *Service) UpdateSavedReactionTag(ctx context.Context, userID int64, tag domain.SavedReactionTag) error {
-	if s == nil || s.channels == nil || userID == 0 {
-		return domain.ErrChannelInvalid
-	}
-	if tag.UserID == 0 {
-		tag.UserID = userID
-	}
-	if tag.UserID != userID || tag.Reaction.Type != domain.MessageReactionEmoji || tag.Reaction.Emoticon == "" {
-		return domain.ErrChannelInvalid
-	}
-	return s.channels.UpsertSavedReactionTag(ctx, tag)
 }
 
 // ReadMessageContents returns visible channel messages whose content-read state can be synced.
@@ -1400,6 +1456,30 @@ func (s *Service) DeleteMessages(ctx context.Context, userID int64, req domain.D
 		return domain.DeleteChannelMessagesResult{}, domain.ErrChannelInvalid
 	}
 	return s.channels.DeleteChannelMessages(ctx, req)
+}
+
+type moderationChannelMessageStore interface {
+	ModerationDeleteChannelMessages(ctx context.Context, channelID int64, ids []int, date int) (domain.DeleteChannelMessagesResult, error)
+}
+
+// ModerationDeleteMessages is the explicit server-authority deletion path used
+// only by the durable moderation action worker. It never accepts a client
+// identity and therefore cannot be reached by ordinary RPC permission checks.
+func (s *Service) ModerationDeleteMessages(ctx context.Context, channelID int64, ids []int, date int) (domain.DeleteChannelMessagesResult, error) {
+	if s == nil || s.channels == nil || channelID <= 0 ||
+		len(ids) == 0 || len(ids) > domain.MaxDeleteMessageIDs {
+		return domain.DeleteChannelMessagesResult{}, domain.ErrChannelInvalid
+	}
+	for _, id := range ids {
+		if id <= 0 || id > domain.MaxMessageBoxID {
+			return domain.DeleteChannelMessagesResult{}, domain.ErrChannelInvalid
+		}
+	}
+	store, ok := s.channels.(moderationChannelMessageStore)
+	if !ok {
+		return domain.DeleteChannelMessagesResult{}, domain.ErrChannelInvalid
+	}
+	return store.ModerationDeleteChannelMessages(ctx, channelID, append([]int(nil), ids...), date)
 }
 
 // DeleteHistory clears the current user's history view or deletes a bounded channel history page for everyone.
@@ -2190,6 +2270,21 @@ func (s *Service) FilterActiveMemberIDs(ctx context.Context, channelID int64, us
 	return s.channels.FilterActiveChannelMemberIDs(ctx, channelID, candidates)
 }
 
+// FilterMessageAudienceIDs keeps active members and currently authorized
+// public-preview viewers from a bounded online candidate set. The store performs
+// one batched authoritative check per bounded chunk so runtime session indexes
+// never become an access-control source of truth.
+func (s *Service) FilterMessageAudienceIDs(ctx context.Context, channelID int64, userIDs []int64) ([]int64, error) {
+	if s == nil || s.channels == nil || channelID == 0 {
+		return nil, domain.ErrChannelInvalid
+	}
+	candidates := uniqueNonZero(userIDs)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	return s.channels.FilterChannelMessageAudienceIDs(ctx, channelID, candidates)
+}
+
 // GetDifference returns channel-scoped pts difference.
 func (s *Service) GetDifference(ctx context.Context, userID int64, req domain.ChannelDifferenceRequest) (domain.ChannelDifference, error) {
 	if s == nil || s.channels == nil || userID == 0 || req.ChannelID == 0 {
@@ -2206,7 +2301,8 @@ func (s *Service) GetDifference(ctx context.Context, userID int64, req domain.Ch
 	if err != nil {
 		return domain.ChannelDifference{}, err
 	}
-	return s.filterBotChannelDifference(ctx, userID, diff), nil
+	diff = s.filterBotChannelDifference(ctx, userID, diff)
+	return diff, nil
 }
 
 // ClearDanglingPinnedMessage 清除指向已删除消息的悬挂置顶值（unpinAll 自愈）。

@@ -9,19 +9,22 @@ import (
 	"github.com/iamxvbaba/td/tg"
 
 	"telesrv/internal/domain"
+	"telesrv/internal/links"
 )
 
-// urlInTextRe 匹配原始文本里的 http(s) 链接（取到首个空白或尖括号/引号为止）。
-var urlInTextRe = regexp.MustCompile(`https?://[^\s<>"'）】]+`)
+// urlInTextRe 匹配原始文本里的带 scheme 链接（取到首个空白或尖括号/引号为止）。
+// 是否接纳由 detectURLEntities 再按 http(s) 或当前 app-link 配置收口，不能把任意
+// foo:// 都提升为服务端认证的可点击实体。
+var urlInTextRe = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://[^\s<>"'）】]+`)
 
 // urlTrailingPunct 是不属于 URL 的句末标点（'/' 是合法路径末尾，保留）。
 const urlTrailingPunct = ".,;:!?)]}'\"。，、！？"
 
-// detectURLEntities 服务端扫描消息文本生成 url 高亮实体（MessageEntityURL）。TDesktop 等客户端
-// 发消息不带 url 实体、依赖服务端检测原文（官方服务端行为），否则链接不高亮。偏移/长度按
-// UTF-16 码元（Telegram 实体口径）。
-func detectURLEntities(message string) []tg.MessageEntityClass {
-	if !strings.Contains(message, "http") {
+// detectURLEntities 服务端扫描消息文本生成 url 高亮实体（MessageEntityURL）。除 http(s)
+// 外，仅接受当前 Router 配置允许的 app-link scheme/host。偏移/长度按 UTF-16 码元
+// （Telegram 实体口径）。自定义 scheme 只参与 entity，不改变网页预览的 http(s) 边界。
+func detectURLEntities(message string, appLinks links.AppLinkBuilder) []tg.MessageEntityClass {
+	if !strings.Contains(message, "://") {
 		return nil
 	}
 	locs := urlInTextRe.FindAllStringIndex(message, -1)
@@ -32,6 +35,14 @@ func detectURLEntities(message string) []tg.MessageEntityClass {
 	for _, loc := range locs {
 		raw := strings.TrimRight(message[loc[0]:loc[1]], urlTrailingPunct)
 		if raw == "" {
+			continue
+		}
+		schemeEnd := strings.Index(raw, "://")
+		if schemeEnd <= 0 {
+			continue
+		}
+		scheme := raw[:schemeEnd]
+		if !strings.EqualFold(scheme, "http") && !strings.EqualFold(scheme, "https") && !appLinks.AcceptsEntityURL(raw) {
 			continue
 		}
 		out = append(out, &tg.MessageEntityURL{
@@ -69,8 +80,9 @@ func firstPreviewableURL(message string, entities []tg.MessageEntityClass) (stri
 			return normalized, true
 		}
 	}
-	// 回退扫原始文本：绝大多数消息无链接，无 "http" 子串则直接跳过正则与分配。
-	if !strings.Contains(message, "http") {
+	// 回退扫原始文本：绝大多数消息无链接，无 "://" 子串则直接跳过正则与分配。
+	// firstURLInText 会继续限定为 http(s)，自定义 app-link 永不进入网页预览。
+	if !strings.Contains(message, "://") {
 		return "", false
 	}
 	if raw, ok := firstURLInText(message); ok {
@@ -83,16 +95,15 @@ func firstPreviewableURL(message string, entities []tg.MessageEntityClass) (stri
 
 // firstURLInText 扫描原始文本里的首个 http(s) 链接，剥掉句末标点。
 func firstURLInText(message string) (string, bool) {
-	match := urlInTextRe.FindString(message)
-	if match == "" {
-		return "", false
+	for _, match := range urlInTextRe.FindAllString(message, -1) {
+		// 句末标点不属于 URL（"见 https://example.com。" / "...go)."）。'/' 是合法路径末尾，保留。
+		match = strings.TrimRight(match, urlTrailingPunct)
+		schemeEnd := strings.Index(match, "://")
+		if schemeEnd > 0 && (strings.EqualFold(match[:schemeEnd], "http") || strings.EqualFold(match[:schemeEnd], "https")) {
+			return match, true
+		}
 	}
-	// 句末标点不属于 URL（"见 https://example.com。" / "...go)."）。'/' 是合法路径末尾，保留。
-	match = strings.TrimRight(match, urlTrailingPunct)
-	if match == "" {
-		return "", false
-	}
-	return match, true
+	return "", false
 }
 
 // sliceUTF16 按 UTF-16 码元偏移/长度从已编码序列取子串；越界返回空串。
@@ -135,9 +146,10 @@ func (r *Router) webPagePendingOrCachedMedia(ctx context.Context, rawURL string,
 			State: domain.MessageWebPageStatePending,
 			ID:    domain.WebPageURLHash(normalized),
 			URL:   normalized,
-			// Date=「processing started」时刻：留 0（=1970）会被严格客户端判为 pending 早已
-			// 过期 → 直接显示纯文本，须填发送时刻。
-			Date:            int(r.clock.Now().Unix()),
+			// date 是客户端重新拉取 pending 消息的绝对截止时间。TDesktop/DrKLO 在
+			// date<=now 时立即重取；若 resolver 此时仍运行，TDesktop 会把占位记成 sticky
+			// failed，后到的 done update 也不会重新显示卡片。
+			Date:            int(r.clock.Now().Add(webPagePendingLifetime).Unix()),
 			ForceLargeMedia: forceLarge,
 			ForceSmallMedia: forceSmall,
 		},

@@ -75,26 +75,89 @@ func TestPublicChannelAndMegagroupPreviewPostgres(t *testing.T) {
 			if !found || history.Self.Status != domain.ChannelMemberLeft {
 				t.Fatalf("preview history = %+v self=%+v", history.Messages, history.Self)
 			}
+			read, err := channels.ReadChannelHistory(ctx, domain.ReadChannelHistoryRequest{
+				UserID: viewer.ID, ChannelID: public.ID, MaxID: sent.Message.ID, Date: 1700009411 + i,
+			})
+			if err != nil {
+				t.Fatalf("read public preview history: %v", err)
+			}
+			if !read.ReadOnly || read.Changed || read.MaxID != sent.Message.ID {
+				t.Fatalf("public preview read = %+v, want read-only no-op at %d", read, sent.Message.ID)
+			}
+			audience, err := channels.FilterChannelMessageAudienceIDs(ctx, public.ID, []int64{viewer.ID, owner.ID, viewer.ID})
+			if err != nil {
+				t.Fatalf("filter public message audience: %v", err)
+			}
+			if len(audience) != 2 || audience[0] != owner.ID || audience[1] != viewer.ID {
+				t.Fatalf("public message audience = %v, want owner/member and viewer/subscriber", audience)
+			}
+			diff, err := channels.ListChannelDifference(ctx, domain.ChannelDifferenceRequest{
+				UserID: viewer.ID, ChannelID: public.ID, Pts: created.Event.Pts, Limit: 20,
+			})
+			if err != nil {
+				t.Fatalf("public preview difference: %v", err)
+			}
+			if !diff.Final || diff.Pts != sent.Event.Pts || len(diff.NewMessages) != 1 || diff.NewMessages[0].ID != sent.Message.ID {
+				t.Fatalf("public preview difference = %+v, want sent message through pts %d", diff, sent.Event.Pts)
+			}
 			if _, err := channels.GetParticipants(ctx, viewer.ID, public.ID, domain.ChannelParticipantsFilter{Kind: domain.ChannelParticipantsRecent}, 0, 20); err != nil {
 				t.Fatalf("public preview participants: %v", err)
 			}
 			if _, err := channels.GetParticipant(ctx, viewer.ID, public.ID, viewer.ID); !errors.Is(err, domain.ErrUserNotParticipant) {
 				t.Fatalf("public preview self participant err = %v, want ErrUserNotParticipant", err)
 			}
-			var memberExists bool
+			dialogs := appdialogs.NewService(nil, channels)
+			peerDialogs, err := dialogs.GetPeerDialogs(ctx, viewer.ID, []domain.Peer{{Type: domain.PeerTypeChannel, ID: public.ID}})
+			if err != nil {
+				t.Fatalf("public preview peer dialogs: %v", err)
+			}
+			if len(peerDialogs.Dialogs) != 1 || len(peerDialogs.ChannelMessages) != 0 || len(peerDialogs.Channels) != 1 {
+				t.Fatalf("public preview peer dialogs = %+v, want one zero-top bootstrap", peerDialogs)
+			}
+			previewDialog := peerDialogs.Dialogs[0]
+			if previewDialog.TopMessage != 0 || !previewDialog.ChannelLeft ||
+				previewDialog.ReadInboxMaxID != 0 || previewDialog.ReadOutboxMaxID != 0 ||
+				previewDialog.Pts != sent.Event.Pts {
+				t.Fatalf("public preview bootstrap dialog = %+v", previewDialog)
+			}
+			var memberExists, dialogExists bool
 			if err := pool.QueryRow(ctx, `SELECT EXISTS (
 SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2
-)`, public.ID, viewer.ID).Scan(&memberExists); err != nil {
+), EXISTS (
+SELECT 1 FROM channel_dialogs WHERE channel_id = $1 AND user_id = $2
+)`, public.ID, viewer.ID).Scan(&memberExists, &dialogExists); err != nil {
 				t.Fatalf("check preview member row: %v", err)
 			}
-			if memberExists {
-				t.Fatal("public preview persisted a channel member row")
+			if memberExists || dialogExists {
+				t.Fatalf("public preview persisted member/dialog = %v/%v", memberExists, dialogExists)
 			}
 			if _, err := channels.JoinChannel(ctx, public.ID, viewer.ID, 1700009420+i); err != nil {
 				t.Fatalf("join public peer: %v", err)
 			}
 			if _, err := channels.LeaveChannel(ctx, public.ID, viewer.ID, 1700009430+i); err != nil {
 				t.Fatalf("leave public peer: %v", err)
+			}
+			filtered, err := channels.ListChannelDifference(ctx, domain.ChannelDifferenceRequest{
+				UserID: viewer.ID, ChannelID: public.ID, Pts: sent.Event.Pts, Limit: 20,
+			})
+			if err != nil {
+				t.Fatalf("public difference across participant events: %v", err)
+			}
+			if tc.broadcast {
+				if !filtered.Final || filtered.Pts != sent.Event.Pts || len(filtered.Events) != 0 ||
+					len(filtered.NewMessages) != 0 || len(filtered.OtherUpdates) != 0 {
+					t.Fatalf("broadcast difference after transient participant changes = %+v, want unchanged PTS", filtered)
+				}
+			} else {
+				if !filtered.Final || filtered.Pts <= sent.Event.Pts || len(filtered.NewMessages) != 2 ||
+					len(filtered.OtherUpdates) != 0 {
+					t.Fatalf("megagroup join/leave difference = %+v, want two real service messages", filtered)
+				}
+				for _, message := range filtered.NewMessages {
+					if message.Action == nil {
+						t.Fatalf("megagroup join/leave difference message = %+v, want service action", message)
+					}
+				}
 			}
 			if _, err := channels.GetParticipant(ctx, viewer.ID, public.ID, viewer.ID); !errors.Is(err, domain.ErrUserNotParticipant) {
 				t.Fatalf("left self participant err = %v, want ErrUserNotParticipant", err)
@@ -112,6 +175,9 @@ SELECT 1 FROM channel_members WHERE channel_id = $1 AND user_id = $2
 		t.Fatalf("create private group: %v", err)
 	}
 	channelIDs = append(channelIDs, private.Channel.ID)
+	if audience, err := channels.FilterChannelMessageAudienceIDs(ctx, private.Channel.ID, []int64{viewer.ID}); err != nil || len(audience) != 0 {
+		t.Fatalf("private message audience = %v err %v, want empty", audience, err)
+	}
 	if _, err := channels.ListChannelHistory(ctx, viewer.ID, domain.ChannelHistoryFilter{ChannelID: private.Channel.ID, Limit: 20}); !errors.Is(err, domain.ErrChannelPrivate) {
 		t.Fatalf("private preview history err = %v, want ErrChannelPrivate", err)
 	}

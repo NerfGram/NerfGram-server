@@ -284,15 +284,6 @@ func (s *captureUpdates) RecordFolderPeers(_ context.Context, authKeyID [8]byte,
 	return s.recordCapturedEvent(authKeyID, userID, domain.UpdateEvent{Type: domain.UpdateEventFolderPeers, FolderPeers: append([]domain.FolderPeerUpdate(nil), peers...)})
 }
 
-func (s *captureUpdates) RecordChannelAvailableMessages(_ context.Context, authKeyID [8]byte, userID, channelID int64, availableMinID int, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error) {
-	s.captureExclude(excludeAuthKeyID, excludeSessionID)
-	return s.recordCapturedEvent(authKeyID, userID, domain.UpdateEvent{
-		Type:  domain.UpdateEventChannelAvailable,
-		Peer:  domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
-		MaxID: availableMinID,
-	})
-}
-
 func (s *captureUpdates) RecordChannelViewForumAsMessages(_ context.Context, authKeyID [8]byte, userID, channelID int64, enabled bool, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error) {
 	s.captureExclude(excludeAuthKeyID, excludeSessionID)
 	return s.recordCapturedEvent(authKeyID, userID, domain.UpdateEvent{

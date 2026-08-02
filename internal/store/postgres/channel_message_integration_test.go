@@ -189,6 +189,17 @@ WHERE channel_id = $1 AND user_id = $2`, channelID, owner.ID).Scan(&ownerMemberR
 		t.Fatalf("read participants = %+v, want friend read date", readers.Participants)
 	}
 
+	var channelPtsBeforeClear, channelEventsBeforeClear int
+	if err := pool.QueryRow(ctx, `
+SELECT c.pts, (
+    SELECT count(*)::int
+    FROM channel_update_events e
+    WHERE e.channel_id = c.id
+)
+FROM channels c
+WHERE c.id = $1`, channelID).Scan(&channelPtsBeforeClear, &channelEventsBeforeClear); err != nil {
+		t.Fatalf("query channel state before local clear: %v", err)
+	}
 	cleared, err := channels.DeleteChannelHistory(ctx, domain.DeleteChannelHistoryRequest{
 		UserID:    friend.ID,
 		ChannelID: channelID,
@@ -201,6 +212,70 @@ WHERE channel_id = $1 AND user_id = $2`, channelID, owner.ID).Scan(&ownerMemberR
 	if cleared.AvailableMinID != sent.Message.ID {
 		t.Fatalf("local clear available_min_id = %d, want %d", cleared.AvailableMinID, sent.Message.ID)
 	}
+	if !cleared.AvailableMinChanged {
+		t.Fatal("local clear did not report an advanced owner-local boundary")
+	}
+	var channelPtsAfterClear, channelEventsAfterClear int
+	if err := pool.QueryRow(ctx, `
+SELECT c.pts, (
+    SELECT count(*)::int
+    FROM channel_update_events e
+    WHERE e.channel_id = c.id
+)
+FROM channels c
+WHERE c.id = $1`, channelID).Scan(&channelPtsAfterClear, &channelEventsAfterClear); err != nil {
+		t.Fatalf("query channel state after local clear: %v", err)
+	}
+	if channelPtsAfterClear != channelPtsBeforeClear || channelEventsAfterClear != channelEventsBeforeClear {
+		t.Fatalf("local clear changed channel sequence: pts %d->%d events %d->%d",
+			channelPtsBeforeClear, channelPtsAfterClear, channelEventsBeforeClear, channelEventsAfterClear)
+	}
+	var recoveryMinID, recoveryAnchorID, recoveryDate int
+	if err := pool.QueryRow(ctx, `
+SELECT available_min_id, history_clear_anchor_id, history_clear_updated_at
+FROM user_channel_member_index
+WHERE user_id = $1 AND channel_id = $2`, friend.ID, channelID).Scan(
+		&recoveryMinID, &recoveryAnchorID, &recoveryDate,
+	); err != nil {
+		t.Fatalf("query owner-local clear recovery index: %v", err)
+	}
+	if recoveryMinID != sent.Message.ID || recoveryAnchorID != sent.Message.ID || recoveryDate != 1700000302 {
+		t.Fatalf("recovery index = min %d anchor %d date %d, want %d/%d/1700000302",
+			recoveryMinID, recoveryAnchorID, recoveryDate, sent.Message.ID, sent.Message.ID)
+	}
+	dirtyAfterClear, err := channels.ListDirtyActiveChannelsForUser(ctx, friend.ID, 1700000302, 0, 10)
+	if err != nil {
+		t.Fatalf("list dirty channels after local clear: %v", err)
+	}
+	if len(dirtyAfterClear) != 1 ||
+		dirtyAfterClear[0].ChannelID != channelID ||
+		dirtyAfterClear[0].AvailableMinID != sent.Message.ID ||
+		dirtyAfterClear[0].HistoryClearDate != 1700000302 {
+		t.Fatalf("dirty channel recovery = %+v, want channel %d boundary %d", dirtyAfterClear, channelID, sent.Message.ID)
+	}
+	planTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin history-clear recovery plan transaction: %v", err)
+	}
+	defer func() { _ = planTx.Rollback(ctx) }()
+	if _, err := planTx.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+		t.Fatalf("disable seqscan for history-clear recovery plan: %v", err)
+	}
+	clearPlan := explainText(t, ctx, planTx, `
+SELECT i.channel_id, c.pts, i.available_min_id, i.history_clear_updated_at
+FROM user_channel_member_index i
+JOIN channels c ON c.id = i.channel_id AND NOT c.deleted
+WHERE i.user_id = $1
+  AND i.status = 'active'
+  AND NOT i.deleted
+  AND i.channel_id > $3
+  AND i.history_clear_anchor_id > 0
+  AND i.history_clear_anchor_id = i.available_min_id
+  AND i.history_clear_updated_at >= $2
+ORDER BY i.channel_id ASC
+LIMIT $4`, friend.ID, 1700000302, int64(0), 10)
+	requirePlanContains(t, clearPlan, "user_channel_member_index_history_clear_idx")
+	_ = planTx.Rollback(ctx)
 	staleClear, err := channels.DeleteChannelHistory(ctx, domain.DeleteChannelHistoryRequest{
 		UserID:    friend.ID,
 		ChannelID: channelID,
@@ -213,12 +288,60 @@ WHERE channel_id = $1 AND user_id = $2`, channelID, owner.ID).Scan(&ownerMemberR
 	if staleClear.AvailableMinID != sent.Message.ID {
 		t.Fatalf("stale local clear available_min_id = %d, want monotonic %d", staleClear.AvailableMinID, sent.Message.ID)
 	}
+	if staleClear.AvailableMinChanged {
+		t.Fatal("stale local clear unexpectedly replaced the owner-local anchor")
+	}
+	if err := pool.QueryRow(ctx, `
+SELECT history_clear_updated_at
+FROM user_channel_member_index
+WHERE user_id = $1 AND channel_id = $2`, friend.ID, channelID).Scan(&recoveryDate); err != nil {
+		t.Fatalf("query recovery timestamp after stale clear: %v", err)
+	}
+	if recoveryDate != 1700000302 {
+		t.Fatalf("stale clear recovery date = %d, want unchanged 1700000302", recoveryDate)
+	}
 	afterClear, err := channels.GetChannel(ctx, friend.ID, channelID)
 	if err != nil {
 		t.Fatalf("get channel after clear: %v", err)
 	}
-	if afterClear.Dialog.TopMessageID != 0 {
-		t.Fatalf("dialog after clear = %+v, want no visible top", afterClear.Dialog)
+	if afterClear.Dialog.TopMessageID != sent.Message.ID ||
+		afterClear.Dialog.HistoryClearAnchorID != sent.Message.ID ||
+		afterClear.Dialog.UnreadCount != 0 {
+		t.Fatalf("dialog after clear = %+v, want owner-local anchored top %d", afterClear.Dialog, sent.Message.ID)
+	}
+	dialogsAfterClear, err := channels.GetChannelDialogs(ctx, friend.ID, []int64{channelID})
+	if err != nil {
+		t.Fatalf("get channel dialogs after clear: %v", err)
+	}
+	if len(dialogsAfterClear.Dialogs) != 1 ||
+		len(dialogsAfterClear.Messages) != 1 ||
+		!domain.IsChannelHistoryClearMessage(dialogsAfterClear.Messages[0]) ||
+		dialogsAfterClear.Messages[0].ID != sent.Message.ID ||
+		dialogsAfterClear.Messages[0].Body != "" {
+		t.Fatalf("dialog projection after clear = dialogs=%+v messages=%+v", dialogsAfterClear.Dialogs, dialogsAfterClear.Messages)
+	}
+	projectedHistory, err := channels.ListChannelHistory(ctx, friend.ID, domain.ChannelHistoryFilter{
+		ChannelID:                 channelID,
+		Limit:                     10,
+		IncludeHistoryClearAnchor: true,
+	})
+	if err != nil {
+		t.Fatalf("project history-clear anchor: %v", err)
+	}
+	if len(projectedHistory.Messages) != 1 ||
+		!domain.IsChannelHistoryClearMessage(projectedHistory.Messages[0]) ||
+		projectedHistory.Messages[0].ID != sent.Message.ID {
+		t.Fatalf("projected history after clear = %+v, want anchor %d", projectedHistory.Messages, sent.Message.ID)
+	}
+	ownerDialogsAfterClear, err := channels.GetChannelDialogs(ctx, owner.ID, []int64{channelID})
+	if err != nil {
+		t.Fatalf("get unaffected owner dialog after friend clear: %v", err)
+	}
+	if len(ownerDialogsAfterClear.Messages) != 1 ||
+		ownerDialogsAfterClear.Messages[0].ID != sent.Message.ID ||
+		ownerDialogsAfterClear.Messages[0].Body != "first visible channel text" ||
+		ownerDialogsAfterClear.Messages[0].Action != nil {
+		t.Fatalf("friend clear changed shared owner projection: %+v", ownerDialogsAfterClear.Messages)
 	}
 
 	next, err := channels.SendChannelMessage(ctx, domain.SendChannelMessageRequest{
@@ -237,6 +360,59 @@ WHERE channel_id = $1 AND user_id = $2`, channelID, owner.ID).Scan(&ownerMemberR
 	}
 	if afterNext.Dialog.TopMessageID != next.Message.ID || afterNext.Dialog.UnreadCount != 1 {
 		t.Fatalf("dialog after next = %+v, want top %d unread 1", afterNext.Dialog, next.Message.ID)
+	}
+	firstPage, err := channels.ListChannelHistory(ctx, friend.ID, domain.ChannelHistoryFilter{
+		ChannelID:                 channelID,
+		Limit:                     1,
+		IncludeHistoryClearAnchor: true,
+	})
+	if err != nil {
+		t.Fatalf("list first page after next message: %v", err)
+	}
+	if len(firstPage.Messages) != 1 ||
+		firstPage.Messages[0].ID != next.Message.ID ||
+		firstPage.Count != 2 {
+		t.Fatalf("first page after next = %+v count=%d, want next message and bounded has-more count", firstPage.Messages, firstPage.Count)
+	}
+	offsetPage, err := channels.ListChannelHistory(ctx, friend.ID, domain.ChannelHistoryFilter{
+		ChannelID:                 channelID,
+		AddOffset:                 1,
+		Limit:                     1,
+		IncludeHistoryClearAnchor: true,
+	})
+	if err != nil {
+		t.Fatalf("list add-offset page after next message: %v", err)
+	}
+	if len(offsetPage.Messages) != 1 ||
+		offsetPage.Messages[0].ID != sent.Message.ID ||
+		!domain.IsChannelHistoryClearMessage(offsetPage.Messages[0]) {
+		t.Fatalf("add-offset page after next = %+v, want retained clear anchor %d", offsetPage.Messages, sent.Message.ID)
+	}
+	exactCount, err := channels.ListChannelHistory(ctx, friend.ID, domain.ChannelHistoryFilter{
+		ChannelID:                 channelID,
+		CountOnly:                 true,
+		NeedTotalCount:            true,
+		IncludeHistoryClearAnchor: true,
+	})
+	if err != nil {
+		t.Fatalf("count history after next message: %v", err)
+	}
+	if exactCount.Count != 2 {
+		t.Fatalf("exact history count after next = %d, want shared message plus clear anchor", exactCount.Count)
+	}
+	olderPage, err := channels.ListChannelHistory(ctx, friend.ID, domain.ChannelHistoryFilter{
+		ChannelID:                 channelID,
+		OffsetID:                  next.Message.ID,
+		Limit:                     10,
+		IncludeHistoryClearAnchor: true,
+	})
+	if err != nil {
+		t.Fatalf("list older page after next message: %v", err)
+	}
+	if len(olderPage.Messages) != 1 ||
+		olderPage.Messages[0].ID != sent.Message.ID ||
+		!domain.IsChannelHistoryClearMessage(olderPage.Messages[0]) {
+		t.Fatalf("older page after next = %+v, want retained clear anchor %d", olderPage.Messages, sent.Message.ID)
 	}
 }
 

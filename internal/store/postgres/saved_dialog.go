@@ -299,7 +299,7 @@ func (s *MessageStore) DeleteSavedHistory(ctx context.Context, req domain.Delete
 			peer:             domain.Peer{Type: domain.PeerType(row.PeerType), ID: row.PeerID},
 		})
 	}
-	delRes, err := s.finishDeleteMessagesTx(ctx, tx, qtx, req.OwnerUserID, req.OriginAuthKeyID, req.OriginSessionID, req.Date, deleted, false)
+	delRes, err := s.finishDeleteMessagesTx(ctx, tx, qtx, req.OwnerUserID, req.OriginAuthKeyID, req.OriginSessionID, req.Date, deleted, nil)
 	if err != nil {
 		return res, err
 	}

@@ -28,7 +28,7 @@ func TestRegisterSeedsNegotiatedLayerBeforeFirstRPC(t *testing.T) {
 	conn, auth, cipher := dialHandshake(t, addr, 2, pub)
 
 	clientMsgID := proto.NewMessageIDGen(time.Now)
-	sendEncrypted(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), &mt.PingRequest{PingID: 7})
+	sendEncryptedWithSeq(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), 1, &mt.PingRequest{PingID: 7})
 
 	// 等 pong 回来，确保携带注册动作的那一帧已处理完成。
 	gotPong := false

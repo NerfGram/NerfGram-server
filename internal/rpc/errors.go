@@ -29,6 +29,9 @@ func inputConstructorInvalidErr() error { return tgerr.New(400, "INPUT_CONSTRUCT
 // langCodeNotSupportedErr 表示请求的语言码没有已导入的语言包。
 func langCodeNotSupportedErr() error { return tgerr.New(400, "LANG_CODE_NOT_SUPPORTED") }
 
+// langPackInvalidErr 表示请求的语言包目录不存在。
+func langPackInvalidErr() error { return tgerr.New(400, "LANG_PACK_INVALID") }
+
 // folderIDInvalidErr 表示客户端传入多个 folder peer 或非法 folder。
 func folderIDInvalidErr() error { return tgerr.New(400, "FOLDER_ID_INVALID") }
 
@@ -78,6 +81,18 @@ func chatInvalidErr() error { return tgerr.New(500, "CHAT_INVALID") }
 func addressInvalidErr() error { return tgerr.New(400, "ADDRESS_INVALID") }
 
 func mediaInvalidErr() error { return tgerr.New(400, "MEDIA_INVALID") }
+
+func richMessageInvalidErr() error { return tgerr.New(400, "RICH_MESSAGE_INVALID") }
+
+func richMessageTooLongErr() error { return tgerr.New(400, "RICH_MESSAGE_TOO_LONG") }
+
+func richMessageDateInvalidErr() error { return tgerr.New(400, "RICH_MESSAGE_DATE_INVALID") }
+
+func richMessageMediaUnsupportedErr() error {
+	return tgerr.New(400, "RICH_MESSAGE_MEDIA_UNSUPPORTED")
+}
+
+func webpageMediaEmptyErr() error { return tgerr.New(400, "WEBPAGE_MEDIA_EMPTY") }
 
 func mediaTypeInvalidErr() error { return tgerr.New(400, "MEDIA_TYPE_INVALID") }
 
@@ -136,6 +151,8 @@ func allowPaymentRequiredErr(stars int64) error {
 func balanceTooLowErr() error { return tgerr.New(400, "BALANCE_TOO_LOW") }
 
 func starsAmountInvalidErr() error { return tgerr.New(400, "STARS_AMOUNT_INVALID") }
+
+func subscriptionIDInvalidErr() error { return tgerr.New(400, "SUBSCRIPTION_ID_INVALID") }
 
 func starsFormAmountMismatchErr() error { return tgerr.New(406, "STARS_FORM_AMOUNT_MISMATCH") }
 
@@ -231,8 +248,6 @@ func authTokenExceptionErr() error { return tgerr.New(400, "AUTH_TOKEN_EXCEPTION
 
 func userIDInvalidErr() error { return tgerr.New(400, "USER_ID_INVALID") }
 
-func usersTooFewErr() error { return tgerr.New(400, "USERS_TOO_FEW") }
-
 func firstNameInvalidErr() error { return tgerr.New(400, "FIRSTNAME_INVALID") }
 
 func aboutTooLongErr() error { return tgerr.New(400, "ABOUT_TOO_LONG") }
@@ -283,6 +298,8 @@ func passwordRecoveryNAErr() error    { return tgerr.New(400, "PASSWORD_RECOVERY
 func replyMessageIDInvalidErr() error { return tgerr.New(400, "REPLY_MESSAGE_ID_INVALID") }
 
 func chatForwardsRestrictedErr() error { return tgerr.New(400, "CHAT_FORWARDS_RESTRICTED") }
+
+func requestMsgExpiredErr() error { return tgerr.New(400, "REQUEST_MSG_EXPIRED") }
 
 func inputRequestInvalidErr() error { return tgerr.New(400, "INPUT_REQUEST_INVALID") }
 
@@ -372,6 +389,9 @@ func callProtocolFlagsInvalidErr() error {
 
 func userIsBlockedErr() error         { return tgerr.New(400, "USER_IS_BLOCKED") }
 func userPrivacyRestrictedErr() error { return tgerr.New(403, "USER_PRIVACY_RESTRICTED") }
+func chatSendVoicesForbiddenErr() error {
+	return tgerr.New(403, "CHAT_SEND_VOICES_FORBIDDEN")
+}
 
 // signalingDataInvalidErr 表示 phone.sendSignalingData 载荷超限或非法。
 func signalingDataInvalidErr() error { return tgerr.New(400, "DATA_INVALID") }
@@ -459,6 +479,12 @@ func passwordErr(err error) error {
 		return emailNotAllowedErr()
 	case errors.Is(err, domain.ErrEmailCodeInvalid):
 		return emailCodeInvalidErr()
+	case errors.Is(err, domain.ErrRecoveryCodeEmpty):
+		return tgerr.New(400, "CODE_EMPTY")
+	case errors.Is(err, domain.ErrRecoveryCodeInvalid):
+		return tgerr.New(400, "CODE_INVALID")
+	case errors.Is(err, domain.ErrPasswordRecoveryExpired):
+		return tgerr.New(400, "PASSWORD_RECOVERY_EXPIRED")
 	case errors.Is(err, domain.ErrPasswordRecoveryNA):
 		return passwordRecoveryNAErr()
 	default:

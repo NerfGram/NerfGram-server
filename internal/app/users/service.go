@@ -20,30 +20,21 @@ type ProfilePhotoProvider = userprojection.ProfilePhotoProvider
 
 // Service 提供用户查询。
 type Service struct {
-	users                store.UserStore
-	cache                store.UserCache
-	contacts             store.ContactStore
-	photos               ProfilePhotoProvider
-	privacy              userprojection.PrivacyEvaluator
-	projector            *userprojection.Projector
-	collectibleUsernames CollectibleUsernameOwnerLookup
-	userFlags            UserAccountFlagsLookup
-}
-
-// CollectibleUsernameOwnerLookup batch-resolves each owner's admin-issued
-// collectible usernames, so they can be attached to domain.User when loading.
-type CollectibleUsernameOwnerLookup interface {
-	ByOwners(ctx context.Context, ownerUserIDs []int64) (map[int64][]domain.CollectibleUsername, error)
-}
-
-// UserAccountFlagsLookup batch-resolves per-user account flags (fake badge,
-// main profile tab, etc.).
-type UserAccountFlagsLookup interface {
-	ByOwners(ctx context.Context, userIDs []int64) (map[int64]domain.UserAccountFlags, error)
+	users     store.UserStore
+	cache     store.UserCache
+	contacts  store.ContactStore
+	photos    ProfilePhotoProvider
+	privacy   userprojection.PrivacyEvaluator
+	freezes   userprojection.AccountFreezeProvider
+	projector *userprojection.Projector
 }
 
 type usernameAvailabilityStore interface {
 	CheckUsername(ctx context.Context, userID int64, username string) (bool, error)
+}
+
+type moderationFlagAudienceStore interface {
+	ModerationFlagAudience(ctx context.Context, userID int64, limit int) ([]int64, error)
 }
 
 // Option 调整用户服务可选依赖。
@@ -59,18 +50,6 @@ func WithBaseUserCache(c store.UserCache) Option {
 	return func(s *Service) { s.cache = c }
 }
 
-// WithCollectibleUsernames injects the admin-issued collectible username
-// lookup, so loaded users get their CollectibleUsername/-Active fields
-// populated. Nil (the default) means no server has issued any.
-func WithCollectibleUsernames(l CollectibleUsernameOwnerLookup) Option {
-	return func(s *Service) { s.collectibleUsernames = l }
-}
-
-// WithUserFlags injects per-user account flags (fake badge, profile tab, etc.).
-func WithUserFlags(l UserAccountFlagsLookup) Option {
-	return func(s *Service) { s.userFlags = l }
-}
-
 // WithContactStore enables viewer-specific contact name/phone projection.
 func WithContactStore(c store.ContactStore) Option {
 	return func(s *Service) { s.contacts = c }
@@ -79,6 +58,10 @@ func WithContactStore(c store.ContactStore) Option {
 // WithPrivacyEvaluator enables viewer-specific privacy projection.
 func WithPrivacyEvaluator(p userprojection.PrivacyEvaluator) Option {
 	return func(s *Service) { s.privacy = p }
+}
+
+func WithAccountFreezeProvider(p userprojection.AccountFreezeProvider) Option {
+	return func(s *Service) { s.freezes = p }
 }
 
 const (
@@ -103,6 +86,7 @@ func NewService(users store.UserStore, opts ...Option) *Service {
 		userprojection.WithContactStore(s.contacts),
 		userprojection.WithPhotoProvider(s.photos),
 		userprojection.WithPrivacyEvaluator(s.privacy),
+		userprojection.WithAccountFreezeProvider(s.freezes),
 	)
 	return s
 }
@@ -158,25 +142,12 @@ func (s *Service) AdminUser(ctx context.Context, userID int64) (domain.User, boo
 	return s.loadBaseUserByID(ctx, userID)
 }
 
-// AdminUserByUsername resolves a username to a user for admin/back-office use.
-// Unlike ResolveUsername, this bypasses privacy projection: admin actions act
-// on the raw account, not on what a given viewer is allowed to see.
-func (s *Service) AdminUserByUsername(ctx context.Context, username string) (domain.User, bool, error) {
-	username = normalizeUsername(username)
-	if !validUsername(username) {
-		return domain.User{}, false, domain.ErrUsernameInvalid
-	}
-	return s.users.ByUsername(ctx, username)
-}
-
-// AdminUserByPhone resolves a phone number to a user for admin/back-office
-// use. Bypasses privacy projection for the same reason as AdminUserByUsername.
-func (s *Service) AdminUserByPhone(ctx context.Context, phone string) (domain.User, bool, error) {
-	phone = normalizePhone(phone)
-	if phone == "" {
-		return domain.User{}, false, domain.ErrPhoneNotOccupied
-	}
-	return s.users.ByPhone(ctx, phone)
+// PrivacyBaseUsers returns viewer-independent bot/premium facts through the
+// shared base-user read model. Privacy uses this as a batched cold loader behind
+// its bounded process cache; no viewer projection is performed, avoiding a
+// privacy -> users -> privacy recursion.
+func (s *Service) PrivacyBaseUsers(ctx context.Context, userIDs []int64) ([]domain.User, error) {
+	return s.loadBaseUsersByIDs(ctx, userIDs)
 }
 
 // ByIDs 批量返回指定用户。调用方必须已登录；缺失用户不会出现在结果中。
@@ -272,14 +243,14 @@ func (s *Service) UpdateUsername(ctx context.Context, userID int64, username str
 		}
 	}
 	if self.Username == username {
-		return s.projectOne(ctx, self.ID, self)
+		return self, nil
 	}
 	u, err := s.users.UpdateUsername(ctx, self.ID, username)
 	if err != nil {
 		return domain.User{}, err
 	}
 	s.refreshCachedUsers(ctx, u)
-	return s.projectOne(ctx, self.ID, u)
+	return u, nil
 }
 
 // UpdateProfile 修改当前用户的基础资料。未设置的字段保持原值。
@@ -311,14 +282,14 @@ func (s *Service) UpdateProfile(ctx context.Context, userID int64, update domain
 		return domain.User{}, domain.ErrAboutTooLong
 	}
 	if firstName == self.FirstName && lastName == self.LastName && about == self.About {
-		return s.projectOne(ctx, self.ID, self)
+		return self, nil
 	}
 	u, err := s.users.UpdateProfile(ctx, self.ID, firstName, lastName, about)
 	if err != nil {
 		return domain.User{}, err
 	}
 	s.refreshCachedUsers(ctx, u)
-	return s.projectOne(ctx, self.ID, u)
+	return u, nil
 }
 
 // UpdateLastSeen records the latest visible account activity time.
@@ -380,7 +351,7 @@ func (s *Service) GrantPremium(ctx context.Context, userID int64, months int) (d
 		return domain.User{}, err
 	}
 	s.refreshCachedUsers(ctx, updated)
-	return s.projectOne(ctx, userID, updated)
+	return updated, nil
 }
 
 // SetVerified 设置/取消用户认证标记。认证是账号基础事实，所有 user 投影统一消费该字段。
@@ -396,14 +367,81 @@ func (s *Service) SetVerified(ctx context.Context, userID int64, verified bool) 
 		return domain.User{}, domain.ErrUserNotFound
 	}
 	if u.Verified == verified {
-		return s.projectOne(ctx, userID, u)
+		return u, nil
 	}
 	updated, err := s.users.SetVerified(ctx, userID, verified)
 	if err != nil {
 		return domain.User{}, err
 	}
 	s.refreshCachedUsers(ctx, updated)
-	return s.projectOne(ctx, userID, updated)
+	return updated, nil
+}
+
+// SetScamFake 设置/取消用户的 scam 与 fake 标记（bot 复用同一路径）。scam/fake
+// 是账号基础事实，所有 user 投影统一消费；写后刷新基础缓存以便投影即时可见。
+func (s *Service) SetScamFake(ctx context.Context, userID int64, scam, fake bool) (domain.User, error) {
+	if userID == 0 {
+		return domain.User{}, ErrNotAuthorized
+	}
+	if scam && fake {
+		return domain.User{}, domain.ErrPeerModerationFlagsInvalid
+	}
+	u, found, err := s.users.ByID(ctx, userID)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if !found {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	if u.Scam == scam && u.Fake == fake {
+		return u, nil
+	}
+	updated, err := s.users.SetScamFake(ctx, userID, scam, fake)
+	if err != nil {
+		return domain.User{}, err
+	}
+	s.refreshCachedUsers(ctx, updated)
+	return updated, nil
+}
+
+// ModerationFlagAudience returns the bounded set of existing viewers that may
+// need an immediate updateUser after SCAM/FAKE changes. This is an online
+// accelerator only: it does not allocate PTS or create durable update events.
+func (s *Service) ModerationFlagAudience(ctx context.Context, userID int64, limit int) ([]int64, error) {
+	if userID == 0 {
+		return nil, ErrNotAuthorized
+	}
+	if limit <= 0 || limit > 4096 {
+		limit = 4096
+	}
+	audience, ok := s.users.(moderationFlagAudienceStore)
+	if !ok {
+		return []int64{userID}, nil
+	}
+	return audience.ModerationFlagAudience(ctx, userID, limit)
+}
+
+// SetSupport 设置/取消用户的 support 标记（官方客服账号）。写后刷新基础缓存。
+func (s *Service) SetSupport(ctx context.Context, userID int64, support bool) (domain.User, error) {
+	if userID == 0 {
+		return domain.User{}, ErrNotAuthorized
+	}
+	u, found, err := s.users.ByID(ctx, userID)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if !found {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	if u.Support == support {
+		return u, nil
+	}
+	updated, err := s.users.SetSupport(ctx, userID, support)
+	if err != nil {
+		return domain.User{}, err
+	}
+	s.refreshCachedUsers(ctx, updated)
+	return updated, nil
 }
 
 // SweepExpiredPremium 清理到期会员（store 把过期行清 NULL）并失效用户缓存，
@@ -434,7 +472,7 @@ func (s *Service) UpdateEmojiStatus(ctx context.Context, userID int64, status do
 		return domain.User{}, err
 	}
 	s.refreshCachedUsers(ctx, u)
-	return s.projectOne(ctx, self.ID, u)
+	return u, nil
 }
 
 // UpdateEmojiStatusWithEvent uses the store's aggregate transaction when it
@@ -501,7 +539,7 @@ func (s *Service) UpdateBirthday(ctx context.Context, userID int64, birthday dom
 		return domain.User{}, err
 	}
 	s.refreshCachedUsers(ctx, u)
-	return s.projectOne(ctx, self.ID, u)
+	return u, nil
 }
 
 // UpdatePersonalChannel 设置/清除资料页个人频道（account.updatePersonalChannel）；
@@ -516,27 +554,7 @@ func (s *Service) UpdatePersonalChannel(ctx context.Context, userID int64, chann
 		return domain.User{}, err
 	}
 	s.refreshCachedUsers(ctx, u)
-	return s.projectOne(ctx, self.ID, u)
-}
-
-type userMainProfileTabSetter interface {
-	SetMainProfileTab(ctx context.Context, userID int64, tab string) error
-}
-
-// SetMainProfileTab stores the user's preferred main profile tab.
-func (s *Service) SetMainProfileTab(ctx context.Context, userID int64, tab string) (domain.User, error) {
-	setter, ok := s.userFlags.(userMainProfileTabSetter)
-	if !ok || setter == nil {
-		return domain.User{}, errors.New("main profile tab store unavailable")
-	}
-	if _, err := s.loadSelf(ctx, userID); err != nil {
-		return domain.User{}, err
-	}
-	if err := setter.SetMainProfileTab(ctx, userID, tab); err != nil {
-		return domain.User{}, err
-	}
-	s.dropCachedUsers(ctx, userID)
-	return s.Self(ctx, userID)
+	return u, nil
 }
 
 // UpdateColor updates the user's message accent or profile background color.
@@ -550,7 +568,7 @@ func (s *Service) UpdateColor(ctx context.Context, userID int64, forProfile bool
 		return domain.User{}, err
 	}
 	s.refreshCachedUsers(ctx, u)
-	return s.projectOne(ctx, self.ID, u)
+	return u, nil
 }
 
 // ResolveUsername 解析 username 到用户；调用方必须已登录。
@@ -559,7 +577,11 @@ func (s *Service) ResolveUsername(ctx context.Context, currentUserID int64, user
 		return domain.User{}, false, err
 	}
 	username = normalizeUsername(username)
-	if !validUsername(username) {
+	// Resolution covers both the editable username slot (5..32) and
+	// Fragment-style collectible usernames (4..32). Keep the stricter
+	// validUsername check on create/update paths; only lookup accepts the
+	// collectible lower bound.
+	if !domain.ValidCollectibleUsername(username) {
 		return domain.User{}, false, domain.ErrUsernameInvalid
 	}
 	u, found, err := s.users.ByUsername(ctx, username)
@@ -574,7 +596,9 @@ func (s *Service) ResolveUsername(ctx context.Context, currentUserID int64, user
 	return u, true, nil
 }
 
-// ResolvePhone 解析手机号到用户；当前阶段默认允许手机号深链解析，隐私规则后续接 account privacy。
+// ResolvePhone resolves a phone number only when the target's AddedByPhone
+// privacy allows the current viewer. The evaluator is backed by owner-level
+// privacy/contact snapshots in production, so this adds no per-rule SQL query.
 func (s *Service) ResolvePhone(ctx context.Context, currentUserID int64, phone string) (domain.User, bool, error) {
 	if _, err := s.loadSelf(ctx, currentUserID); err != nil {
 		return domain.User{}, false, err
@@ -588,6 +612,28 @@ func (s *Service) ResolvePhone(ctx context.Context, currentUserID int64, phone s
 		return u, found, err
 	}
 	s.putCachedUsers(ctx, u)
+	if s.privacy != nil && u.ID != currentUserID {
+		allowed := false
+		var err error
+		if batch, ok := s.privacy.(userprojection.BatchPrivacyEvaluator); ok {
+			visibility, batchErr := batch.CanSeeBatch(
+				ctx,
+				[]int64{u.ID},
+				currentUserID,
+				[]domain.PrivacyKey{domain.PrivacyKeyAddedByPhone},
+			)
+			err = batchErr
+			allowed = visibility[u.ID][domain.PrivacyKeyAddedByPhone]
+		} else {
+			allowed, err = s.privacy.CanSee(ctx, u.ID, currentUserID, domain.PrivacyKeyAddedByPhone)
+		}
+		if err != nil {
+			return domain.User{}, false, err
+		}
+		if !allowed {
+			return domain.User{}, false, domain.ErrPhoneNotOccupied
+		}
+	}
 	u, err = s.projectOne(ctx, currentUserID, u)
 	if err != nil {
 		return domain.User{}, false, err
@@ -651,45 +697,6 @@ func (s *Service) loadBaseUsersByIDs(ctx context.Context, userIDs []int64) ([]do
 	for _, id := range ids {
 		if u, ok := loaded[id]; ok {
 			out = append(out, u)
-		}
-	}
-	// Always freshly attached (never cached alongside the base user): a
-	// collectible username can be issued/toggled independently of the base
-	// user record, and out is rebuilt from `loaded` (cache or DB) on every
-	// call regardless, so this can't go stale the way a cached field could.
-	if s.collectibleUsernames != nil && len(out) > 0 {
-		byOwner, err := s.collectibleUsernames.ByOwners(ctx, ids)
-		if err == nil && len(byOwner) > 0 {
-			for i := range out {
-				list := byOwner[out[i].ID]
-				if len(list) == 0 {
-					out[i].CollectibleUsernames = nil
-					out[i].CollectibleUsername = ""
-					out[i].CollectibleUsernameActive = false
-					continue
-				}
-				out[i].CollectibleUsernames = append([]domain.CollectibleUsername(nil), list...)
-				out[i].CollectibleUsername = ""
-				out[i].CollectibleUsernameActive = false
-				for _, cu := range list {
-					if cu.Active {
-						out[i].CollectibleUsername = cu.Username
-						out[i].CollectibleUsernameActive = true
-						break
-					}
-				}
-			}
-		}
-	}
-	if s.userFlags != nil && len(out) > 0 {
-		flags, err := s.userFlags.ByOwners(ctx, ids)
-		if err == nil && len(flags) > 0 {
-			for i := range out {
-				if f, ok := flags[out[i].ID]; ok {
-					out[i].Fake = f.Fake
-					out[i].MainProfileTab = f.MainProfileTab
-				}
-			}
 		}
 	}
 	return out, nil

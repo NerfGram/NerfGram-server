@@ -72,6 +72,12 @@ func (s *ChannelStore) DeleteChannelHistory(_ context.Context, req domain.Delete
 	if err != nil {
 		return domain.DeleteChannelHistoryResult{}, err
 	}
+	if req.Date <= 0 {
+		req.Date = channel.Date
+		if req.Date <= 0 {
+			req.Date = 1
+		}
+	}
 	maxID := req.MaxID
 	if maxID <= 0 || maxID > channel.TopMessageID {
 		maxID = channel.TopMessageID
@@ -79,6 +85,22 @@ func (s *ChannelStore) DeleteChannelHistory(_ context.Context, req domain.Delete
 	member := s.members[req.ChannelID][req.UserID]
 	if !req.ForEveryone {
 		appliedMinID := maxInt(member.AvailableMinID, maxID)
+		changed := appliedMinID > member.AvailableMinID
+		if changed {
+			anchorDate := req.Date
+			if msg, ok := s.findMessageLocked(req.ChannelID, appliedMinID); ok && msg.Date > 0 {
+				anchorDate = msg.Date
+			}
+			if anchorDate <= 0 {
+				anchorDate = channel.Date
+			}
+			member.HistoryClearAnchorID = appliedMinID
+			member.HistoryClearAnchorDate = anchorDate
+			if s.historyClearDates[req.ChannelID] == nil {
+				s.historyClearDates[req.ChannelID] = make(map[int64]int)
+			}
+			s.historyClearDates[req.ChannelID][req.UserID] = req.Date
+		}
 		member.AvailableMinID = appliedMinID
 		member.ReadInboxMaxID = maxInt(member.ReadInboxMaxID, appliedMinID)
 		member.UnreadMark = false
@@ -92,7 +114,11 @@ func (s *ChannelStore) DeleteChannelHistory(_ context.Context, req domain.Delete
 			s.dialogs[req.UserID] = make(map[int64]domain.ChannelDialog)
 		}
 		s.dialogs[req.UserID][req.ChannelID] = s.dialogForUserLocked(req.UserID, channel)
-		return domain.DeleteChannelHistoryResult{Channel: channel, AvailableMinID: appliedMinID}, nil
+		return domain.DeleteChannelHistoryResult{
+			Channel:             channel,
+			AvailableMinID:      appliedMinID,
+			AvailableMinChanged: changed,
+		}, nil
 	}
 	if !canDeleteAnyChannelMessage(member) {
 		return domain.DeleteChannelHistoryResult{}, domain.ErrChannelAdminRequired

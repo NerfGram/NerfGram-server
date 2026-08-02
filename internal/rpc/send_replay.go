@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 
 	"github.com/iamxvbaba/td/tg"
+	"go.uber.org/zap"
 
 	"telesrv/internal/domain"
 )
@@ -46,6 +47,11 @@ func (r *Router) lookupOutgoingReplay(ctx context.Context, userID int64, peer do
 			IdempotencyFingerprint: fingerprint,
 		})
 		if err != nil {
+			r.log.Warn("private send replay lookup failed",
+				append(r.contextLogFields(ctx),
+					zap.Error(err),
+					zap.Int64("recipient_user_id", peer.ID),
+				)...)
 			return outgoingReplayLookup{checked: true}, messageSendErr(err)
 		}
 		return outgoingReplayLookup{private: res, found: found, checked: true}, nil

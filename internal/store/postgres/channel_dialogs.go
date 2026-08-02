@@ -18,6 +18,26 @@ type channelDialogListItem struct {
 	defaultSendAs *domain.Peer
 }
 
+func channelDialogVisibleTopIDSQL() string {
+	return `CASE
+    WHEN c.top_message_id > m.available_min_id THEN c.top_message_id
+    WHEN m.history_clear_anchor_id > 0
+      AND m.history_clear_anchor_id = m.available_min_id
+      THEN m.history_clear_anchor_id
+    ELSE 0
+END`
+}
+
+func channelDialogVisibleTopDateSQL(globalTopDate, emptyFallback string) string {
+	return `CASE
+    WHEN c.top_message_id > m.available_min_id THEN ` + globalTopDate + `
+    WHEN m.history_clear_anchor_id > 0
+      AND m.history_clear_anchor_id = m.available_min_id
+      THEN m.history_clear_anchor_date
+    ELSE ` + emptyFallback + `
+END`
+}
+
 func (s *ChannelStore) ListChannelDialogs(ctx context.Context, viewerUserID int64, filter domain.DialogFilter) (domain.ChannelDialogList, error) {
 	if viewerUserID == 0 {
 		return domain.ChannelDialogList{}, nil
@@ -33,8 +53,8 @@ func (s *ChannelStore) ListChannelDialogs(ctx context.Context, viewerUserID int6
 	if len(channelIDs) == 0 {
 		return domain.ChannelDialogList{}, nil
 	}
-	visibleTopID := "CASE WHEN c.top_message_id > m.available_min_id THEN c.top_message_id ELSE 0 END"
-	visibleTopDate := "CASE WHEN c.top_message_id > m.available_min_id THEN COALESCE(top_msg.message_date, d.top_message_date, c.date) ELSE 0 END"
+	visibleTopID := channelDialogVisibleTopIDSQL()
+	visibleTopDate := channelDialogVisibleTopDateSQL("COALESCE(top_msg.message_date, d.top_message_date, c.date)", "0")
 	visibleReadInbox := "GREATEST(COALESCE(d.read_inbox_max_id, 0), m.read_inbox_max_id)"
 	visibleUnreadCount := channelDialogVisibleUnreadCountSQL(visibleReadInbox, visibleTopID)
 	args := []any{viewerUserID, channelIDs}
@@ -139,7 +159,9 @@ SELECT `+channelColumns+`,
        COALESCE(d.view_forum_as_messages, false),
        COALESCE(d.has_scheduled, false),
        d.default_send_as_peer_type,
-       d.default_send_as_peer_id
+       d.default_send_as_peer_id,
+       m.history_clear_anchor_id,
+       m.history_clear_anchor_date
 FROM channel_members m
 JOIN channels c ON c.id = m.channel_id AND c.id = ANY($2::bigint[]) AND NOT c.deleted
 LEFT JOIN channel_messages top_msg ON top_msg.channel_id = m.channel_id AND top_msg.channel_id = ANY($2::bigint[]) AND top_msg.id = c.top_message_id AND NOT top_msg.deleted
@@ -232,6 +254,7 @@ LIMIT `+limitArg, args...)
 	if err := s.populateChannelMessagesReactions(ctx, s.db, viewerUserID, out.Channels, out.Messages); err != nil {
 		return domain.ChannelDialogList{}, err
 	}
+	projectChannelDialogHistoryClearMessages(out.Dialogs, out.Messages)
 	return out, nil
 }
 
@@ -255,7 +278,9 @@ SELECT `+channelColumns+`,
        COALESCE(d.view_forum_as_messages, false),
        COALESCE(d.has_scheduled, false),
        d.default_send_as_peer_type,
-       d.default_send_as_peer_id
+       d.default_send_as_peer_id,
+       0,
+       0
 FROM user_channel_member_index i
 JOIN channel_members pm ON pm.user_id = i.user_id AND pm.channel_id = i.channel_id
 JOIN channels parent ON parent.id = i.channel_id AND parent.id = ANY($2::bigint[]) AND parent.broadcast AND parent.linked_monoforum_id <> 0 AND NOT parent.deleted
@@ -267,7 +292,7 @@ WHERE i.user_id = $1
   AND NOT i.deleted
   AND i.role IN ('creator','admin')
   AND pm.status = 'active'
-  AND pm.role IN ('creator','admin')
+  AND (pm.role = 'creator' OR (pm.role = 'admin' AND COALESCE((pm.admin_rights->>'ManageDirectMessages')::boolean, false)))
 ORDER BY COALESCE(d.pinned, false) DESC,
          COALESCE(d.pinned_order, 0) DESC,
          COALESCE(top_msg.message_date, d.top_message_date, c.date) DESC,
@@ -357,6 +382,20 @@ WHERE `+where.String(), args...)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("scan channel dialog top messages: %w", err)
 	}
+	for _, dialog := range dialogs {
+		if dialog.Peer.Type != domain.PeerTypeChannel ||
+			dialog.TopMessage <= 0 ||
+			dialog.TopMessage != dialog.HistoryClearAnchorID {
+			continue
+		}
+		key := channelMessageLookupKey{channelID: dialog.Peer.ID, id: dialog.TopMessage}
+		out[key] = domain.ProjectChannelHistoryClearMessage(
+			out[key],
+			dialog.Peer.ID,
+			dialog.HistoryClearAnchorID,
+			dialog.HistoryClearAnchorDate,
+		)
+	}
 	return out, nil
 }
 
@@ -413,6 +452,14 @@ func (s *ChannelStore) GetChannelDialogs(ctx context.Context, viewerUserID int64
 			}
 		}
 		msg, _ := s.getChannelMessage(ctx, s.db, channelID, dialog.TopMessageID)
+		if dialog.TopMessageID > 0 && dialog.TopMessageID == dialog.HistoryClearAnchorID {
+			msg = domain.ProjectChannelHistoryClearMessage(
+				msg,
+				channelID,
+				dialog.HistoryClearAnchorID,
+				dialog.HistoryClearAnchorDate,
+			)
+		}
 		if msg.ID != 0 {
 			dialog.TopMessageDate = msg.Date
 			out.Messages = append(out.Messages, msg)
@@ -425,7 +472,32 @@ func (s *ChannelStore) GetChannelDialogs(ctx context.Context, viewerUserID int64
 	if err := s.populateChannelMessagesReactions(ctx, s.db, viewerUserID, out.Channels, out.Messages); err != nil {
 		return domain.ChannelDialogList{}, err
 	}
+	projectChannelDialogHistoryClearMessages(out.Dialogs, out.Messages)
 	return out, nil
+}
+
+func projectChannelDialogHistoryClearMessages(dialogs []domain.Dialog, messages []domain.ChannelMessage) {
+	anchors := make(map[channelMessageLookupKey]domain.Dialog)
+	for _, dialog := range dialogs {
+		if dialog.Peer.Type != domain.PeerTypeChannel ||
+			dialog.TopMessage <= 0 ||
+			dialog.TopMessage != dialog.HistoryClearAnchorID {
+			continue
+		}
+		anchors[channelMessageLookupKey{channelID: dialog.Peer.ID, id: dialog.TopMessage}] = dialog
+	}
+	for i := range messages {
+		dialog, ok := anchors[channelMessageLookupKey{channelID: messages[i].ChannelID, id: messages[i].ID}]
+		if !ok {
+			continue
+		}
+		messages[i] = domain.ProjectChannelHistoryClearMessage(
+			messages[i],
+			dialog.Peer.ID,
+			dialog.HistoryClearAnchorID,
+			dialog.HistoryClearAnchorDate,
+		)
+	}
 }
 
 func (s *ChannelStore) ListCommonChannels(ctx context.Context, req domain.CommonChannelsRequest) (domain.CommonChannelsResult, error) {
@@ -553,6 +625,7 @@ func (s *ChannelStore) leftChannelsByIDs(ctx context.Context, userID int64, ids 
 	rows, err := s.db.Query(ctx, `
 SELECT channel_id, user_id, inviter_user_id, role, status, joined_at, left_at,
        admin_rights::text, banned_rights::text, rank, available_min_id, available_min_pts,
+       history_clear_anchor_id, history_clear_anchor_date,
        read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
 FROM channel_members
 WHERE user_id = $1
@@ -603,8 +676,8 @@ func (s *ChannelStore) ListInactiveChannels(ctx context.Context, userID int64, l
 	if len(channelIDs) == 0 {
 		return domain.ChannelDialogList{}, nil
 	}
-	visibleTopID := "CASE WHEN c.top_message_id > m.available_min_id THEN c.top_message_id ELSE 0 END"
-	visibleTopDate := "CASE WHEN c.top_message_id > m.available_min_id THEN COALESCE(top_msg.message_date, d.top_message_date, c.date) ELSE GREATEST(c.date, m.joined_at) END"
+	visibleTopID := channelDialogVisibleTopIDSQL()
+	visibleTopDate := channelDialogVisibleTopDateSQL("COALESCE(top_msg.message_date, d.top_message_date, c.date)", "GREATEST(c.date, m.joined_at)")
 	visibleReadInbox := "GREATEST(COALESCE(d.read_inbox_max_id, 0), m.read_inbox_max_id)"
 	visibleUnreadCount := channelDialogVisibleUnreadCountSQL(visibleReadInbox, visibleTopID)
 	rows, err := s.db.Query(ctx, `
@@ -619,7 +692,9 @@ SELECT `+channelColumns+`,
        COALESCE(d.view_forum_as_messages, false),
        COALESCE(d.has_scheduled, false),
        d.default_send_as_peer_type,
-       d.default_send_as_peer_id
+       d.default_send_as_peer_id,
+       m.history_clear_anchor_id,
+       m.history_clear_anchor_date
 FROM channel_members m
 JOIN channels c ON c.id = m.channel_id AND c.id = ANY($2::bigint[]) AND NOT c.deleted
 LEFT JOIN channel_messages top_msg ON top_msg.channel_id = m.channel_id AND top_msg.channel_id = ANY($2::bigint[]) AND top_msg.id = c.top_message_id AND NOT top_msg.deleted
@@ -856,6 +931,7 @@ func (s *ChannelStore) EditChannelPeerFolders(ctx context.Context, userID int64,
 	// 归档必须 ensure-INSERT：从未读过/置顶过的频道还没有 dialog 行，
 	// 只 UPDATE 会让归档静默丢失；新行同时带上 member 真实水位，
 	// 避免 0 水位缓存行遮蔽未读/已读状态。
+	visibleTopID := channelDialogVisibleTopIDSQL()
 	if _, err := s.db.Exec(ctx, `
 WITH requested AS (
     SELECT ($2::text[])[i] AS peer_type, ($3::bigint[])[i] AS channel_id, ($4::int[])[i] AS folder_id
@@ -870,7 +946,7 @@ deduped AS (
 )
 INSERT INTO channel_dialogs (user_id, channel_id, folder_id, top_message_id, read_inbox_max_id, read_outbox_max_id, unread_count, updated_at)
 SELECT $1, m.channel_id, deduped.folder_id,
-       CASE WHEN c.top_message_id > m.available_min_id THEN c.top_message_id ELSE 0 END,
+       `+visibleTopID+`,
        m.read_inbox_max_id, m.read_outbox_max_id,
        (
            SELECT COUNT(*)::int
@@ -904,7 +980,7 @@ func (s *ChannelStore) CountChannelArchiveUnread(ctx context.Context, userID int
 	// JOIN active member：退群残留的 channel_dialogs 行不计入归档徽章。
 	// unread 读时动态派生（H4a）：不再消费 channel_dialogs.unread_count 缓存列；归档集合
 	// 有界（需显式归档建行），每行动态 COUNT 已被 cap 钳制。
-	visibleTopID := "CASE WHEN c.top_message_id > m.available_min_id THEN c.top_message_id ELSE 0 END"
+	visibleTopID := channelDialogVisibleTopIDSQL()
 	visibleReadInbox := "GREATEST(COALESCE(d.read_inbox_max_id, 0), m.read_inbox_max_id)"
 	if err := s.db.QueryRow(ctx, `
 SELECT
@@ -937,7 +1013,7 @@ func (s *ChannelStore) getChannelDialogUncached(ctx context.Context, db sqlcgen.
 	dialog := domain.ChannelDialog{UserID: userID, ChannelID: channel.ID, TopMessageID: channel.TopMessageID}
 	var defaultSendAsType sql.NullString
 	var defaultSendAsID sql.NullInt64
-	visibleTopID := "CASE WHEN c.top_message_id > m.available_min_id THEN c.top_message_id ELSE 0 END"
+	visibleTopID := channelDialogVisibleTopIDSQL()
 	visibleReadInbox := "GREATEST(COALESCE(d.read_inbox_max_id, 0), m.read_inbox_max_id)"
 	visibleUnreadCount := channelDialogVisibleUnreadCountSQL(visibleReadInbox, visibleTopID)
 	// 单频道 TopMessageDate 用 LEFT JOIN top_msg 直接取,替代此前对每个频道再单查一次
@@ -946,7 +1022,10 @@ func (s *ChannelStore) getChannelDialogUncached(ctx context.Context, db sqlcgen.
 	// message_date(不过滤 deleted,与原 getChannelMessage 一致),否则回退
 	// COALESCE(d.top_message_date, c.date)。注意:与批量版 getChannelDialogs 的隐藏态
 	// (ELSE 0)刻意保持各自既有差异,本改动只去往返、不改单频道输出。
-	visibleTopDate := "CASE WHEN c.top_message_id > m.available_min_id AND top_msg.id IS NOT NULL THEN top_msg.message_date ELSE COALESCE(d.top_message_date, c.date) END"
+	visibleTopDate := channelDialogVisibleTopDateSQL(
+		"CASE WHEN top_msg.id IS NOT NULL THEN top_msg.message_date ELSE COALESCE(d.top_message_date, c.date) END",
+		"COALESCE(d.top_message_date, c.date)",
+	)
 	err := db.QueryRow(ctx, `
 SELECT `+visibleTopID+`,
        `+visibleTopDate+`,
@@ -962,7 +1041,9 @@ SELECT `+visibleTopID+`,
        COALESCE(d.view_forum_as_messages, false),
        COALESCE(d.has_scheduled, false),
        d.default_send_as_peer_type,
-       d.default_send_as_peer_id
+       d.default_send_as_peer_id,
+       m.history_clear_anchor_id,
+       m.history_clear_anchor_date
 FROM channels c
 JOIN channel_members m ON m.channel_id = c.id AND m.user_id = $1
 LEFT JOIN channel_messages top_msg ON top_msg.channel_id = c.id AND top_msg.id = c.top_message_id
@@ -983,6 +1064,8 @@ WHERE c.id = $2`, userID, channel.ID).Scan(
 		&dialog.HasScheduled,
 		&defaultSendAsType,
 		&defaultSendAsID,
+		&dialog.HistoryClearAnchorID,
+		&dialog.HistoryClearAnchorDate,
 	)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return domain.ChannelDialog{}, fmt.Errorf("get channel dialog: %w", err)
@@ -1037,8 +1120,8 @@ func (s *ChannelStore) getChannelDialogsUncached(ctx context.Context, db sqlcgen
 	if userID == 0 || len(channelIDs) == 0 {
 		return nil, nil
 	}
-	visibleTopID := "CASE WHEN c.top_message_id > m.available_min_id THEN c.top_message_id ELSE 0 END"
-	visibleTopDate := "CASE WHEN c.top_message_id > m.available_min_id THEN COALESCE(top_msg.message_date, d.top_message_date, c.date) ELSE 0 END"
+	visibleTopID := channelDialogVisibleTopIDSQL()
+	visibleTopDate := channelDialogVisibleTopDateSQL("COALESCE(top_msg.message_date, d.top_message_date, c.date)", "0")
 	visibleReadInbox := "GREATEST(COALESCE(d.read_inbox_max_id, 0), m.read_inbox_max_id)"
 	visibleUnreadCount := channelDialogVisibleUnreadCountSQL(visibleReadInbox, visibleTopID)
 	rows, err := db.Query(ctx, `
@@ -1057,7 +1140,9 @@ SELECT c.id,
        COALESCE(d.view_forum_as_messages, false),
        COALESCE(d.has_scheduled, false),
        d.default_send_as_peer_type,
-       d.default_send_as_peer_id
+       d.default_send_as_peer_id,
+       m.history_clear_anchor_id,
+       m.history_clear_anchor_date
 FROM channels c
 JOIN channel_members m ON m.channel_id = c.id AND m.user_id = $1
 LEFT JOIN channel_messages top_msg ON top_msg.channel_id = c.id AND top_msg.id = c.top_message_id AND NOT top_msg.deleted
@@ -1089,6 +1174,8 @@ WHERE c.id = ANY($2::bigint[])`, userID, channelIDs)
 			&dialog.HasScheduled,
 			&defaultSendAsType,
 			&defaultSendAsID,
+			&dialog.HistoryClearAnchorID,
+			&dialog.HistoryClearAnchorDate,
 		); err != nil {
 			return nil, err
 		}
@@ -1197,6 +1284,7 @@ func scanChannelDialogRow(row rowScanner, userID int64) (domain.Channel, domain.
 	var rights, reactionPolicy string
 	var wallpaper *string
 	var topID, topDate, folderID, readInbox, readOutbox, unreadCount, pinnedOrder, unreadMentions, unreadReactions int
+	var historyClearAnchorID, historyClearAnchorDate int
 	var pinned, unreadMark, viewForumAsMessages, hasScheduled bool
 	var defaultSendAsType sql.NullString
 	var defaultSendAsID sql.NullInt64
@@ -1204,27 +1292,30 @@ func scanChannelDialogRow(row rowScanner, userID int64) (domain.Channel, domain.
 		&topID, &topDate,
 		&folderID, &readInbox, &readOutbox, &unreadCount, &pinned, &pinnedOrder, &unreadMark, &unreadMentions, &unreadReactions, &viewForumAsMessages, &hasScheduled,
 		&defaultSendAsType, &defaultSendAsID,
+		&historyClearAnchorID, &historyClearAnchorDate,
 	)
 	if err := row.Scan(dest...); err != nil {
 		return domain.Channel{}, domain.Dialog{}, nil, err
 	}
 	finishChannelScan(&ch, rights, reactionPolicy, wallpaper)
 	dialog := domain.Dialog{
-		Peer:                domain.Peer{Type: domain.PeerTypeChannel, ID: ch.ID},
-		FolderID:            folderID,
-		TopMessage:          topID,
-		TopMessageDate:      topDate,
-		ReadInboxMaxID:      readInbox,
-		ReadOutboxMaxID:     readOutbox,
-		UnreadCount:         unreadCount,
-		UnreadMentions:      unreadMentions,
-		UnreadReactions:     unreadReactions,
-		Pinned:              pinned,
-		PinnedOrder:         pinnedOrder,
-		UnreadMark:          unreadMark,
-		ViewForumAsMessages: viewForumAsMessages,
-		HasScheduled:        hasScheduled,
-		Pts:                 ch.Pts,
+		Peer:                   domain.Peer{Type: domain.PeerTypeChannel, ID: ch.ID},
+		FolderID:               folderID,
+		TopMessage:             topID,
+		TopMessageDate:         topDate,
+		HistoryClearAnchorID:   historyClearAnchorID,
+		HistoryClearAnchorDate: historyClearAnchorDate,
+		ReadInboxMaxID:         readInbox,
+		ReadOutboxMaxID:        readOutbox,
+		UnreadCount:            unreadCount,
+		UnreadMentions:         unreadMentions,
+		UnreadReactions:        unreadReactions,
+		Pinned:                 pinned,
+		PinnedOrder:            pinnedOrder,
+		UnreadMark:             unreadMark,
+		ViewForumAsMessages:    viewForumAsMessages,
+		HasScheduled:           hasScheduled,
+		Pts:                    ch.Pts,
 	}
 	var defaultSendAs *domain.Peer
 	if defaultSendAsType.Valid && defaultSendAsID.Valid && defaultSendAsID.Int64 != 0 {
@@ -1236,41 +1327,45 @@ func scanChannelDialogRow(row rowScanner, userID int64) (domain.Channel, domain.
 
 func channelDialogToDialog(dialog domain.ChannelDialog, channelPts int) domain.Dialog {
 	return domain.Dialog{
-		Peer:                domain.Peer{Type: domain.PeerTypeChannel, ID: dialog.ChannelID},
-		FolderID:            dialog.FolderID,
-		TopMessage:          dialog.TopMessageID,
-		TopMessageDate:      dialog.TopMessageDate,
-		ReadInboxMaxID:      dialog.ReadInboxMaxID,
-		ReadOutboxMaxID:     dialog.ReadOutboxMaxID,
-		UnreadCount:         dialog.UnreadCount,
-		UnreadMentions:      dialog.UnreadMentions,
-		UnreadReactions:     dialog.UnreadReactions,
-		Pinned:              dialog.Pinned,
-		PinnedOrder:         dialog.PinnedOrder,
-		UnreadMark:          dialog.UnreadMark,
-		ViewForumAsMessages: dialog.ViewForumAsMessages,
-		HasScheduled:        dialog.HasScheduled,
-		Pts:                 channelPts,
+		Peer:                   domain.Peer{Type: domain.PeerTypeChannel, ID: dialog.ChannelID},
+		FolderID:               dialog.FolderID,
+		TopMessage:             dialog.TopMessageID,
+		TopMessageDate:         dialog.TopMessageDate,
+		HistoryClearAnchorID:   dialog.HistoryClearAnchorID,
+		HistoryClearAnchorDate: dialog.HistoryClearAnchorDate,
+		ReadInboxMaxID:         dialog.ReadInboxMaxID,
+		ReadOutboxMaxID:        dialog.ReadOutboxMaxID,
+		UnreadCount:            dialog.UnreadCount,
+		UnreadMentions:         dialog.UnreadMentions,
+		UnreadReactions:        dialog.UnreadReactions,
+		Pinned:                 dialog.Pinned,
+		PinnedOrder:            dialog.PinnedOrder,
+		UnreadMark:             dialog.UnreadMark,
+		ViewForumAsMessages:    dialog.ViewForumAsMessages,
+		HasScheduled:           dialog.HasScheduled,
+		Pts:                    channelPts,
 	}
 }
 
 func channelDialogFromDialog(userID int64, dialog domain.Dialog) domain.ChannelDialog {
 	return domain.ChannelDialog{
-		UserID:              userID,
-		ChannelID:           dialog.Peer.ID,
-		FolderID:            dialog.FolderID,
-		TopMessageID:        dialog.TopMessage,
-		TopMessageDate:      dialog.TopMessageDate,
-		ReadInboxMaxID:      dialog.ReadInboxMaxID,
-		ReadOutboxMaxID:     dialog.ReadOutboxMaxID,
-		UnreadCount:         dialog.UnreadCount,
-		UnreadMentions:      dialog.UnreadMentions,
-		UnreadReactions:     dialog.UnreadReactions,
-		Pinned:              dialog.Pinned,
-		PinnedOrder:         dialog.PinnedOrder,
-		UnreadMark:          dialog.UnreadMark,
-		ViewForumAsMessages: dialog.ViewForumAsMessages,
-		HasScheduled:        dialog.HasScheduled,
+		UserID:                 userID,
+		ChannelID:              dialog.Peer.ID,
+		FolderID:               dialog.FolderID,
+		TopMessageID:           dialog.TopMessage,
+		TopMessageDate:         dialog.TopMessageDate,
+		HistoryClearAnchorID:   dialog.HistoryClearAnchorID,
+		HistoryClearAnchorDate: dialog.HistoryClearAnchorDate,
+		ReadInboxMaxID:         dialog.ReadInboxMaxID,
+		ReadOutboxMaxID:        dialog.ReadOutboxMaxID,
+		UnreadCount:            dialog.UnreadCount,
+		UnreadMentions:         dialog.UnreadMentions,
+		UnreadReactions:        dialog.UnreadReactions,
+		Pinned:                 dialog.Pinned,
+		PinnedOrder:            dialog.PinnedOrder,
+		UnreadMark:             dialog.UnreadMark,
+		ViewForumAsMessages:    dialog.ViewForumAsMessages,
+		HasScheduled:           dialog.HasScheduled,
 	}
 }
 
@@ -1392,14 +1487,23 @@ func channelFolderPeerIDs(primary []domain.DialogFolderPeer, rest ...[]domain.Di
 func previewChannelDialog(userID int64, channel domain.Channel, member domain.ChannelMember) domain.ChannelDialog {
 	topMessageID := channel.TopMessageID
 	if topMessageID <= member.AvailableMinID {
-		topMessageID = 0
+		topMessageID = member.HistoryClearAnchorID
+		if topMessageID != member.AvailableMinID {
+			topMessageID = 0
+		}
+	}
+	topMessageDate := channel.Date
+	if topMessageID > 0 && topMessageID == member.HistoryClearAnchorID {
+		topMessageDate = member.HistoryClearAnchorDate
 	}
 	return domain.ChannelDialog{
-		UserID:          userID,
-		ChannelID:       channel.ID,
-		TopMessageID:    topMessageID,
-		TopMessageDate:  channel.Date,
-		ReadInboxMaxID:  maxInt(channel.TopMessageID, member.ReadInboxMaxID),
-		ReadOutboxMaxID: maxInt(channel.TopMessageID, member.ReadOutboxMaxID),
+		UserID:                 userID,
+		ChannelID:              channel.ID,
+		TopMessageID:           topMessageID,
+		TopMessageDate:         topMessageDate,
+		HistoryClearAnchorID:   member.HistoryClearAnchorID,
+		HistoryClearAnchorDate: member.HistoryClearAnchorDate,
+		ReadInboxMaxID:         maxInt(channel.TopMessageID, member.ReadInboxMaxID),
+		ReadOutboxMaxID:        maxInt(channel.TopMessageID, member.ReadOutboxMaxID),
 	}
 }

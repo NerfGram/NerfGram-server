@@ -447,6 +447,16 @@ func TestMessagesGetSavedDialogsByID(t *testing.T) {
 func TestMessagesGetSavedHistoryFiltersBySavedPeer(t *testing.T) {
 	ctx := context.Background()
 	r, _, alice, bob, noteID, fwdID := savedDialogsFixture(t)
+	verify := newFakeBotVerifications()
+	r.deps.BotVerifications = verify
+	const savedHistoryIcon = int64(8800022)
+	bobPeer := domain.Peer{Type: domain.PeerTypeUser, ID: bob.ID}
+	verify.marks[bobPeer] = domain.CustomVerification{
+		VerifierBotID:  777000123,
+		Peer:           bobPeer,
+		IconDocumentID: savedHistoryIcon,
+		Description:    "Verified saved peer",
+	}
 
 	bobHistory, err := r.onMessagesGetSavedHistory(WithUserID(ctx, alice.ID), &tg.MessagesGetSavedHistoryRequest{
 		Peer:  &tg.InputPeerUser{UserID: bob.ID, AccessHash: bob.AccessHash},
@@ -455,6 +465,7 @@ func TestMessagesGetSavedHistoryFiltersBySavedPeer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getSavedHistory bob: %v", err)
 	}
+	assertMessagesEnvelopeBotVerificationIcon(t, bobHistory, bobPeer, savedHistoryIcon)
 	bobMsgs := savedHistoryMessages(t, bobHistory)
 	if len(bobMsgs) != 1 || bobMsgs[0].ID != fwdID {
 		t.Fatalf("bob saved history = %+v, want forwarded message only", bobMsgs)

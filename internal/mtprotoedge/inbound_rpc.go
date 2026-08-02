@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -542,6 +543,60 @@ func (c *Conn) dropInboundRPCSpecs(specs []inboundRPCSpec, reason string) {
 	for _, spec := range specs {
 		c.metrics.InboundRPCDropped(spec.method, reason)
 	}
+}
+
+// growEntry raises one provisional task's materialization charge without a
+// release/reacquire window. Exact gzip admission calls this after the expanded
+// size is known but before the generated typed decoder can allocate the request
+// graph. A failure leaves every existing reservation unchanged so the caller
+// can reject and abort the whole container atomically.
+func (r *inboundRPCBatchReservation) growEntry(index, targetSize int) error {
+	if r == nil || index < 0 || index >= len(r.entries) || targetSize < 0 {
+		return errInboundRPCBatchSelection
+	}
+	entry := &r.entries[index]
+	if targetSize <= entry.size {
+		return nil
+	}
+	if entry.global == nil || entry.global.scheduler == nil || entry.global.released.Load() {
+		return ErrConnClosed
+	}
+	delta := int64(targetSize) - int64(entry.size)
+	scheduler := entry.global.scheduler
+	conn := r.conn
+
+	// Match initial admission's lock order: global scheduler budget, then the
+	// connection queue budget. Release paths never hold rpcMu while acquiring
+	// budgetMu, so this cannot invert task completion or close.
+	scheduler.budgetMu.Lock()
+	defer scheduler.budgetMu.Unlock()
+	select {
+	case <-scheduler.stopCh:
+		return ErrConnClosed
+	default:
+	}
+	if delta > scheduler.maxBytes-scheduler.bytes {
+		return fmt.Errorf("%w: grow exact admission global byte budget by %d", ErrInboundRPCQueueFull, delta)
+	}
+
+	conn.rpcMu.Lock()
+	defer conn.rpcMu.Unlock()
+	if err := r.ctx.Err(); err != nil {
+		return err
+	}
+	if conn.rpcClosed || conn.isRetired() {
+		return ErrConnClosed
+	}
+	if delta > int64(maxInflightRPCBytes)-conn.inflightRPCBytes.Load() {
+		return fmt.Errorf("%w: grow exact admission connection byte budget by %d", ErrInboundRPCQueueFull, delta)
+	}
+
+	scheduler.bytes += delta
+	entry.global.size += delta
+	entry.size = targetSize
+	r.totalSize += delta
+	conn.inflightRPCBytes.Add(delta)
+	return nil
 }
 
 // retain keeps a subset of a provisional batch on the original connection and

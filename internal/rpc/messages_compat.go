@@ -42,11 +42,13 @@ func (r *Router) onMessagesGetSavedHistory(ctx context.Context, req *tg.Messages
 			if req.Hash != 0 {
 				return &tg.MessagesMessagesNotModified{Count: 0}, nil
 			}
-			return &tg.MessagesMessages{
+			result := &tg.MessagesMessages{
 				Messages: []tg.MessageClass{},
 				Chats:    r.savedHistoryChats(ctx, userID, hasParent, parentPeer, req.Peer),
 				Users:    []tg.UserClass{},
-			}, nil
+			}
+			r.applyPeerReadModelsToMessages(ctx, userID, result)
+			return result, nil
 		}
 		// parent_peer = monoforum:返回该订阅者(req.Peer)在频道私信内的历史。
 		return r.monoforumSavedHistory(ctx, userID, mono, savedPeer, req.Limit, req.OffsetID)
@@ -83,6 +85,7 @@ func (r *Router) onMessagesGetSavedHistory(ctx context.Context, req *tg.Messages
 			m.Chats = mergeTGChats(m.Chats, chats)
 		}
 	}
+	r.applyPeerReadModelsToMessages(ctx, userID, out)
 	return out, nil
 }
 
@@ -380,7 +383,7 @@ func (r *Router) webPagePreviewMedia(ctx context.Context, message string, entiti
 
 // resolveWebPageForRequest 为交互式读 RPC 解析链接预览：先查缓存（LookupWebPage，命中即返回，
 // 不抓取不阻塞）；未命中才同步抓取，但用受限短预算（webpageRequestResolveBudget）而非异步解析
-// 的 20s，避免慢/挂上游把 RPC worker 钉死。命中（含负缓存的 empty）返回 ok=true，调用方据 state
+// 的 30s，避免慢/挂上游把 RPC worker 钉死。命中（含负缓存的 empty）返回 ok=true，调用方据 state
 // 决定；抓取失败返回 false。未启用返回 false。
 func (r *Router) resolveWebPageForRequest(ctx context.Context, url string) (domain.MessageWebPage, bool) {
 	if page, ok := r.resolveAIComposeStyleWebPage(ctx, url); ok {

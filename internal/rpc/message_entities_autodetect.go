@@ -6,6 +6,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/iamxvbaba/td/tg"
+
+	"telesrv/internal/links"
 )
 
 // 服务端自动实体检测：@mention / #hashtag / $cashtag / bot command。
@@ -24,26 +26,21 @@ import (
 // augmentAutoEntities 在客户端已发实体基础上补充服务端检测的自动实体。补充项与任何
 // 已有实体(客户端富文本意图实体或先补入的自动实体)区间相交时丢弃,避免把 mention/
 // hashtag 打进 code/pre/textUrl/已有 mentionName 内部或彼此重叠(对齐官方不重复打实体)。
-// 客户端已带 url/textUrl 实体(自行检测过,如 DrKLO)时跳过 url 检测,沿用既有口径。
-// 客户端实体保持在前(超过上限裁剪时优先保留),结果裁剪到实体上限。
-func augmentAutoEntities(message string, entities []tg.MessageEntityClass) []tg.MessageEntityClass {
+// URL 按跨度逐条补缺，不能因客户端带了某一条 HTTP URL 就跳过同消息中客户端不认识的
+// app-link。客户端实体保持在前(超过上限裁剪时优先保留),结果裁剪到实体上限。
+func augmentAutoEntities(message string, entities []tg.MessageEntityClass, appLinks links.AppLinkBuilder) []tg.MessageEntityClass {
 	// 快路径:绝大多数消息不含任何可自动识别的触发字符。单次 ContainsAny 扫描即短路返回,
 	// 跳过下面各检测器对全文的扫描与区间分配(纯文本发送零额外开销)。所有 http(s) 链接
 	// 都含 '/',故 "@#$/" 一并覆盖 url 检测;email/phone 未实现故不在触发集内。
 	if message == "" || !strings.ContainsAny(message, "@#$/") {
 		return entities
 	}
-	hasClientURL := false
 	type interval struct{ start, end int }
 	occupied := make([]interval, 0, len(entities)+8)
 	for _, e := range entities {
 		if ln := e.GetLength(); ln > 0 {
 			off := e.GetOffset()
 			occupied = append(occupied, interval{off, off + ln})
-		}
-		switch e.(type) {
-		case *tg.MessageEntityURL, *tg.MessageEntityTextURL:
-			hasClientURL = true
 		}
 	}
 	overlaps := func(s, e int) bool {
@@ -75,9 +72,9 @@ func augmentAutoEntities(message string, entities []tg.MessageEntityClass) []tg.
 	}
 
 	// URL 跨度始终计算并加入排除区(occupied),使 @mention/#hashtag 等不会落进 URL 路径内部
-	// (如 https://t.me/@scam 的 @scam,既不符官方语义也是钓鱼风险);但仅在客户端未带任何
-	// url/textUrl 实体时才作为实体下发,沿用 all-or-nothing(DrKLO 一带即全带;TDesktop 不带、依赖服务端)。
-	for _, u := range detectURLEntities(message) {
+	// (如 https://t.me/@scam 的 @scam,既不符官方语义也是钓鱼风险)。逐跨度补缺可覆盖
+	// “客户端带 HTTP entity、但不认识 telesrv://”的混合消息，同时仍避免重复实体。
+	for _, u := range detectURLEntities(message, appLinks) {
 		ln := u.GetLength()
 		if ln <= 0 {
 			continue
@@ -87,7 +84,7 @@ func augmentAutoEntities(message string, entities []tg.MessageEntityClass) []tg.
 			continue
 		}
 		occupied = append(occupied, interval{off, off + ln})
-		if !hasClientURL && len(entities)+len(extra) < maxMessageEntityCount {
+		if len(entities)+len(extra) < maxMessageEntityCount {
 			extra = append(extra, u)
 		}
 	}
@@ -112,6 +109,10 @@ func augmentAutoEntities(message string, entities []tg.MessageEntityClass) []tg.
 	out := make([]tg.MessageEntityClass, 0, len(entities)+len(extra))
 	out = append(out, entities...)
 	return append(out, extra...)
+}
+
+func (r *Router) augmentAutoEntities(message string, entities []tg.MessageEntityClass) []tg.MessageEntityClass {
+	return augmentAutoEntities(message, entities, r.appLinks)
 }
 
 // isWordRune 判定「单词字符」(用于实体前导边界:前一个字符是单词字符时不是新实体起点,

@@ -47,6 +47,14 @@ type AuthService interface {
 	ResetAuthorizations(ctx context.Context, userID int64, keepAuthKeyID [8]byte) ([]domain.Authorization, error)
 }
 
+type AuthDeliveryReportService interface {
+	ReportMissingCode(ctx context.Context, req domain.AuthMissingCodeReportRequest) (domain.AuthDeliveryReport, bool, error)
+}
+
+type ClientTelemetryService interface {
+	Record(ctx context.Context, userID int64, kind domain.ClientTelemetryKind, peer domain.Peer, subjectIDs []int64, payload any, createdAt time.Time) (domain.ClientTelemetryEvent, bool, error)
+}
+
 // SessionBinder 抽象登录后 session 与 user 的在线绑定。
 //
 // MTProto session 的完整身份是 raw auth_key_id + session_id。所有定位单个 session
@@ -206,6 +214,16 @@ type OnlineUserProvider interface {
 	OnlineChannelMemberUserIDs(channelID int64, limit int) []int64
 }
 
+// ChannelSubscriptionProvider is the bounded process-local implementation of
+// Telegram's public-channel short-poll subscription. A successful
+// updates.getChannelDifference refresh from one session enables passive channel
+// updates for the whole user account until the subscription expires.
+type ChannelSubscriptionProvider interface {
+	RefreshChannelSubscription(rawAuthKeyID [8]byte, sessionID, userID, channelID int64, ttl time.Duration)
+	OnlineChannelSubscriberUserIDs(channelID int64, limit int) []int64
+	OnlineChannelSubscriberUserIDsExcluding(channelID int64, exclude map[int64]struct{}, limit int) []int64
+}
+
 // ChannelNudgeProvider 暴露「频道在线成员中排除已投递集合后的剩余 user id」，用于 >cap
 // 在线成员的 UpdateChannelTooLong nudge（P0-8）。SessionManager 实现；测试/未装配 fake 可不实现
 // （type-assert 失败时跳过 nudge，不影响完整 payload 投递）。
@@ -241,13 +259,22 @@ type UsersService interface {
 	ByIDs(ctx context.Context, currentUserID int64, userIDs []int64) ([]domain.User, error)
 }
 
-// CollectibleUsernameService serves admin-assigned Fragment-style collectible
-// username metadata (backs fragment.getCollectibleInfo) and lets the owner
-// switch which of their usernames is active (backs account.toggleUsername).
-type CollectibleUsernameService interface {
-	Get(ctx context.Context, username string) (domain.CollectibleUsername, bool, error)
-	SetActive(ctx context.Context, username string, ownerUserID int64, active bool) error
-	DeactivateAllForOwner(ctx context.Context, ownerUserID int64) error
+// TelegramLoginService is the domain-only boundary shared by the MTProto RPC
+// edge and the public OIDC provider. PostgreSQL remains authoritative for all
+// consent transitions; the RPC layer only projects domain state to TL.
+type TelegramLoginService interface {
+	ValidateMessageButton(ctx context.Context, botUserID int64, rawURL string) (normalizedURL, domainName string, err error)
+	AuthorizeMessageButton(ctx context.Context, params domain.TelegramLoginMessageButtonAuthorization) (domain.TelegramLoginMessageButtonResult, error)
+	RequestByDeepLink(ctx context.Context, deepLink string) (domain.TelegramLoginRequest, error)
+	RequestByDeepLinkForOrigin(ctx context.Context, deepLink, inAppOrigin string) (domain.TelegramLoginRequest, error)
+	CheckMatchCode(ctx context.Context, deepLink, selected string) (bool, error)
+	Approve(ctx context.Context, deepLink string, identity domain.TelegramLoginIdentitySnapshot, writeAllowed, phoneShared bool, matchCode string) (domain.TelegramLoginRequest, domain.TelegramLoginWebAuthorization, error)
+	FinalizeRedirectByDeepLink(ctx context.Context, deepLink string) (string, error)
+	FinalizeInAppRedirectByDeepLink(ctx context.Context, deepLink string) (string, error)
+	Decline(ctx context.Context, deepLink string, userID int64) (domain.TelegramLoginRequest, error)
+	ListWebAuthorizations(ctx context.Context, userID int64) ([]domain.TelegramLoginWebAuthorization, error)
+	RevokeWebAuthorization(ctx context.Context, userID, hash int64) error
+	RevokeAllWebAuthorizations(ctx context.Context, userID int64) (int64, error)
 }
 
 // BatchViewerUsersResolver 是 UsersService 的可选能力：跨多个 viewer 一次性投影同一组 user
@@ -300,6 +327,27 @@ type BotsService interface {
 	PutWebViewCustomMethodQuery(ctx context.Context, botUserID, userID int64, method, paramsJSON string) (domain.BotWebViewCustomMethodQuery, error)
 }
 
+// ServiceBotCallbacks answers inline-button clicks for the built-in bots that run
+// inside this process (@verifybot and friends); app/bots implements it.
+//
+// It exists because the ordinary callback path cannot serve them: an internal bot
+// has no MTProto session to receive updateBotCallbackQuery and no Bot API consumer
+// to drain the update queue, so pushing the query at it and waiting could only
+// ever end in BOT_RESPONSE_TIMEOUT after the full 25-second window. A bot claimed
+// here is answered synchronously instead, by the responder that owns it.
+//
+// OnCallbackQuery reports handled=false when the bot is not one of the responder's
+// own, which the edge treats as invalid callback data. The answer is final:
+// nothing is registered in the shared callback registry for it, so no external
+// setBotCallbackAnswer can overwrite or spoof it.
+//
+// A nil Deps.ServiceBotCallbacks keeps the edge behaviour exactly as it was:
+// every callback is pushed to the bot's session and waited on.
+type ServiceBotCallbacks interface {
+	HandlesBot(botUserID int64) bool
+	OnCallbackQuery(ctx context.Context, query domain.BotCallbackQuery) (domain.BotCallbackAnswer, bool, error)
+}
+
 // UserIdentityService 是 UsersService 的资料扩展能力，用于 username/phone 解析。
 type UserIdentityService interface {
 	CheckUsername(ctx context.Context, userID int64, username string) (bool, error)
@@ -307,7 +355,6 @@ type UserIdentityService interface {
 	UpdateUsername(ctx context.Context, userID int64, username string) (domain.User, error)
 	UpdateBirthday(ctx context.Context, userID int64, birthday domain.Birthday) (domain.User, error)
 	UpdatePersonalChannel(ctx context.Context, userID int64, channelID int64) (domain.User, error)
-	SetMainProfileTab(ctx context.Context, userID int64, tab string) (domain.User, error)
 	ResolveUsername(ctx context.Context, currentUserID int64, username string) (domain.User, bool, error)
 	ResolvePhone(ctx context.Context, currentUserID int64, phone string) (domain.User, bool, error)
 }
@@ -449,7 +496,6 @@ type UpdatesService interface {
 	RecordDialogFilterOrder(ctx context.Context, stateAuthKeyID [8]byte, userID int64, order []int, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error)
 	RecordDialogFiltersReload(ctx context.Context, stateAuthKeyID [8]byte, userID int64, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error)
 	RecordFolderPeers(ctx context.Context, stateAuthKeyID [8]byte, userID int64, peers []domain.FolderPeerUpdate, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error)
-	RecordChannelAvailableMessages(ctx context.Context, stateAuthKeyID [8]byte, userID, channelID int64, availableMinID int, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error)
 	RecordChannelViewForumAsMessages(ctx context.Context, stateAuthKeyID [8]byte, userID, channelID int64, enabled bool, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error)
 	RecordChannelDiscussionInbox(ctx context.Context, stateAuthKeyID [8]byte, userID, channelID int64, topicID, maxID int, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error)
 	RecordDraftMessage(ctx context.Context, stateAuthKeyID [8]byte, userID int64, peer domain.Peer, topMsgID int, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error)
@@ -538,6 +584,8 @@ type MessagesService interface {
 	GetOutboxReadDate(ctx context.Context, userID int64, req domain.OutboxReadDateRequest) (int, error)
 	SetMessageReactions(ctx context.Context, userID int64, req domain.SetPrivateMessageReactionsRequest) (domain.PrivateMessageReactionsResult, error)
 	GetMessageReactions(ctx context.Context, userID int64, req domain.PrivateMessageReactionsRequest) (domain.PrivateMessageReactionsResult, error)
+	SavedReactionTags(ctx context.Context, userID int64, savedPeer domain.Peer, limit int) ([]domain.SavedReactionTag, error)
+	UpdateSavedReactionTag(ctx context.Context, userID int64, tag domain.SavedReactionTag) error
 	VoteMessagePoll(ctx context.Context, userID int64, req domain.VotePrivateMessagePollRequest) (domain.PrivateMessagePollResult, error)
 	CloseMessagePoll(ctx context.Context, userID int64, req domain.ClosePrivateMessagePollRequest) (domain.PrivateMessagePollResult, error)
 	ListUnreadReactionMessages(ctx context.Context, userID int64, peer domain.Peer, limit int) ([]domain.Message, error)
@@ -553,6 +601,13 @@ type MessagesService interface {
 	ToggleSavedDialogPin(ctx context.Context, userID int64, peer domain.Peer, pinned bool) (bool, error)
 	ReorderPinnedSavedDialogs(ctx context.Context, userID int64, order []domain.Peer, force bool) error
 	DeleteSavedHistory(ctx context.Context, userID int64, req domain.DeleteSavedHistoryRequest) (domain.DeleteSavedHistoryResult, error)
+}
+
+// PrivateNoForwardsService is an optional messages capability used by the
+// private-user branch of messages.toggleNoForwards and userFull projection.
+type PrivateNoForwardsService interface {
+	GetPrivateNoForwards(ctx context.Context, userID, peerUserID int64) (domain.PrivateNoForwardsState, error)
+	TogglePrivateNoForwards(ctx context.Context, userID int64, req domain.TogglePrivateNoForwardsRequest) (domain.TogglePrivateNoForwardsResult, error)
 }
 
 // TranslationService owns read-only translation and the durable per-account
@@ -661,11 +716,10 @@ type ChannelsService interface {
 	VoteMessagePoll(ctx context.Context, userID int64, req domain.VoteChannelMessagePollRequest) (domain.ChannelMessagePollResult, error)
 	CloseMessagePoll(ctx context.Context, userID int64, req domain.CloseChannelMessagePollRequest) (domain.ChannelMessagePollResult, error)
 	ListMessageReactions(ctx context.Context, userID int64, req domain.ChannelMessageReactionsListRequest) (domain.ChannelMessageReactionsList, error)
+	FindMessageReaction(ctx context.Context, userID int64, req domain.ChannelMessageReactionLookupRequest) (domain.ChannelMessageReactionLookup, bool, error)
 	TopReactions(ctx context.Context, userID int64, limit int) ([]domain.MessageReaction, error)
 	RecentReactions(ctx context.Context, userID int64, limit int) ([]domain.MessageReaction, error)
 	ClearRecentReactions(ctx context.Context, userID int64) error
-	SavedReactionTags(ctx context.Context, userID int64, limit int) ([]domain.SavedReactionTag, error)
-	UpdateSavedReactionTag(ctx context.Context, userID int64, tag domain.SavedReactionTag) error
 	GetPremiumBoostStatus(ctx context.Context, userID, channelID int64, now int) (domain.PremiumBoostStatus, error)
 	ListPremiumBoosts(ctx context.Context, userID, channelID int64, gifts bool, offset string, limit, now int) (domain.PremiumBoostList, error)
 	GetPremiumMyBoosts(ctx context.Context, userID int64, now, premiumUntil int) (domain.PremiumMyBoosts, error)
@@ -742,6 +796,19 @@ type ChannelsService interface {
 	AppendStarGiftAdminLog(ctx context.Context, channelID, senderUserID int64, savedID int64, date int, action domain.ChannelMessageAction) error
 	InviteAdminMemberIDs(ctx context.Context, channelID int64, limit int) ([]int64, error)
 	FilterActiveMemberIDs(ctx context.Context, channelID int64, userIDs []int64) ([]int64, error)
+}
+
+// ChannelMessageAudienceService is the optional production authorization
+// boundary for public short-poll subscribers. Lightweight test/domain adapters
+// that only model joined members may omit it and retain member-only behavior.
+type ChannelMessageAudienceService interface {
+	FilterMessageAudienceIDs(ctx context.Context, channelID int64, userIDs []int64) ([]int64, error)
+}
+
+// ChannelAuthoritativeProjectionService bypasses long-lived channel read
+// models for a durable channel_state refresh emitted by an admin mutation.
+type ChannelAuthoritativeProjectionService interface {
+	GetChannelsAuthoritative(ctx context.Context, userID int64, channelIDs []int64) ([]domain.ChannelView, error)
 }
 
 // CommunitiesService abstracts the Layer 228 Community aggregation domain.
@@ -867,9 +934,106 @@ type EphemeralService interface {
 	ReportTarget(ctx context.Context, userID int64, device domain.EphemeralDevice, peer domain.Peer, id int) (domain.EphemeralMessage, error)
 }
 
+// ModerationService accepts only final report choices. Implementations must
+// validate and snapshot referenced evidence, then durably commit the immutable
+// submission before returning success.
+type ModerationService interface {
+	ReportPeer(ctx context.Context, reporterUserID int64, source domain.ModerationReportSource, target domain.Peer, reason domain.ModerationReason, option, comment string, createdAt time.Time) (domain.ModerationReport, bool, error)
+	ReportMessages(ctx context.Context, req domain.ModerationMessageReportRequest) (domain.ModerationReport, bool, error)
+	ReportProfilePhoto(ctx context.Context, req domain.ModerationProfilePhotoReportRequest) (domain.ModerationReport, bool, error)
+	ReportChannelSpam(ctx context.Context, req domain.ModerationChannelSpamReportRequest) (domain.ModerationReport, bool, error)
+	ReportReaction(ctx context.Context, req domain.ModerationReactionReportRequest) (domain.ModerationReport, bool, error)
+	ReportEncryptedSpam(ctx context.Context, reporterUserID int64, chat domain.SecretChat, createdAt time.Time) (domain.ModerationReport, bool, error)
+	ReportStories(ctx context.Context, req domain.ModerationStoryReportRequest) (domain.ModerationReport, bool, error)
+	ReportEphemeral(ctx context.Context, reporterUserID int64, target domain.EphemeralMessage, reason domain.ModerationReason, option, comment string, createdAt time.Time) (domain.ModerationReport, bool, error)
+	SponsoredImpression(ctx context.Context, userID int64, randomID []byte, now time.Time) (domain.SponsoredMessageImpression, error)
+	ReportSponsored(ctx context.Context, userID int64, randomID []byte, reason domain.ModerationReason, option string, now time.Time) (domain.ModerationReport, bool, error)
+	ReportAntiSpamFalsePositive(ctx context.Context, reporterUserID, channelID int64, messageID int, now time.Time) (domain.ModerationReport, bool, error)
+}
+
+// PremiumPromoService exposes the immutable promo media catalog through a
+// domain-only boundary. File bytes remain served by upload.getFile through the
+// ordinary Files service.
+type PremiumPromoService interface {
+	PremiumPromo(ctx context.Context) (domain.PremiumPromoCatalog, bool, error)
+}
+
+// UsernameRegistryService is the collectible (Fragment-style) username registry
+// boundary. It owns the full per-peer username list -- the editable slot the
+// client owns through account/channels.updateUsername plus every collectible
+// asset attached to the peer -- and the purchase record behind a collectible.
+//
+// The registry is deliberately optional. Every RPC surface that consults it must
+// degrade to the legacy single-editable-username behaviour when the field is nil
+// or a call fails, because the scalar users.username / channels.username column
+// remains the editable-name persistence slot.
+type UsernameRegistryService interface {
+	// PeerUsernames returns one peer's full username list. Order is irrelevant:
+	// callers project through domain.SortUsernames.
+	PeerUsernames(ctx context.Context, peer domain.Peer) ([]domain.Username, error)
+	// UsernamesBatch is the N+1-free variant used by list projections. Peers with
+	// no registry row may be omitted from the result map.
+	UsernamesBatch(ctx context.Context, peers []domain.Peer) (map[domain.Peer][]domain.Username, error)
+	// ToggleUsername activates/deactivates one collectible username. The bool
+	// reports whether anything changed; false maps to USERNAME_NOT_MODIFIED.
+	ToggleUsername(ctx context.Context, peer domain.Peer, username string, active bool) (bool, error)
+	// ReorderUsernames rewrites the active username display order, including the
+	// editable slot when present (domain.ValidateUsernameReorder).
+	ReorderUsernames(ctx context.Context, peer domain.Peer, order []string) (bool, error)
+	// DeactivateAllUsernames deactivates every collectible username of the peer.
+	DeactivateAllUsernames(ctx context.Context, peer domain.Peer) (bool, error)
+	// Collectible returns the asset and owner needed by the RPC edge to enforce
+	// fragment visibility before projecting fragment.collectibleInfo.
+	Collectible(ctx context.Context, username string) (domain.CollectibleUsername, error)
+}
+
+// AccountRatingService exposes the stored gramsrv composite rating used by the
+// userFull rating projection.
+//
+// It is deliberately read-only at the RPC boundary: ratings are computed by the
+// bounded background worker, while profile reads only fetch the latest stored
+// projection. A nil service or a read failure leaves every rating flag unset.
+type AccountRatingService interface {
+	Rating(ctx context.Context, userID int64) (domain.AccountRating, error)
+}
+
+// BotVerificationService is the third-party bot verification boundary
+// (core.telegram.org/api/bots/verification): a verifier bot marking peers with its
+// own icon and description, which official clients render as a badge distinct from
+// the operator-granted checkmark.
+//
+// It is the single source for every surface that projects the feature --
+// user.bot_verification_icon, channel.bot_verification_icon,
+// userFull.bot_verification, channelFull.bot_verification,
+// chatInvite.bot_verification and botInfo.verifier_settings -- so no two responses
+// can disagree about which mark a peer carries.
+//
+// Optional like UsernameRegistryService: a nil field, or
+// any read error, must leave every flag unset and bots.setCustomVerification
+// answering BOT_VERIFIER_FORBIDDEN, which is exactly the pre-feature wire shape.
+type BotVerificationService interface {
+	// PeerVerification returns the peer's single mark, or
+	// domain.ErrCustomVerificationNotFound.
+	PeerVerification(ctx context.Context, peer domain.Peer) (domain.CustomVerification, error)
+	// PeerVerificationBatch is the N+1-free variant used by the response-boundary
+	// overlay. Peers without a mark may be omitted from the result map.
+	PeerVerificationBatch(ctx context.Context, peers []domain.Peer) (map[domain.Peer]domain.CustomVerification, error)
+	// VerifierSettings reads one bot's verifier status, or
+	// domain.ErrVerifierNotFound.
+	VerifierSettings(ctx context.Context, botID int64) (domain.BotVerifierSettings, error)
+	// VerifierSettingsBatch resolves several bots at once for the botInfo
+	// projection; bots without verifier status may be omitted.
+	VerifierSettingsBatch(ctx context.Context, botIDs []int64) (map[int64]domain.BotVerifierSettings, error)
+	// SetCustomVerification applies bots.setCustomVerification. changed controls
+	// update fan-out only; the RPC returns Bool true for an idempotent success.
+	SetCustomVerification(ctx context.Context, req domain.SetCustomVerificationRequest) (changed bool, err error)
+}
+
 // Deps 按业务域注入服务接口。各域的 handler 注册见对应文件（auth.go / users.go / updates.go）。
 type Deps struct {
-	Auth AuthService
+	Auth                AuthService
+	AuthDeliveryReports AuthDeliveryReportService
+	ClientTelemetry     ClientTelemetryService
 	// AuthKeySessionLayers is the protocol-only durable ordering boundary for
 	// explicit invokeWithLayer evidence. Production must wire the same auth-key
 	// store used by the MTProto edge; nil is reserved for isolated router tests.
@@ -881,9 +1045,12 @@ type Deps struct {
 	AICompose            AIComposeService
 	Ephemeral            EphemeralService
 	EphemeralPush        store.EphemeralPushBroker
-	EphemeralReports     store.EphemeralReportStore
+	Moderation           ModerationService
 	Users                UsersService
-	CollectibleUsernames CollectibleUsernameService
+	Usernames            UsernameRegistryService
+	AccountRatings       AccountRatingService
+	BotVerifications     BotVerificationService
+	TelegramLogin        TelegramLoginService
 	Updates              UpdatesService
 	BootstrapUpdates     store.BootstrapUpdateJobStore
 	BotAPIUpdates        store.BotAPIUpdateStore
@@ -897,7 +1064,9 @@ type Deps struct {
 	Channels             ChannelsService
 	Communities          CommunitiesService
 	Files                FilesService
+	PremiumPromo         PremiumPromoService
 	Bots                 BotsService
+	ServiceBotCallbacks  ServiceBotCallbacks
 	Polls                PollsService
 	Phone                PhoneService
 	GroupCalls           GroupCallsService
@@ -949,6 +1118,7 @@ type GiftsService interface {
 	GiftByID(ctx context.Context, id int64) (domain.StarGift, bool, error)
 	GiftRevisionByID(ctx context.Context, revisionID int64) (domain.StarGift, bool, error)
 	CollectiblePreview(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
+	CollectiblePreviewSample(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
 	CollectibleAvailability(ctx context.Context, giftIDs []int64) (map[int64]domain.StarGiftCollectibleAvailability, error)
 	UniqueBySlug(ctx context.Context, slug string) (domain.UniqueStarGift, bool, error)
 	UniqueByID(ctx context.Context, uniqueGiftID int64) (domain.UniqueStarGift, bool, error)
@@ -989,7 +1159,7 @@ type GiftsService interface {
 	SetNotifications(ctx context.Context, userID, channelID int64, enabled bool) error
 	Withdraw(ctx context.Context, req domain.StarGiftWithdrawalRequest) (domain.StarGiftWithdrawal, error)
 	TonBalance(ctx context.Context, userID int64) (int64, error)
-	TonTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.TonTransactionPage, error)
+	TonTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error)
 	IssuePurchaseForm(ctx context.Context, form domain.StarGiftPurchaseForm) (domain.StarGiftPurchaseForm, error)
 	ValidatePurchaseForm(ctx context.Context, req domain.StarGiftPurchaseRequest) error
 	Purchase(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error)
@@ -1002,8 +1172,7 @@ type StarsService interface {
 	GetBalance(ctx context.Context, userID int64) (domain.StarsBalance, error)
 	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
-	ListTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.StarsTransactionPage, error)
-	TotalSpent(ctx context.Context, userID int64) (int64, error)
+	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
 }
 
 // SecretChatService 抽象私聊端对端加密（Secret Chat）握手状态机（app/secretchat）。

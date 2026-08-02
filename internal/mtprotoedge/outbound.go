@@ -50,8 +50,8 @@ const (
 	maxTrackedServerMsgIDs = 4096
 	maxTrackedAckedMsgIDs  = 1024
 	// maxTrackedServerBytes 是 pending（已发送待 ack、用于 resend）总 body 字节上限。
-	// 与 maxTrackedServerMsgIDs 并列：客户端从不 ack 时，大响应体按字节滚动丢弃，
-	// 防 pending 被「4096 条 × 大 body」撑爆。
+	// 与 maxTrackedServerMsgIDs 并列；到达任一上限后拒绝新可靠 frame，绝不滚动
+	// 丢弃尚未 ACK 的旧 frame。
 	maxTrackedServerBytes = 64 << 20 // 64 MiB
 	// Encrypted transport adds auth-key/msg-key, plaintext headers, randomized
 	// padding and codec framing. Reject before creating the two encryption buffers.
@@ -214,6 +214,12 @@ type encodedOutboundMessage struct {
 	layer             *outboundLayerBinding
 	compressed        bool
 	uncompressedBytes int
+	// replayMsgID/replaySeqNo identify an existing logical-session frame. They
+	// are populated only by the receipt ledger's outbox lookup, never by a newly
+	// encoded result. A replay writes that exact frame instead of allocating a
+	// second payload owner or a new MTProto message identity.
+	replayMsgID int64
+	replaySeqNo int32
 }
 
 type rpcResultDeliveryState uint32
@@ -263,7 +269,7 @@ type rpcResultDeliveryCoordinator struct {
 	// deferredToReplay is sticky while a successful initConnection retarget owns
 	// the logical hook. The ordinary source terminal may mark physical delivery,
 	// but only the alias restore barrier may claim the hook. On terminal alias
-	// failure the flag is released so a later completed-cache replay can retry.
+	// failure the flag is released so a later logical-outbox replay can retry.
 	deferredToReplay bool
 }
 
@@ -722,18 +728,25 @@ func cloneRPCResultForRequest(encoded *encodedOutboundMessage, reqMsgID int64, s
 	if shareDelivery {
 		delivery = encoded.delivery
 	}
+	var replayMsgID int64
+	var replaySeqNo int32
+	if reqMsgID == encoded.reqMsgID {
+		replayMsgID = encoded.replayMsgID
+		replaySeqNo = encoded.replaySeqNo
+	}
 	return &encodedOutboundMessage{
 		body: body, typeID: encoded.typeID, reqMsgID: reqMsgID,
 		priority: encoded.priority, delivery: delivery, compressed: encoded.compressed,
 		layer: encoded.layer, layerInvariant: encoded.layerInvariant,
 		uncompressedBytes: encoded.uncompressedBytes,
+		replayMsgID:       replayMsgID, replaySeqNo: replaySeqNo,
 	}, nil
 }
 
 // cloneRPCResultForRequestReserved charges the target connection's retained-body
 // budget before a retarget copy can exist. Even the same-req_id zero-copy case
-// needs a reservation: the replay/rewrap owner may outlive cache eviction while
-// it is queued, so its immutable body must remain independently pinned.
+// needs a reservation: the replay/rewrap attempt may outlive ACK/removal of its
+// source frame while queued, so its immutable body must remain independently pinned.
 func (c *Conn) cloneRPCResultForRequestReserved(
 	encoded *encodedOutboundMessage,
 	reqMsgID int64,
@@ -776,14 +789,20 @@ type outboundFrame struct {
 	// but their bytes must remain on the independent control budget for the full lifetime.
 	reservationBudget *outboundTrackedBudget
 	reqMsgID          int64
+	priority          outboundPriority
+	delivery          *rpcResultDelivery
+	compressed        bool
+	uncompressedBytes int
 	// layer is retained only for proactive session-bound frames so a later
 	// msg_resend_req cannot replay bytes from an obsolete profile epoch.
-	layer  *outboundLayerBinding
-	sentAt time.Time
-	sends  int
+	layer          *outboundLayerBinding
+	layerInvariant bool
+	sentAt         time.Time
+	sends          int
 }
 
 type outboundState struct {
+	mu          sync.Mutex
 	pending     map[int64]*outboundFrame
 	order       []int64
 	byRequest   map[int64]int64
@@ -793,6 +812,16 @@ type outboundState struct {
 	maxMessages int
 	maxBytes    int
 	budget      *outboundTrackedBudget
+	// sentContentMessages is logical-session state, not physical-connection
+	// state. Reserving a new content frame advances it before the first write so
+	// a failed write can be replayed with the same seq_no after reconnect.
+	sentContentMessages int32
+	lastMsgID           int64
+	// persistent becomes true once this state is owned by a logical session.
+	// Directly constructed Conns may start with actor-local ownership and be
+	// adopted only from the terminal callback after a failed first write; the
+	// actor must not release that outbox while the logical session retains it.
+	persistent atomic.Bool
 }
 
 // outboundTrackedBudget 是 body/control/write 三类预算共用的原子 byte-budget primitive。
@@ -1001,6 +1030,12 @@ func (c *Conn) startOutbound() {
 	c.outboundBulk = make(chan outboundOp, bulkSize)
 	c.outboundStop = make(chan struct{})
 	c.outboundDone = make(chan struct{})
+	// Publish the actor state before starting its goroutine. The pointer remains
+	// immutable for the physical Conn lifetime; logical-session adoption may only
+	// mark the existing state persistent.
+	if c.outboundState == nil {
+		c.outboundState = newOutboundState(c.outboundTrackedBudget)
+	}
 	go c.outboundLoop()
 }
 
@@ -1669,12 +1704,14 @@ func (c *Conn) endOutboundEnqueue() {
 }
 
 func (c *Conn) outboundLoop() {
-	state := newOutboundState(c.outboundTrackedBudget)
+	state := c.outboundState
 	ordinarySinceBulk := 0
 	defer func() {
-		// pending frames belong exclusively to this actor. Releasing after drain ensures no
-		// resend path can race the final budget return and no Conn body survives actor exit.
-		state.releaseAll()
+		// A Server Conn leaves pending frames with the logical session. Standalone
+		// construction/tests retain the old actor-local ownership boundary.
+		if !state.persistent.Load() {
+			state.releaseAll()
+		}
 		close(c.outboundDone)
 	}()
 	for {
@@ -1790,29 +1827,46 @@ func (c *Conn) handleOutboundOp(state *outboundState, op outboundOp) {
 	if op.kind != outboundSend {
 		defer op.releaseReservation(state.budget)
 	}
+	// Physical generations may overlap briefly during activation fencing. The
+	// logical-session mutex preserves one writer/seq/outbox state machine across
+	// both actors without transferring payload ownership. Terminal callbacks run
+	// only after unlock: publication may look the frame up in this same outbox.
+	state.mu.Lock()
+	var (
+		result outboundResult
+		acked  []outboundAcknowledgement
+	)
 	switch op.kind {
 	case outboundSend:
-		c.handleOutboundSend(state, op)
+		result.err = c.handleOutboundSend(state, op)
 	case outboundAck:
-		for _, reqMsgID := range state.ack(op.ids) {
-			if c.rpcResultAcked != nil {
-				c.rpcResultAcked(c, reqMsgID)
-			}
-		}
+		acked = state.ackWithDetails(op.ids)
 	case outboundQueryState:
-		op.finish(outboundResult{info: state.stateInfo(op.ids)})
+		result.info = state.stateInfo(op.ids)
 	case outboundResend:
-		info, err := c.handleOutboundResend(state, op.ctx, op.ids)
-		op.finish(outboundResult{info: info, err: err})
+		result.info, result.err = c.handleOutboundResend(state, op.ctx, op.ids)
 	case outboundResendByRequest:
-		resent, err := c.handleOutboundResendByRequest(state, op.ctx, op.reqMsgID)
-		op.finish(outboundResult{resent: resent, err: err})
+		result.resent, result.err = c.handleOutboundResendByRequest(state, op.ctx, op.reqMsgID)
 	default:
-		op.finish(outboundResult{err: fmt.Errorf("unknown outbound op %d", op.kind)})
+		result.err = fmt.Errorf("unknown outbound op %d", op.kind)
 	}
+	state.mu.Unlock()
+	for _, ack := range acked {
+		if metrics, ok := c.metrics.(LogicalOutboxMetrics); ok {
+			retainedFor := time.Duration(0)
+			if !ack.sentAt.IsZero() {
+				retainedFor = time.Since(ack.sentAt)
+			}
+			metrics.LogicalOutboxAcknowledged(ack.bytes, retainedFor, ack.reqMsgID != 0)
+		}
+		if ack.reqMsgID != 0 && c.rpcResultAcked != nil {
+			c.rpcResultAcked(c, ack.reqMsgID)
+		}
+	}
+	op.finish(result)
 }
 
-func (c *Conn) handleOutboundSend(state *outboundState, op outboundOp) {
+func (c *Conn) handleOutboundSend(state *outboundState, op outboundOp) error {
 	var binding *outboundLayerBinding
 	if op.encoded != nil {
 		binding = op.encoded.layer
@@ -1861,7 +1915,7 @@ func (c *Conn) handleOutboundSend(state *outboundState, op outboundOp) {
 	}
 	var frame *outboundFrame
 	if err == nil {
-		frame, err = c.buildFrame(op.ctx, op.msgType, op.msg, op.encoded)
+		frame, err = c.buildFrameWithState(op.ctx, op.msgType, op.msg, op.encoded, state)
 	}
 	// A profile-bound preparation can allocate a different body. Reserve the
 	// replacement before dropping the original prepared-body reservation. The
@@ -1875,11 +1929,30 @@ func (c *Conn) handleOutboundSend(state *outboundState, op outboundOp) {
 			reserved = len(frame.body)
 		}
 	}
-	if err == nil && frame != nil && frameNeedsAck(frame.typeID) {
-		// The queue reservation is transferred to pending after write. A frame larger
-		// than the per-Conn resend ceiling is rejected before any bytes hit the wire.
+	needsAck := err == nil && frame != nil && frameNeedsAck(frame.typeID)
+	replaying := false
+	if needsAck && frame.replayMsgID() != 0 {
+		if existing := state.pending[frame.msgID]; existing != nil {
+			frame = existing
+			replaying = true
+		}
+	}
+	if needsAck && !replaying {
+		// Transfer the producer reservation into the logical outbox before the
+		// first physical write. A write failure therefore remains replayable on a
+		// replacement connection with the same msg_id/seq_no.
 		if len(frame.body) > maxTrackedServerBytes {
 			err = ErrOutboundTrackedBudget
+		} else {
+			frame.reservedBytes = reserved
+			frame.reservationBudget = reservationBudget
+			if admitErr := state.admitReserved(frame); admitErr != nil {
+				frame.reservedBytes = 0
+				frame.reservationBudget = nil
+				err = admitErr
+			} else {
+				reserved = 0
+			}
 		}
 	}
 	if errors.Is(err, ErrOutboundTrackedBudget) {
@@ -1894,18 +1967,6 @@ func (c *Conn) handleOutboundSend(state *outboundState, op outboundOp) {
 	if err == nil {
 		err = c.writeFrame(op.ctx, frame)
 	}
-	if err == nil && frame != nil && frameNeedsAck(frame.typeID) {
-		// 写成功后才提交 content seq_no 递增（peekSeqNo 已按当前计数算好本帧 seq_no）。
-		c.commitContentSeqNo()
-		frame.reservedBytes = reserved
-		frame.reservationBudget = reservationBudget
-		reserved = 0
-		if dropped := state.addReserved(frame); dropped > 0 {
-			for i := 0; i < dropped; i++ {
-				c.metrics.OutboundDropped("tracked_queue_overflow")
-			}
-		}
-	}
 	queueWait := time.Since(op.enqueuedAt)
 	bytes := 0
 	typeID := uint32(0)
@@ -1914,7 +1975,7 @@ func (c *Conn) handleOutboundSend(state *outboundState, op outboundOp) {
 		typeID = frame.typeID
 	}
 	c.metrics.OutboundSend(typeID, queueWait, bytes, err)
-	op.finish(outboundResult{err: err})
+	return err
 }
 
 func (c *Conn) handleOutboundResend(state *outboundState, ctx context.Context, ids []int64) ([]byte, error) {
@@ -2141,6 +2202,16 @@ func (c *Conn) ensureOutboundControlTrackedBudget() *outboundTrackedBudget {
 }
 
 func (c *Conn) buildFrame(ctx context.Context, t proto.MessageType, msg bin.Encoder, encoded *encodedOutboundMessage) (*outboundFrame, error) {
+	return c.buildFrameWithState(ctx, t, msg, encoded, c.outboundState)
+}
+
+func (c *Conn) buildFrameWithState(
+	ctx context.Context,
+	t proto.MessageType,
+	msg bin.Encoder,
+	encoded *encodedOutboundMessage,
+	state *outboundState,
+) (*outboundFrame, error) {
 	if encoded == nil {
 		var err error
 		encoded, err = encodeOutboundMessage(msg)
@@ -2155,14 +2226,29 @@ func (c *Conn) buildFrame(ctx context.Context, t proto.MessageType, msg bin.Enco
 		return nil, ErrOutboundLayerBindingRequired
 	}
 	content := frameNeedsAck(encoded.typeID)
-	msgID := c.msgID.New(t)
+	msgID := encoded.replayMsgID
+	seqNo := encoded.replaySeqNo
+	if msgID == 0 {
+		msgID = c.msgID.New(t)
+		if state != nil {
+			msgID = state.reserveMsgID(msgID)
+			seqNo = state.peekSeqNo(content)
+		} else {
+			seqNo = c.peekSeqNo(content)
+		}
+	}
 	return &outboundFrame{
-		msgID:    msgID,
-		seqNo:    c.peekSeqNo(content),
-		typeID:   encoded.typeID,
-		body:     encoded.body,
-		reqMsgID: encoded.reqMsgID,
-		layer:    encoded.layer,
+		msgID:             msgID,
+		seqNo:             seqNo,
+		typeID:            encoded.typeID,
+		body:              encoded.body,
+		reqMsgID:          encoded.reqMsgID,
+		layer:             encoded.layer,
+		layerInvariant:    encoded.layerInvariant,
+		priority:          encoded.priority,
+		delivery:          encoded.delivery,
+		compressed:        encoded.compressed,
+		uncompressedBytes: encoded.uncompressedBytes,
 	}, nil
 }
 
@@ -2545,7 +2631,18 @@ func outboundRequestMsgID(msg bin.Encoder) int64 {
 
 // addReserved 接管调用方已经取得的全局 body 预算。pending 的每个元素恰好对应一份
 // reservation；后续只有 removePending/releaseAll 能归还。
-func (s *outboundState) addReserved(frame *outboundFrame) int {
+func (s *outboundState) admitReserved(frame *outboundFrame) error {
+	if _, exists := s.pending[frame.msgID]; exists {
+		return fmt.Errorf("mtprotoedge: duplicate outbound msg_id inserted into resend tracking")
+	}
+	if len(s.pending) >= s.maxMessages || s.totalBytes > s.maxBytes-len(frame.body) {
+		return ErrOutboundTrackedBudget
+	}
+	s.insertReserved(frame)
+	return nil
+}
+
+func (s *outboundState) insertReserved(frame *outboundFrame) {
 	if _, exists := s.pending[frame.msgID]; exists {
 		panic("mtprotoedge: duplicate outbound msg_id inserted into resend tracking")
 	}
@@ -2561,28 +2658,57 @@ func (s *outboundState) addReserved(frame *outboundFrame) int {
 		}
 		s.byRequest[frame.reqMsgID] = frame.msgID
 	}
+	if frameNeedsAck(frame.typeID) {
+		s.sentContentMessages++
+	}
+}
+
+// addReserved is retained as a focused-test helper. Production uses
+// admitReserved and never evicts an unacknowledged frame.
+func (s *outboundState) addReserved(frame *outboundFrame) int {
+	s.insertReserved(frame)
 	return s.shrinkPending()
 }
 
+type outboundAcknowledgement struct {
+	reqMsgID int64
+	bytes    int
+	sentAt   time.Time
+}
+
 func (s *outboundState) ack(ids []int64) []int64 {
-	var requestIDs []int64
+	details := s.ackWithDetails(ids)
+	requestIDs := make([]int64, 0, len(details))
+	for _, detail := range details {
+		if detail.reqMsgID != 0 {
+			requestIDs = append(requestIDs, detail.reqMsgID)
+		}
+	}
+	return requestIDs
+}
+
+func (s *outboundState) ackWithDetails(ids []int64) []outboundAcknowledgement {
+	var acknowledged []outboundAcknowledgement
 	for _, id := range ids {
 		frame, ok := s.pending[id]
 		if !ok {
 			continue
 		}
-		if frame.reqMsgID != 0 {
-			requestIDs = append(requestIDs, frame.reqMsgID)
+		detail := outboundAcknowledgement{
+			reqMsgID: frame.reqMsgID,
+			bytes:    len(frame.body),
+			sentAt:   frame.sentAt,
 		}
 		if !s.removePending(id) {
 			continue
 		}
 		s.markAcked(id)
+		acknowledged = append(acknowledged, detail)
 	}
 	if len(s.order) > s.maxMessages*2 {
 		s.compactOrder()
 	}
-	return requestIDs
+	return acknowledged
 }
 
 func (s *outboundState) stateInfo(ids []int64) []byte {
@@ -2619,6 +2745,8 @@ func (s *outboundState) markAcked(id int64) {
 	}
 }
 
+// shrinkPending remains only for focused legacy state tests. Production
+// admission never calls it: unacknowledged frames must not be silently evicted.
 func (s *outboundState) shrinkPending() int {
 	dropped := 0
 	for (len(s.pending) > s.maxMessages || s.totalBytes > s.maxBytes) && len(s.order) > 0 {
@@ -2652,6 +2780,8 @@ func (s *outboundState) removePending(id int64) bool {
 }
 
 func (s *outboundState) releaseAll() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, frame := range s.pending {
 		frame.body = nil
 		frame.releaseReservation(s.budget)
@@ -2660,6 +2790,58 @@ func (s *outboundState) releaseAll() {
 	s.order = nil
 	s.byRequest = nil
 	s.totalBytes = 0
+}
+
+func (s *outboundState) peekSeqNo(content bool) int32 {
+	seqNo := s.sentContentMessages * 2
+	if content {
+		seqNo++
+	}
+	return seqNo
+}
+
+func (s *outboundState) reserveMsgID(candidate int64) int64 {
+	if candidate <= s.lastMsgID {
+		candidate = s.lastMsgID + 4
+	}
+	for s.pending[candidate] != nil {
+		candidate += 4
+	}
+	s.lastMsgID = candidate
+	return candidate
+}
+
+func (s *outboundState) rpcResult(reqMsgID int64) (*encodedOutboundMessage, bool) {
+	if s == nil || reqMsgID == 0 {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgID := s.byRequest[reqMsgID]
+	frame := s.pending[msgID]
+	if frame == nil || frame.typeID != proto.ResultTypeID || len(frame.body) == 0 {
+		return nil, false
+	}
+	return &encodedOutboundMessage{
+		body:              frame.body,
+		typeID:            frame.typeID,
+		reqMsgID:          frame.reqMsgID,
+		priority:          frame.priority,
+		delivery:          frame.delivery,
+		layer:             frame.layer,
+		layerInvariant:    frame.layerInvariant,
+		compressed:        frame.compressed,
+		uncompressedBytes: frame.uncompressedBytes,
+		replayMsgID:       frame.msgID,
+		replaySeqNo:       frame.seqNo,
+	}, true
+}
+
+func (f *outboundFrame) replayMsgID() int64 {
+	if f == nil {
+		return 0
+	}
+	return f.msgID
 }
 
 func (f *outboundFrame) releaseReservation(defaultBudget *outboundTrackedBudget) {

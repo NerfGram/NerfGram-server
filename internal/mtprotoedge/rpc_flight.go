@@ -18,11 +18,12 @@ var (
 	ErrRPCResultSubscriberCapacity = errors.New("mtproto rpc result subscriber capacity exhausted")
 	ErrRPCResultFlightInvalid      = errors.New("mtproto rpc result in-flight claim is invalid")
 	ErrRPCResultIdentityMismatch   = errors.New("mtproto rpc result request identity mismatch")
+	ErrRPCResultReplayUnavailable  = errors.New("mtproto rpc result replay payload is unavailable")
 	ErrRPCAdmissionSeqExhausted    = errors.New("mtproto rpc admission sequence exhausted")
 )
 
 // rpcResultIdentityMismatchError carries the winner's immutable admission
-// profile from inside the cache shard critical section. A replacement Conn can
+// profile from inside the ledger shard critical section. A replacement Conn can
 // re-decode the same naked body under that grammar even if the winner aborts
 // immediately after the mismatch is returned.
 type rpcResultIdentityMismatchError struct {
@@ -50,8 +51,8 @@ type rpcResultRequestIdentity struct {
 
 func (i rpcResultRequestIdentity) matches(requested rpcResultRequestIdentity) bool {
 	if !requested.valid {
-		// Legacy service/test callers carry no API request identity and preserve
-		// the historical cache lookup behavior. Exact callers must always match.
+		// Service-message callers carry no API request identity. Exact API callers
+		// must always match the winner's full prepared identity.
 		return true
 	}
 	return i.valid && i.exact == requested.exact
@@ -61,6 +62,7 @@ type rpcResultAcquireState uint8
 
 const (
 	rpcResultAcquireCompleted rpcResultAcquireState = iota + 1
+	rpcResultAcquireAcknowledged
 	rpcResultAcquirePending
 	rpcResultAcquireOwner
 )
@@ -70,8 +72,10 @@ const (
 //
 // Exactly one state-specific field is non-nil:
 //   - completed: encoded contains the immutable completed rpc_result;
+//   - acknowledged: ACK won while the owner was still pending, so the duplicate
+//     must be ACK-only until that owner completes;
 //   - pending: waiter joins the already-running owner;
-//   - owner: owner must eventually complete through rpcResultCache.Put or Abort.
+//   - owner: owner must eventually complete through ledger Complete or Abort.
 type rpcResultAcquire struct {
 	state          rpcResultAcquireState
 	admissionSeq   uint64
@@ -82,8 +86,8 @@ type rpcResultAcquire struct {
 	executionOK    bool
 }
 
-// rpcResultFlight is not part of the completed cache TTL lifecycle. Its
-// done channel is closed exactly once while holding the owning cache shard lock;
+// rpcResultFlight is not part of the completed receipt TTL lifecycle. Its
+// done channel is closed exactly once while holding the owning ledger shard lock;
 // channel close publishes encoded/ok to all waiters without a waiter goroutine.
 type rpcResultFlight struct {
 	done                 chan struct{}
@@ -93,24 +97,29 @@ type rpcResultFlight struct {
 	executionDone        bool
 	executionOK          bool
 	executionSubscribers []func(bool)
+	// acknowledged is set only from the sole outbound actor's server-msg-id to
+	// request-msg-id mapping. It can win the race with asynchronous completion;
+	// publication then drops the receipt while still resolving waiters with the
+	// immutable result that was already written on the wire.
+	acknowledged bool
 	// subscriberSlots counts callbacks retained by this pending flight. Result
 	// and execution callbacks are charged independently; a replay alias installs
 	// both atomically so a capacity failure cannot leave half an alias behind.
 	subscriberSlots int
 	identity        rpcResultRequestIdentity
 	admissionSeq    uint64
-	// reservation owns one entry and at least one byte at global, raw-auth and
-	// session scopes. Put transfers it to a result/tombstone; Abort releases it.
-	reservation *rpcResultBudgetReservation
+	// reservation owns one entry at global, raw-auth and session scopes.
+	// Complete transfers it to a receipt/tombstone; Abort releases it.
+	reservation *rpcExecutionBudgetReservation
 }
 
 type rpcResultWaiter struct {
-	cache  *rpcResultCache
-	key    rpcResultCacheKey
+	ledger *rpcExecutionLedger
+	key    rpcExecutionKey
 	flight *rpcResultFlight
 }
 
-// Wait blocks until the owner publishes through Put, aborts, or ctx expires.
+// Wait blocks until the owner publishes through Complete, aborts, or ctx expires.
 // ok=false with err=nil means the owner aborted without a result.
 func (w *rpcResultWaiter) Wait(ctx context.Context) (encoded *encodedOutboundMessage, ok bool, err error) {
 	if w == nil || w.flight == nil || ctx == nil {
@@ -139,7 +148,7 @@ func (w *rpcResultWaiter) Wait(ctx context.Context) (encoded *encodedOutboundMes
 }
 
 // Subscribe registers an event callback without creating a goroutine or
-// occupying an RPC worker. The callback is invoked after the cache shard lock is
+// occupying an RPC worker. The callback is invoked after the ledger shard lock is
 // released; it must remain non-blocking.
 func (w *rpcResultWaiter) Subscribe(fn func(*encodedOutboundMessage, bool)) error {
 	if fn == nil {
@@ -177,10 +186,10 @@ func (w *rpcResultWaiter) subscribe(
 	resultFn func(*encodedOutboundMessage, bool),
 	executionFn func(bool),
 ) error {
-	if w == nil || w.cache == nil || w.flight == nil || (resultFn == nil && executionFn == nil) {
+	if w == nil || w.ledger == nil || w.flight == nil || (resultFn == nil && executionFn == nil) {
 		return ErrRPCResultFlightInvalid
 	}
-	s := w.cache.shard(w.key)
+	s := w.ledger.shard(w.key)
 	var (
 		encoded        *encodedOutboundMessage
 		resultOK       bool
@@ -198,8 +207,8 @@ func (w *rpcResultWaiter) subscribe(
 			slots++
 		}
 		if slots > 0 {
-			if flight.subscriberSlots > w.cache.subscriberPerFlight-slots ||
-				!w.cache.subscriberBudget.reserve(w.key, slots) {
+			if flight.subscriberSlots > w.ledger.subscriberPerFlight-slots ||
+				!w.ledger.subscriberBudget.reserve(w.key, slots) {
 				s.mu.Unlock()
 				return ErrRPCResultSubscriberCapacity
 			}
@@ -247,8 +256,8 @@ func (w *rpcResultWaiter) subscribe(
 }
 
 type rpcResultOwnerLease struct {
-	cache     *rpcResultCache
-	key       rpcResultCacheKey
+	ledger    *rpcExecutionLedger
+	key       rpcExecutionKey
 	flight    *rpcResultFlight
 	delivery  *rpcResultDelivery
 	hookMu    sync.Mutex
@@ -269,13 +278,13 @@ func (l *rpcResultOwnerLease) SetAbortHook(fn func()) {
 }
 
 // InstallAbortHook installs fn only while this lease still owns the pending
-// flight. The shard lock linearizes installation with Abort/Put so a registry
+// flight. The shard lock linearizes installation with Abort/Complete so a registry
 // cannot publish a candidate after its owner has already disappeared.
 func (l *rpcResultOwnerLease) InstallAbortHook(fn func()) bool {
-	if l == nil || l.cache == nil || l.flight == nil || fn == nil {
+	if l == nil || l.ledger == nil || l.flight == nil || fn == nil {
 		return false
 	}
-	s := l.cache.shard(l.key)
+	s := l.ledger.shard(l.key)
 	s.mu.Lock()
 	flight, ok := s.pending[l.key]
 	if !ok || flight != l.flight {
@@ -290,10 +299,10 @@ func (l *rpcResultOwnerLease) InstallAbortHook(fn func()) bool {
 }
 
 func (l *rpcResultOwnerLease) Waiter() *rpcResultWaiter {
-	if l == nil || l.cache == nil || l.flight == nil {
+	if l == nil || l.ledger == nil || l.flight == nil {
 		return nil
 	}
-	return &rpcResultWaiter{cache: l.cache, key: l.key, flight: l.flight}
+	return &rpcResultWaiter{ledger: l.ledger, key: l.key, flight: l.flight}
 }
 
 func (l *rpcResultOwnerLease) TryRetarget(reqMsgID int64) bool {
@@ -309,13 +318,13 @@ func (l *rpcResultOwnerLease) Delivery() *rpcResultDelivery {
 
 // CompleteExecution publishes the handler outcome exactly once while this
 // lease still owns the flight. success=false includes RPC errors, internal
-// failures and dependency failures. Delivery/cache completion remains a
+// failures and dependency failures. Delivery/ledger completion remains a
 // separate later transition.
 func (l *rpcResultOwnerLease) CompleteExecution(success bool) bool {
-	if l == nil || l.cache == nil || l.flight == nil {
+	if l == nil || l.ledger == nil || l.flight == nil {
 		return false
 	}
-	s := l.cache.shard(l.key)
+	s := l.ledger.shard(l.key)
 	s.mu.Lock()
 	flight, ok := s.pending[l.key]
 	if !ok || flight != l.flight || flight.executionDone {
@@ -326,7 +335,7 @@ func (l *rpcResultOwnerLease) CompleteExecution(success bool) bool {
 	flight.executionOK = success
 	subscribers := append([]func(bool){}, flight.executionSubscribers...)
 	flight.executionSubscribers = nil
-	l.cache.releaseFlightSubscriberSlotsLocked(l.key, flight, len(subscribers))
+	l.ledger.releaseFlightSubscriberSlotsLocked(l.key, flight, len(subscribers))
 	s.mu.Unlock()
 	for _, subscriber := range subscribers {
 		subscriber(success)
@@ -336,12 +345,12 @@ func (l *rpcResultOwnerLease) CompleteExecution(success bool) bool {
 
 // HandOff transfers completion responsibility from the inbound RPC task to an
 // already-admitted egress operation. The egress terminal callback must resolve
-// the flight through Put on both successful delivery and fenced failure.
+// the flight through Complete on both successful delivery and fenced failure.
 func (l *rpcResultOwnerLease) HandOff() bool {
-	if l == nil || l.cache == nil || l.flight == nil {
+	if l == nil || l.ledger == nil || l.flight == nil {
 		return false
 	}
-	s := l.cache.shard(l.key)
+	s := l.ledger.shard(l.key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	flight, ok := s.pending[l.key]
@@ -356,13 +365,13 @@ func (l *rpcResultOwnerLease) HandOff() bool {
 // result. Pointer identity prevents an old lease from deleting a later owner
 // that reacquired the same key. It returns true only for the winning abort.
 func (l *rpcResultOwnerLease) Abort() bool {
-	if l == nil || l.cache == nil || l.flight == nil {
+	if l == nil || l.ledger == nil || l.flight == nil {
 		return false
 	}
 	if l.handedOff.Load() {
 		return false
 	}
-	s := l.cache.shard(l.key)
+	s := l.ledger.shard(l.key)
 	s.mu.Lock()
 	if l.handedOff.Load() {
 		s.mu.Unlock()
@@ -379,13 +388,13 @@ func (l *rpcResultOwnerLease) Abort() bool {
 		flight.reservation.release()
 		flight.reservation = nil
 	}
-	l.cache.flightLimit.release()
-	l.cache.activeAdmissions.retire(flight.admissionSeq)
+	l.ledger.flightLimit.release()
+	l.ledger.activeAdmissions.retire(flight.admissionSeq)
 	subscribers := append([]func(*encodedOutboundMessage, bool){}, flight.subscribers...)
 	flight.subscribers = nil
 	executionSubscribers := append([]func(bool){}, flight.executionSubscribers...)
 	flight.executionSubscribers = nil
-	l.cache.releaseFlightSubscriberSlotsLocked(
+	l.ledger.releaseFlightSubscriberSlotsLocked(
 		l.key, flight, len(subscribers)+len(executionSubscribers),
 	)
 	if !flight.executionDone {
@@ -449,7 +458,7 @@ func (l *rpcResultFlightLimit) releaseN(delta int64) {
 		panic("mtproto rpc result counter release must be positive")
 	}
 	if remaining := l.used.Add(-delta); remaining < 0 {
-		// Put/Abort use map removal and lease identity to make double release
+		// Complete/Abort use map removal and lease identity to make double release
 		// impossible. Fail fast instead of masking a capacity-accounting bug that
 		// could otherwise admit more owners than the configured hard limit.
 		panic("mtproto rpc result in-flight counter underflow")
@@ -465,30 +474,30 @@ func (l *rpcResultFlightLimit) snapshot() int64 {
 
 // Acquire atomically returns a completed result, joins the existing in-flight
 // owner, or installs the unique owner lease. Pending entries have a separate
-// lifecycle from completed cache TTL but reserve the same global/auth/session
-// ownership that Put later transfers to a completed result or tombstone.
-func (c *rpcResultCache) Acquire(authKeyID [8]byte, sessionID, reqMsgID int64) (rpcResultAcquire, error) {
-	return c.acquire(authKeyID, sessionID, reqMsgID, rpcResultRequestIdentity{})
+// lifecycle from completed receipt TTL but reserve the same global/auth/session
+// ownership that Complete later transfers to a receipt or tombstone.
+func (l *rpcExecutionLedger) Acquire(authKeyID [8]byte, sessionID, reqMsgID int64) (rpcResultAcquire, error) {
+	return l.acquire(authKeyID, sessionID, reqMsgID, rpcResultRequestIdentity{})
 }
 
-func (c *rpcResultCache) AcquireIdentified(
+func (l *rpcExecutionLedger) AcquireIdentified(
 	authKeyID [8]byte,
 	sessionID, reqMsgID int64,
 	identity tlprofile.PreparedIdentity,
 ) (rpcResultAcquire, error) {
-	return c.acquire(authKeyID, sessionID, reqMsgID, rpcResultRequestIdentity{exact: identity, valid: true})
+	return l.acquire(authKeyID, sessionID, reqMsgID, rpcResultRequestIdentity{exact: identity, valid: true})
 }
 
 // AcquireLayerIdentified is the production exact-RPC claim. In addition to the
 // immutable full request identity it retains the admission profile required to
 // decode a later same-msg_id naked replay under its original grammar.
-func (c *rpcResultCache) AcquireLayerIdentified(
+func (l *rpcExecutionLedger) AcquireLayerIdentified(
 	authKeyID [8]byte,
 	sessionID, reqMsgID int64,
 	profile tlprofile.Profile,
 	identity tlprofile.PreparedIdentity,
 ) (rpcResultAcquire, error) {
-	return c.acquire(authKeyID, sessionID, reqMsgID, rpcResultRequestIdentity{
+	return l.acquire(authKeyID, sessionID, reqMsgID, rpcResultRequestIdentity{
 		exact: identity, profile: profile, valid: true,
 	})
 }
@@ -497,17 +506,17 @@ func (c *rpcResultCache) AcquireLayerIdentified(
 // owner/result. It does not create or join a flight. Callers still perform
 // AcquireLayerIdentified after decode, which atomically rejects a same-msg_id
 // body change by comparing the full prepared identity.
-func (c *rpcResultCache) ExactAdmissionProfile(authKeyID [8]byte, sessionID, reqMsgID int64) (tlprofile.Profile, bool) {
-	if c == nil || reqMsgID == 0 {
+func (l *rpcExecutionLedger) ExactAdmissionProfile(authKeyID [8]byte, sessionID, reqMsgID int64) (tlprofile.Profile, bool) {
+	if l == nil || reqMsgID == 0 {
 		return 0, false
 	}
-	key := rpcResultCacheKey{authKeyID: authKeyID, sessionID: sessionID, reqMsgID: reqMsgID}
-	s := c.shard(key)
+	key := rpcExecutionKey{authKeyID: authKeyID, sessionID: sessionID, reqMsgID: reqMsgID}
+	s := l.shard(key)
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if elem := s.byKey[key]; elem != nil {
-		entry := elem.Value.(*rpcResultCacheEntry)
+		entry := elem.Value.(*rpcExecutionReceipt)
 		if entry.expiresAt.After(now) {
 			if entry.identity.valid && entry.identity.profile != 0 {
 				return entry.identity.profile, true
@@ -522,16 +531,16 @@ func (c *rpcResultCache) ExactAdmissionProfile(authKeyID [8]byte, sessionID, req
 	return 0, false
 }
 
-func (c *rpcResultCache) acquire(
+func (l *rpcExecutionLedger) acquire(
 	authKeyID [8]byte,
 	sessionID, reqMsgID int64,
 	identity rpcResultRequestIdentity,
 ) (rpcResultAcquire, error) {
-	if c == nil || reqMsgID == 0 {
+	if l == nil || reqMsgID == 0 {
 		return rpcResultAcquire{}, ErrRPCResultFlightInvalid
 	}
-	key := rpcResultCacheKey{authKeyID: authKeyID, sessionID: sessionID, reqMsgID: reqMsgID}
-	s := c.shard(key)
+	key := rpcExecutionKey{authKeyID: authKeyID, sessionID: sessionID, reqMsgID: reqMsgID}
+	s := l.shard(key)
 	reclaimedExpired := false
 	for {
 		now := s.now()
@@ -539,20 +548,33 @@ func (c *rpcResultCache) acquire(
 		s.expireLocked(now)
 
 		if elem, ok := s.byKey[key]; ok {
-			entry := elem.Value.(*rpcResultCacheEntry)
+			entry := elem.Value.(*rpcExecutionReceipt)
 			if !entry.identity.matches(identity) {
 				s.mu.Unlock()
 				return rpcResultAcquire{}, identityMismatch(entry.identity)
 			}
-			if entry.capacity || entry.encoded == nil {
+			if entry.acknowledged {
+				result := rpcResultAcquire{
+					state: rpcResultAcquireAcknowledged, admissionSeq: entry.admissionSeq,
+					executionKnown: entry.executionKnown, executionOK: entry.executionOK,
+				}
+				s.mu.Unlock()
+				return result, nil
+			}
+			if entry.unavailable {
 				s.mu.Unlock()
 				return rpcResultAcquire{}, ErrRPCResultFlightCapacity
 			}
 			result := rpcResultAcquire{
-				state: rpcResultAcquireCompleted, admissionSeq: entry.admissionSeq, encoded: entry.encoded,
+				state: rpcResultAcquireCompleted, admissionSeq: entry.admissionSeq,
 				executionKnown: entry.executionKnown, executionOK: entry.executionOK,
 			}
 			s.mu.Unlock()
+			encoded, replayable := l.replayStore.rpcResult(authKeyID, sessionID, reqMsgID)
+			if !replayable {
+				return rpcResultAcquire{}, ErrRPCResultReplayUnavailable
+			}
+			result.encoded = encoded
 			return result, nil
 		}
 		if flight, ok := s.pending[key]; ok {
@@ -560,25 +582,29 @@ func (c *rpcResultCache) acquire(
 				s.mu.Unlock()
 				return rpcResultAcquire{}, identityMismatch(flight.identity)
 			}
+			if flight.acknowledged {
+				result := rpcResultAcquire{
+					state: rpcResultAcquireAcknowledged, admissionSeq: flight.admissionSeq,
+					executionKnown: flight.executionDone, executionOK: flight.executionOK,
+				}
+				s.mu.Unlock()
+				return result, nil
+			}
 			result := rpcResultAcquire{
 				state:        rpcResultAcquirePending,
 				admissionSeq: flight.admissionSeq,
-				waiter:       &rpcResultWaiter{cache: c, key: key, flight: flight},
+				waiter:       &rpcResultWaiter{ledger: l, key: key, flight: flight},
 			}
 			s.mu.Unlock()
 			return result, nil
 		}
-		if s.maxEntries > 0 && len(s.byKey)+len(s.pending) >= s.maxEntries {
+		if !l.flightLimit.reserve() {
 			s.mu.Unlock()
 			return rpcResultAcquire{}, ErrRPCResultFlightCapacity
 		}
-		if !c.flightLimit.reserve() {
-			s.mu.Unlock()
-			return rpcResultAcquire{}, ErrRPCResultFlightCapacity
-		}
-		reservation := c.fairBudget.reserveOwner(key)
+		reservation := l.fairBudget.reserveOwner(key)
 		if reservation == nil {
-			c.flightLimit.release()
+			l.flightLimit.release()
 			s.mu.Unlock()
 			if reclaimedExpired {
 				return rpcResultAcquire{}, ErrRPCResultFlightCapacity
@@ -586,17 +612,17 @@ func (c *rpcResultCache) acquire(
 			// Expired rows in another full-key shard may be the only consumers at
 			// the global, auth or session scope. Reap once, then retry every identity
 			// and capacity check because another goroutine may have won this key.
-			c.expireCompletedResults()
+			l.expireReceipts()
 			reclaimedExpired = true
 			continue
 		}
 		var admissionSeq uint64
 		if identity.valid {
 			var err error
-			admissionSeq, err = c.activeAdmissions.allocateAndRegister(&c.nextAdmissionSeq)
+			admissionSeq, err = l.activeAdmissions.allocateAndRegister(&l.nextAdmissionSeq)
 			if err != nil {
 				reservation.release()
-				c.flightLimit.release()
+				l.flightLimit.release()
 				s.mu.Unlock()
 				return rpcResultAcquire{}, err
 			}
@@ -606,7 +632,7 @@ func (c *rpcResultCache) acquire(
 			reservation: reservation,
 		}
 		if s.pending == nil {
-			s.pending = make(map[rpcResultCacheKey]*rpcResultFlight)
+			s.pending = make(map[rpcExecutionKey]*rpcResultFlight)
 		}
 		s.pending[key] = flight
 		s.mu.Unlock()
@@ -614,24 +640,24 @@ func (c *rpcResultCache) acquire(
 			state:        rpcResultAcquireOwner,
 			admissionSeq: admissionSeq,
 			owner: &rpcResultOwnerLease{
-				cache: c, key: key, flight: flight, delivery: newRPCResultDelivery(reqMsgID),
+				ledger: l, key: key, flight: flight, delivery: newRPCResultDelivery(reqMsgID),
 			},
 		}, nil
 	}
 }
 
 // completeRPCResultFlightLocked publishes encoded to the current owner claim.
-// The caller must hold s.mu and must publish the completed cache entry first.
-func (c *rpcResultCache) completeRPCResultFlightLocked(
-	s *rpcResultCacheShard,
-	key rpcResultCacheKey,
+// The caller must hold s.mu and must publish the completed receipt first.
+func (l *rpcExecutionLedger) completeRPCResultFlightLocked(
+	s *rpcExecutionLedgerShard,
+	key rpcExecutionKey,
 	encoded *encodedOutboundMessage,
 ) (
 	[]func(*encodedOutboundMessage, bool),
 	[]func(bool),
 	bool,
 ) {
-	if c == nil || s == nil || encoded == nil {
+	if l == nil || s == nil || encoded == nil {
 		return nil, nil, false
 	}
 	flight, ok := s.pending[key]
@@ -646,8 +672,8 @@ func (c *rpcResultCache) completeRPCResultFlightLocked(
 	}
 	flight.encoded = encoded
 	flight.ok = true
-	c.flightLimit.release()
-	c.activeAdmissions.retire(flight.admissionSeq)
+	l.flightLimit.release()
+	l.activeAdmissions.retire(flight.admissionSeq)
 	subscribers := append([]func(*encodedOutboundMessage, bool){}, flight.subscribers...)
 	flight.subscribers = nil
 	executionSubscribers := append([]func(bool){}, flight.executionSubscribers...)
@@ -655,13 +681,13 @@ func (c *rpcResultCache) completeRPCResultFlightLocked(
 	executionOK := flight.executionOK
 	if !flight.executionDone {
 		// A result without an explicit handler-completion proof cannot satisfy an
-		// invokeAfter dependency. Production completes execution before Put; this
+		// invokeAfter dependency. Production completes execution before Complete;
 		// branch is the conservative terminal cleanup for defensive callers.
 		flight.executionDone = true
 		flight.executionOK = false
 		executionOK = false
 	}
-	c.releaseFlightSubscriberSlotsLocked(
+	l.releaseFlightSubscriberSlotsLocked(
 		key, flight, len(subscribers)+len(executionSubscribers),
 	)
 	close(flight.done)
@@ -669,19 +695,19 @@ func (c *rpcResultCache) completeRPCResultFlightLocked(
 }
 
 // releaseFlightSubscriberSlotsLocked releases callbacks detached from a flight.
-// The caller holds that flight's cache shard lock, preserving the only lock
+// The caller holds that flight's ledger shard lock, preserving the only lock
 // order used by subscription: shard -> subscriber budget.
-func (c *rpcResultCache) releaseFlightSubscriberSlotsLocked(
-	key rpcResultCacheKey,
+func (l *rpcExecutionLedger) releaseFlightSubscriberSlotsLocked(
+	key rpcExecutionKey,
 	flight *rpcResultFlight,
 	slots int,
 ) {
 	if slots == 0 {
 		return
 	}
-	if c == nil || flight == nil || slots < 0 || flight.subscriberSlots < slots {
+	if l == nil || flight == nil || slots < 0 || flight.subscriberSlots < slots {
 		panic("mtproto rpc result subscriber slot underflow")
 	}
 	flight.subscriberSlots -= slots
-	c.subscriberBudget.release(key, slots)
+	l.subscriberBudget.release(key, slots)
 }

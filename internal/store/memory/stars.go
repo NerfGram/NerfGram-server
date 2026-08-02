@@ -93,12 +93,13 @@ func (s *StarsStore) Debit(_ context.Context, userID, amount int64, reason domai
 	return domain.StarsBalance{UserID: userID, Balance: st.balance, Granted: st.granted}, nil
 }
 
-func (s *StarsStore) ListTransactions(_ context.Context, userID int64, offset string, limit int) (domain.StarsTransactionPage, error) {
+func (s *StarsStore) ListTransactions(_ context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error) {
 	if userID == 0 {
 		return domain.StarsTransactionPage{}, nil
 	}
-	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
-		limit = domain.MaxStarsTransactionsLimit
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.StarsTransactionPage{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -107,22 +108,35 @@ func (s *StarsStore) ListTransactions(_ context.Context, userID int64, offset st
 		return domain.StarsTransactionPage{}, nil
 	}
 	page := domain.StarsTransactionPage{Balance: st.balance}
-	cursor, hasCursor := domain.DecodeStarsCursor(offset)
-	// 倒序遍历（id DESC）。
-	out := make([]domain.StarsTransaction, 0, limit)
-	for i := len(st.txns) - 1; i >= 0; i-- {
-		t := st.txns[i]
-		if hasCursor && t.ID >= cursor {
-			continue
+	cursor, hasCursor := domain.DecodeStarsCursor(query.Offset)
+	out := make([]domain.StarsTransaction, 0, query.Limit+1)
+	appendMatch := func(t domain.StarsTransaction) bool {
+		if hasCursor {
+			if query.Ascending && t.ID <= cursor {
+				return false
+			}
+			if !query.Ascending && t.ID >= cursor {
+				return false
+			}
+		}
+		if !query.Direction.IncludesAmount(t.Amount) {
+			return false
 		}
 		out = append(out, t)
-		if len(out) == limit {
-			// 还有更早的流水则给出下一页游标。
-			if i-1 >= 0 {
-				page.NextOffset = domain.EncodeStarsCursor(t.ID)
-			}
-			break
+		return len(out) > query.Limit
+	}
+	if query.Ascending {
+		for i := 0; i < len(st.txns) && len(out) <= query.Limit; i++ {
+			appendMatch(st.txns[i])
 		}
+	} else {
+		for i := len(st.txns) - 1; i >= 0 && len(out) <= query.Limit; i-- {
+			appendMatch(st.txns[i])
+		}
+	}
+	if len(out) > query.Limit {
+		out = out[:query.Limit]
+		page.NextOffset = domain.EncodeStarsCursor(out[len(out)-1].ID)
 	}
 	page.Transactions = out
 	return page, nil

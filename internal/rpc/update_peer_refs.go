@@ -3,6 +3,8 @@ package rpc
 import (
 	"context"
 
+	"go.uber.org/zap"
+
 	"telesrv/internal/domain"
 )
 
@@ -25,8 +27,23 @@ func (r *Router) enrichUpdateEventsWithPeerCache(ctx context.Context, viewerUser
 	allUserIDs := make(map[int64]struct{})
 	allChannelIDs := make(map[int64]struct{})
 	for i := range out {
-		if out[i].Type == domain.UpdateEventMessageReactions {
-			out[i] = r.enrichMessageReactionEvent(ctx, viewerUserID, out[i])
+		if out[i].Type == domain.UpdateEventChannelState {
+			if service, ok := r.deps.Channels.(ChannelAuthoritativeProjectionService); ok {
+				views, err := service.GetChannelsAuthoritative(ctx, viewerUserID, []int64{out[i].Peer.ID})
+				if err != nil {
+					r.log.Warn("reload authoritative channel state event",
+						zap.Int64("viewer_user_id", viewerUserID),
+						zap.Int64("channel_id", out[i].Peer.ID),
+						zap.Error(err))
+				} else {
+					out[i].Channels = out[i].Channels[:0]
+					for _, view := range views {
+						if view.Channel.ID != 0 {
+							out[i].Channels = append(out[i].Channels, view.Channel)
+						}
+					}
+				}
+			}
 		}
 		if out[i].Type == domain.UpdateEventMessagePoll {
 			out[i] = r.enrichMessagePollEvent(ctx, viewerUserID, out[i])
@@ -93,36 +110,6 @@ func collectEphemeralMessagePeerRefs(message domain.EphemeralMessage, userIDs, c
 type updateEventPeerRefs struct {
 	userIDs    map[int64]struct{}
 	channelIDs map[int64]struct{}
-}
-
-func (r *Router) enrichMessageReactionEvent(ctx context.Context, viewerUserID int64, event domain.UpdateEvent) domain.UpdateEvent {
-	if r.deps.Messages == nil || event.Message.ID <= 0 {
-		return event
-	}
-	peer := event.Message.Peer
-	if peer.Type == "" || peer.ID == 0 {
-		peer = event.Peer
-	}
-	if peer.Type != domain.PeerTypeUser || peer.ID == 0 {
-		return event
-	}
-	res, err := r.deps.Messages.GetMessageReactions(ctx, viewerUserID, domain.PrivateMessageReactionsRequest{
-		OwnerUserID: viewerUserID,
-		Peer:        peer,
-		IDs:         []int{event.Message.ID},
-	})
-	if err != nil {
-		return event
-	}
-	for _, msg := range res.Messages {
-		if msg.OwnerUserID == viewerUserID && msg.ID == event.Message.ID {
-			msg.Pts = event.Pts
-			event.Message = msg
-			event.Peer = msg.Peer
-			return event
-		}
-	}
-	return event
 }
 
 // enrichMessagePollEvent 在 difference 重放时按 viewer 重载消息（media 含最新 poll 权威态与
@@ -247,11 +234,14 @@ func collectMessagePeerRefs(msg domain.Message, currentChannelID int64, userIDs,
 	if msg.Media != nil && msg.Media.Contact != nil && msg.Media.Contact.UserID != 0 {
 		userIDs[msg.Media.Contact.UserID] = struct{}{}
 	}
-	if msg.Media != nil && msg.Media.ServiceAction != nil && msg.Media.ServiceAction.RequestedPeer != nil {
-		for _, peer := range msg.Media.ServiceAction.RequestedPeer.Peers {
-			addDomainPeerRef(peer, currentChannelID, userIDs, channelIDs)
+	if msg.Media != nil && msg.Media.Giveaway != nil {
+		for _, id := range msg.Media.Giveaway.Channels {
+			if id != 0 && id != currentChannelID {
+				channelIDs[id] = struct{}{}
+			}
 		}
 	}
+	collectServiceActionPeerRefs(msg.Media, currentChannelID, userIDs, channelIDs)
 	collectPollMediaUserRefs(msg.Media, userIDs)
 	collectTodoMediaUserRefs(msg.Media, userIDs)
 	if msg.Reactions != nil {
@@ -345,6 +335,7 @@ func collectChannelMessagePeerRefs(msg domain.ChannelMessage, currentChannelID i
 				channelIDs[id] = struct{}{}
 			}
 		}
+		collectStarGiftUniquePeerRefs(msg.Action.StarGiftUnique, currentChannelID, userIDs, channelIDs)
 	}
 	if msg.Reactions != nil {
 		for _, reaction := range msg.Reactions.Recent {
@@ -352,6 +343,49 @@ func collectChannelMessagePeerRefs(msg domain.ChannelMessage, currentChannelID i
 				userIDs[reaction.UserID] = struct{}{}
 			}
 		}
+	}
+}
+
+func collectServiceActionPeerRefs(media *domain.MessageMedia, currentChannelID int64, userIDs, channelIDs map[int64]struct{}) {
+	if media == nil || media.ServiceAction == nil {
+		return
+	}
+	action := media.ServiceAction
+	if action.RequestedPeer != nil {
+		for _, peer := range action.RequestedPeer.Peers {
+			addDomainPeerRef(peer, currentChannelID, userIDs, channelIDs)
+		}
+	}
+	if gift := action.StarGift; gift != nil {
+		if gift.FromUserID != 0 && !gift.NameHidden {
+			userIDs[gift.FromUserID] = struct{}{}
+		}
+		if gift.PeerUserID != 0 {
+			userIDs[gift.PeerUserID] = struct{}{}
+		}
+		if gift.PeerChannelID != 0 && gift.PeerChannelID != currentChannelID {
+			channelIDs[gift.PeerChannelID] = struct{}{}
+		}
+		addDomainPeerRef(gift.To, currentChannelID, userIDs, channelIDs)
+	}
+	collectStarGiftUniquePeerRefs(action.StarGiftUnique, currentChannelID, userIDs, channelIDs)
+}
+
+func collectStarGiftUniquePeerRefs(action *domain.MessageStarGiftUniqueAction, currentChannelID int64, userIDs, channelIDs map[int64]struct{}) {
+	if action == nil {
+		return
+	}
+	if action.FromUserID != 0 {
+		userIDs[action.FromUserID] = struct{}{}
+	}
+	addDomainPeerRef(action.Peer, currentChannelID, userIDs, channelIDs)
+	addDomainPeerRef(action.Gift.Owner, currentChannelID, userIDs, channelIDs)
+	addDomainPeerRef(action.Gift.OriginalOwner, currentChannelID, userIDs, channelIDs)
+	addDomainPeerRef(action.Gift.ReleasedBy, currentChannelID, userIDs, channelIDs)
+	addDomainPeerRef(action.Gift.ThemePeer, currentChannelID, userIDs, channelIDs)
+	addDomainPeerRef(action.Gift.Host, currentChannelID, userIDs, channelIDs)
+	if action.Gift.OriginalFromUserID != 0 && !action.Gift.OriginalNameHidden {
+		userIDs[action.Gift.OriginalFromUserID] = struct{}{}
 	}
 }
 

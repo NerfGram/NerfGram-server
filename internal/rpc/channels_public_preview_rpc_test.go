@@ -16,6 +16,7 @@ import (
 
 func TestPublicChannelPreviewRPCsAllowNonMember(t *testing.T) {
 	ctx := context.Background()
+	sessions := &captureSessions{}
 	userStore := memory.NewUserStore()
 	owner, _ := userStore.Create(ctx, domain.User{AccessHash: 92001, Phone: "15550092001", FirstName: "Owner"})
 	viewer, _ := userStore.Create(ctx, domain.User{AccessHash: 92002, Phone: "15550092002", FirstName: "Viewer"})
@@ -26,6 +27,7 @@ func TestPublicChannelPreviewRPCsAllowNonMember(t *testing.T) {
 		Users:    appusers.NewService(userStore),
 		Channels: channelService,
 		Dialogs:  dialogService,
+		Sessions: sessions,
 	}, zaptest.NewLogger(t), clock.System)
 	public, err := channelService.CreateChannel(ctx, owner.ID, domain.CreateChannelRequest{
 		Title:     "Public Preview RPC",
@@ -122,8 +124,16 @@ func TestPublicChannelPreviewRPCsAllowNonMember(t *testing.T) {
 	if !ok || !historyChat.Left || historyChat.ID != public.Channel.ID {
 		t.Fatalf("history chat = %T %+v, want left public channel", history.Chats[0], history.Chats[0])
 	}
+	readOK, err := r.onChannelsReadHistory(WithUserID(ctx, viewer.ID), &tg.ChannelsReadHistoryRequest{
+		Channel: input,
+		MaxID:   sent.Message.ID,
+	})
+	if err != nil || !readOK {
+		t.Fatalf("non-member readHistory public preview = %v err=%v, want successful no-op", readOK, err)
+	}
 
-	diff, err := r.onUpdatesGetChannelDifference(WithUserID(ctx, viewer.ID), &tg.UpdatesGetChannelDifferenceRequest{
+	viewerCtx := WithSessionID(WithRawAuthKeyID(WithUserID(ctx, viewer.ID), [8]byte{9, 2}), 9202)
+	diff, err := r.onUpdatesGetChannelDifference(viewerCtx, &tg.UpdatesGetChannelDifferenceRequest{
 		Channel: input,
 		Pts:     public.Event.Pts,
 		Limit:   10,
@@ -131,9 +141,66 @@ func TestPublicChannelPreviewRPCsAllowNonMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("non-member getChannelDifference public preview: %v", err)
 	}
-	emptyDiff, ok := diff.(*tg.UpdatesChannelDifferenceEmpty)
-	if !ok || !emptyDiff.Final || emptyDiff.Pts != sent.Event.Pts {
-		t.Fatalf("channel difference = %T %+v, want empty public preview difference at current pts", diff, diff)
+	fullDiff, ok := diff.(*tg.UpdatesChannelDifference)
+	if !ok || !fullDiff.Final || fullDiff.Pts != sent.Event.Pts || len(fullDiff.NewMessages) != 1 {
+		t.Fatalf("channel difference = %T %+v, want one public preview message", diff, diff)
+	}
+	message, ok := fullDiff.NewMessages[0].(*tg.Message)
+	if !ok || message.ID != sent.Message.ID || message.Message != sent.Message.Body {
+		t.Fatalf("channel difference message = %T %+v, want sent public post", fullDiff.NewMessages[0], fullDiff.NewMessages[0])
+	}
+	if subscribers := sessions.OnlineChannelSubscriberUserIDs(public.Channel.ID, 10); len(subscribers) != 1 || subscribers[0] != viewer.ID {
+		t.Fatalf("public channel subscribers = %v, want viewer %d", subscribers, viewer.ID)
+	}
+
+	live, err := channelService.SendMessage(ctx, owner.ID, domain.SendChannelMessageRequest{
+		ChannelID: public.Channel.ID,
+		RandomID:  202,
+		Message:   "public preview live post",
+		Date:      1700010120,
+	})
+	if err != nil {
+		t.Fatalf("send live public post: %v", err)
+	}
+	sessions.clearMessages()
+	r.enqueueChannelMessageFanout(WithUserID(ctx, owner.ID), owner.ID, live, nil)
+	if !fanoutHasID(sessions.pushedUserIDs(), viewer.ID) {
+		t.Fatalf("live public preview fanout users = %v, want viewer %d", sessions.pushedUserIDs(), viewer.ID)
+	}
+	liveUpdates, ok := sessions.lastUserPush().(*tg.Updates)
+	if !ok || len(liveUpdates.Updates) == 0 {
+		t.Fatalf("live public preview update = %T %+v", sessions.lastUserPush(), sessions.lastUserPush())
+	}
+	foundLive := false
+	for _, update := range liveUpdates.Updates {
+		newMessage, ok := update.(*tg.UpdateNewChannelMessage)
+		if !ok {
+			continue
+		}
+		if item, ok := newMessage.Message.(*tg.Message); ok && item.ID == live.Message.ID && item.Message == live.Message.Body {
+			foundLive = true
+		}
+	}
+	if !foundLive {
+		t.Fatalf("live public preview updates = %+v, want new message %d", liveUpdates.Updates, live.Message.ID)
+	}
+	sessions.clearMessages()
+	if ok := r.runChannelFanoutOverflowNudge(ctx, public.Channel.ID, live.Event.Pts); !ok {
+		t.Fatal("public preview overflow nudge did not complete")
+	}
+	if !fanoutHasID(sessions.pushedUserIDs(), viewer.ID) {
+		t.Fatalf("public preview overflow nudge users = %v, want viewer %d", sessions.pushedUserIDs(), viewer.ID)
+	}
+	nudgeUpdates, ok := sessions.lastUserPush().(*tg.Updates)
+	if !ok || len(nudgeUpdates.Updates) != 1 {
+		t.Fatalf("public preview overflow nudge = %T %+v", sessions.lastUserPush(), sessions.lastUserPush())
+	}
+	tooLong, ok := nudgeUpdates.Updates[0].(*tg.UpdateChannelTooLong)
+	if !ok || tooLong.ChannelID != public.Channel.ID {
+		t.Fatalf("public preview overflow update = %T %+v, want channel %d tooLong", nudgeUpdates.Updates[0], nudgeUpdates.Updates[0], public.Channel.ID)
+	}
+	if pts, ok := tooLong.GetPts(); !ok || pts != live.Event.Pts {
+		t.Fatalf("public preview overflow pts = %d/%v, want %d", pts, ok, live.Event.Pts)
 	}
 
 	domainPeers, err := r.dialogPeersFromInput(WithUserID(ctx, viewer.ID), viewer.ID, []tg.InputDialogPeerClass{&tg.InputDialogPeer{Peer: peer}})
@@ -147,8 +214,12 @@ func TestPublicChannelPreviewRPCsAllowNonMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dialog service public preview: %v", err)
 	}
-	if len(directPeerDialogs.Dialogs) != 0 || len(directPeerDialogs.ChannelMessages) != 0 || len(directPeerDialogs.Channels) != 0 {
-		t.Fatalf("direct peer dialogs = %+v, want no public preview dialog/message/channel", directPeerDialogs)
+	if len(directPeerDialogs.Dialogs) != 1 || len(directPeerDialogs.ChannelMessages) != 0 || len(directPeerDialogs.Channels) != 1 {
+		t.Fatalf("direct peer dialogs = %+v, want one zero-top public preview bootstrap", directPeerDialogs)
+	}
+	directDialog := directPeerDialogs.Dialogs[0]
+	if directDialog.TopMessage != 0 || !directDialog.ChannelLeft || directDialog.Pts != live.Event.Pts {
+		t.Fatalf("direct public preview dialog = %+v, want left zero-top bootstrap", directDialog)
 	}
 
 	peerDialogsReq := &tg.MessagesGetPeerDialogsRequest{
@@ -166,8 +237,17 @@ func TestPublicChannelPreviewRPCsAllowNonMember(t *testing.T) {
 	if !ok {
 		t.Fatalf("getPeerDialogs response = %T, want peer dialogs", peerDialogsEnc)
 	}
-	if len(peerDialogs.Dialogs) != 0 || len(peerDialogs.Messages) != 0 || len(peerDialogs.Chats) != 0 {
-		t.Fatalf("peer dialogs = %+v, want no public preview dialog/message/channel", peerDialogs)
+	if len(peerDialogs.Dialogs) != 1 || len(peerDialogs.Messages) != 0 || len(peerDialogs.Chats) != 1 {
+		t.Fatalf("peer dialogs = %+v, want one zero-top public preview bootstrap", peerDialogs)
+	}
+	tgDialog, ok := peerDialogs.Dialogs[0].(*tg.Dialog)
+	if !ok || tgDialog.TopMessage != 0 || tgDialog.ReadInboxMaxID != 0 ||
+		tgDialog.ReadOutboxMaxID != 0 || tgDialog.UnreadCount != 0 {
+		t.Fatalf("peer dialog = %T %+v, want zero-state dialog", peerDialogs.Dialogs[0], peerDialogs.Dialogs[0])
+	}
+	peerDialogChat, ok := peerDialogs.Chats[0].(*tg.Channel)
+	if !ok || !peerDialogChat.Left || peerDialogChat.ID != public.Channel.ID {
+		t.Fatalf("peer dialog chat = %T %+v, want left public channel", peerDialogs.Chats[0], peerDialogs.Chats[0])
 	}
 
 	if _, err := channelService.JoinChannel(ctx, viewer.ID, public.Channel.ID, 1700010120); err != nil {
@@ -191,5 +271,46 @@ func TestPublicChannelPreviewRPCsAllowNonMember(t *testing.T) {
 	joinedChat, ok := joinedPeerDialogs.Chats[0].(*tg.Channel)
 	if !ok || joinedChat.Left || joinedChat.ID != public.Channel.ID {
 		t.Fatalf("joined peer dialog chat = %T %+v, want active channel with left=false", joinedPeerDialogs.Chats[0], joinedPeerDialogs.Chats[0])
+	}
+}
+
+func TestChannelsReadHistoryAllowsSyntheticMonoforumViewers(t *testing.T) {
+	ctx := context.Background()
+	userStore := memory.NewUserStore()
+	owner, err := userStore.Create(ctx, domain.User{AccessHash: 92101, Phone: "15550092101", FirstName: "Owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscriber, err := userStore.Create(ctx, domain.User{AccessHash: 92102, Phone: "15550092102", FirstName: "Subscriber"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelStore := memory.NewChannelStore()
+	channels := appchannels.NewService(channelStore)
+	parent, err := channels.CreateChannel(ctx, owner.ID, domain.CreateChannelRequest{
+		Title: "Monoforum Read RPC", Broadcast: true, Date: 1_700_011_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := channelStore.SetPaidMessagesPrice(ctx, owner.ID, parent.Channel.ID, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mono, err := channelStore.GetChannelByID(ctx, enabled.Channel.LinkedMonoforumID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{}, Deps{
+		Users: appusers.NewService(userStore), Channels: channels,
+	}, zaptest.NewLogger(t), clock.System)
+	for _, userID := range []int64{owner.ID, subscriber.ID} {
+		ok, err := r.onChannelsReadHistory(WithUserID(ctx, userID), &tg.ChannelsReadHistoryRequest{
+			Channel: &tg.InputChannel{ChannelID: mono.ID, AccessHash: mono.AccessHash},
+			MaxID:   mono.TopMessageID,
+		})
+		if err != nil || !ok {
+			t.Fatalf("synthetic monoforum read for %d = %v err=%v, want successful no-op", userID, ok, err)
+		}
 	}
 }

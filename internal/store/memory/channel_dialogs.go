@@ -42,7 +42,7 @@ func (s *ChannelStore) ListChannelDialogs(_ context.Context, viewerUserID int64,
 			continue
 		}
 		parentMember, ok := s.members[channel.LinkedMonoforumID][viewerUserID]
-		if !ok || parentMember.Status != domain.ChannelMemberActive || !isChannelAdmin(parentMember) {
+		if !ok || !parentMember.CanManageDirectMessages() {
 			continue
 		}
 		channelIDs = append(channelIDs, channelID)
@@ -95,8 +95,8 @@ func (s *ChannelStore) ListChannelDialogs(_ context.Context, viewerUserID int64,
 		out.Dialogs = append(out.Dialogs, dialog)
 		channel := s.channels[dialog.Peer.ID]
 		out.Channels = append(out.Channels, channel)
-		if msg, ok := s.findMessageLocked(dialog.Peer.ID, dialog.TopMessage); ok && !msg.Deleted {
-			out.Messages = append(out.Messages, cloneChannelMessage(msg))
+		if msg, ok := s.channelMessageForMemberLocked(viewerUserID, dialog.Peer.ID, dialog.TopMessage); ok {
+			out.Messages = append(out.Messages, msg)
 		}
 	}
 	// 与 PG 同因：getDialogs top message 按 viewer 补未读提及标志。
@@ -131,7 +131,7 @@ func (s *ChannelStore) GetChannelDialogs(_ context.Context, viewerUserID int64, 
 				continue
 			}
 			parentMember, ok := s.members[channel.LinkedMonoforumID][viewerUserID]
-			if !ok || parentMember.Status != domain.ChannelMemberActive || !isChannelAdmin(parentMember) {
+			if !ok || !parentMember.CanManageDirectMessages() {
 				continue
 			}
 			member = syntheticMonoforumAdminMember(channel, parentMember)
@@ -151,8 +151,8 @@ func (s *ChannelStore) GetChannelDialogs(_ context.Context, viewerUserID int64, 
 				out.Channels = append(out.Channels, cloneChannel(parent))
 			}
 		}
-		if msg, ok := s.findMessageLocked(channelID, dialog.TopMessage); ok && !msg.Deleted {
-			out.Messages = append(out.Messages, cloneChannelMessage(msg))
+		if msg, ok := s.channelMessageForMemberLocked(viewerUserID, channelID, dialog.TopMessage); ok {
+			out.Messages = append(out.Messages, msg)
 		}
 	}
 	out.Count = len(out.Dialogs)
@@ -470,36 +470,47 @@ func channelDialogToDialog(dialog domain.ChannelDialog, channelPts int, memberSt
 	return domain.Dialog{
 		Peer: domain.Peer{Type: domain.PeerTypeChannel, ID: dialog.ChannelID},
 		// 非成员预览(publicPreviewMember/被踢)须标记 ChannelLeft,客户端据此把频道渲染为只读 left 预览。
-		ChannelLeft:         memberStatus == domain.ChannelMemberLeft,
-		FolderID:            dialog.FolderID,
-		TopMessage:          dialog.TopMessageID,
-		TopMessageDate:      dialog.TopMessageDate,
-		ReadInboxMaxID:      dialog.ReadInboxMaxID,
-		ReadOutboxMaxID:     dialog.ReadOutboxMaxID,
-		UnreadCount:         dialog.UnreadCount,
-		UnreadMentions:      dialog.UnreadMentions,
-		UnreadReactions:     dialog.UnreadReactions,
-		Pinned:              dialog.Pinned,
-		PinnedOrder:         dialog.PinnedOrder,
-		UnreadMark:          dialog.UnreadMark,
-		ViewForumAsMessages: dialog.ViewForumAsMessages,
-		HasScheduled:        dialog.HasScheduled,
-		Pts:                 channelPts,
+		ChannelLeft:            memberStatus == domain.ChannelMemberLeft,
+		FolderID:               dialog.FolderID,
+		TopMessage:             dialog.TopMessageID,
+		TopMessageDate:         dialog.TopMessageDate,
+		HistoryClearAnchorID:   dialog.HistoryClearAnchorID,
+		HistoryClearAnchorDate: dialog.HistoryClearAnchorDate,
+		ReadInboxMaxID:         dialog.ReadInboxMaxID,
+		ReadOutboxMaxID:        dialog.ReadOutboxMaxID,
+		UnreadCount:            dialog.UnreadCount,
+		UnreadMentions:         dialog.UnreadMentions,
+		UnreadReactions:        dialog.UnreadReactions,
+		Pinned:                 dialog.Pinned,
+		PinnedOrder:            dialog.PinnedOrder,
+		UnreadMark:             dialog.UnreadMark,
+		ViewForumAsMessages:    dialog.ViewForumAsMessages,
+		HasScheduled:           dialog.HasScheduled,
+		Pts:                    channelPts,
 	}
 }
 
 func previewChannelDialog(userID int64, channel domain.Channel, member domain.ChannelMember) domain.ChannelDialog {
 	topMessageID := channel.TopMessageID
 	if topMessageID <= member.AvailableMinID {
-		topMessageID = 0
+		topMessageID = member.HistoryClearAnchorID
+		if topMessageID != member.AvailableMinID {
+			topMessageID = 0
+		}
+	}
+	topMessageDate := channel.Date
+	if topMessageID > 0 && topMessageID == member.HistoryClearAnchorID {
+		topMessageDate = member.HistoryClearAnchorDate
 	}
 	return domain.ChannelDialog{
-		UserID:          userID,
-		ChannelID:       channel.ID,
-		TopMessageID:    topMessageID,
-		TopMessageDate:  channel.Date,
-		ReadInboxMaxID:  maxInt(channel.TopMessageID, member.ReadInboxMaxID),
-		ReadOutboxMaxID: maxInt(channel.TopMessageID, member.ReadOutboxMaxID),
+		UserID:                 userID,
+		ChannelID:              channel.ID,
+		TopMessageID:           topMessageID,
+		TopMessageDate:         topMessageDate,
+		HistoryClearAnchorID:   member.HistoryClearAnchorID,
+		HistoryClearAnchorDate: member.HistoryClearAnchorDate,
+		ReadInboxMaxID:         maxInt(channel.TopMessageID, member.ReadInboxMaxID),
+		ReadOutboxMaxID:        maxInt(channel.TopMessageID, member.ReadOutboxMaxID),
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"telesrv/internal/compat/tdesktop"
 	"telesrv/internal/domain"
 )
 
@@ -117,6 +118,26 @@ func TestLegacyThemeWireDispatch(t *testing.T) {
 	}
 	if id, err := boolWire.ID(); err != nil || id != tg.BoolTrueTypeID {
 		t.Fatalf("installTheme legacy wire id = %#x err=%v, want boolTrue", id, err)
+	}
+
+	// 同一 legacy overlay 必须接受 account.getThemes 下发的静态默认主题，
+	// 且不能要求该引用存在于自定义主题 store。
+	defaultTheme := tdesktop.DefaultThemeList()[0]
+	var defaultIB bin.Buffer
+	defaultIB.PutID(legacyInstallThemeID)
+	defaultIB.PutInt32((1 << 0) | (1 << 1))
+	defaultIB.PutString("android")
+	(&tg.InputTheme{ID: defaultTheme.ID, AccessHash: defaultTheme.AccessHash}).Encode(&defaultIB)
+	enc, err = r.Dispatch(ctx, authKeyID, sessionID, &defaultIB)
+	if err != nil {
+		t.Fatalf("installTheme legacy default dispatch: %v", err)
+	}
+	boolWire.Reset()
+	if err := enc.Encode(&boolWire); err != nil {
+		t.Fatalf("encode installTheme legacy default result: %v", err)
+	}
+	if id, err := boolWire.ID(); err != nil || id != tg.BoolTrueTypeID {
+		t.Fatalf("installTheme legacy default wire id = %#x err=%v, want boolTrue", id, err)
 	}
 
 	// 已声明 legacy 方法仍必须由静态 decoder 精确消费完整结构。

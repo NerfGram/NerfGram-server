@@ -279,7 +279,7 @@ func TestCachedReplacementReplayBarrierWaitsForLogicalHookDone(t *testing.T) {
 	firstConn := newOutboundTestConn(t, &collectingSessionTransport{}, newOutboundTrackedBudget(1<<20))
 	firstResult := make(chan error, 1)
 	go func() {
-		firstResult <- s.sendCachedRPCResultWithHook(context.Background(), firstConn, encoded, func() error {
+		firstResult <- s.sendReplayedRPCResultWithHook(context.Background(), firstConn, encoded, func() error {
 			if !order.CompareAndSwap(0, 1) {
 				return errors.New("first replacement restore ran out of order")
 			}
@@ -300,7 +300,7 @@ func TestCachedReplacementReplayBarrierWaitsForLogicalHookDone(t *testing.T) {
 	secondReplacement := make(chan struct{})
 	secondResult := make(chan error, 1)
 	go func() {
-		secondResult <- s.sendCachedRPCResultWithHook(context.Background(), secondConn, encoded, func() error {
+		secondResult <- s.sendReplayedRPCResultWithHook(context.Background(), secondConn, encoded, func() error {
 			if !order.CompareAndSwap(2, 3) {
 				return errors.New("second replacement restore passed logical hook completion")
 			}

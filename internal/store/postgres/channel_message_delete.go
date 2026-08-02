@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"sort"
@@ -58,6 +59,68 @@ func (s *ChannelStore) DeleteChannelMessages(ctx context.Context, req domain.Del
 		cascades[i].Recipients, _ = s.ListActiveChannelMemberIDs(ctx, 0, cascades[i].Channel.ID, 0)
 	}
 	return domain.DeleteChannelMessagesResult{Channel: channel, Event: event, DeletedIDs: deleted, Recipients: recipients, DiscussionDeletes: cascades}, nil
+}
+
+func (s *ChannelStore) ModerationDeleteChannelMessages(ctx context.Context, channelID int64, ids []int, date int) (domain.DeleteChannelMessagesResult, error) {
+	if channelID <= 0 || len(ids) == 0 || len(ids) > domain.MaxDeleteMessageIDs {
+		return domain.DeleteChannelMessagesResult{}, domain.ErrChannelInvalid
+	}
+	if date == 0 {
+		date = nowUnix()
+	}
+	beginner, ok := s.db.(txBeginner)
+	if !ok {
+		return domain.DeleteChannelMessagesResult{}, fmt.Errorf("moderation delete channel messages: db does not support transactions")
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return domain.DeleteChannelMessagesResult{}, fmt.Errorf("begin moderation delete channel messages: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	channel, err := getChannelByID(ctx, tx, channelID)
+	if err != nil || channel.Deleted {
+		if err != nil {
+			return domain.DeleteChannelMessagesResult{}, err
+		}
+		return domain.DeleteChannelMessagesResult{}, domain.ErrChannelInvalid
+	}
+	refs, err := s.discussionRefsForMessages(ctx, tx, channel.ID, ids)
+	if err != nil {
+		return domain.DeleteChannelMessagesResult{}, err
+	}
+	systemMember := domain.ChannelMember{
+		ChannelID: channel.ID, UserID: domain.OfficialSystemUserID,
+		Role: domain.ChannelRoleCreator, Status: domain.ChannelMemberActive,
+	}
+	deleted, event, channel, err := s.deleteChannelMessagesTx(
+		ctx, tx, channel, systemMember, ids, domain.OfficialSystemUserID, date,
+	)
+	if err != nil {
+		return domain.DeleteChannelMessagesResult{}, err
+	}
+	cascades, err := s.cascadeDeleteDiscussionRootsTx(
+		ctx, tx, refs, deleted, domain.OfficialSystemUserID, date,
+	)
+	if err != nil {
+		return domain.DeleteChannelMessagesResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DeleteChannelMessagesResult{}, fmt.Errorf("commit moderation delete channel messages: %w", err)
+	}
+	committed = true
+	recipients, _ := s.ListActiveChannelMemberIDs(ctx, 0, channel.ID, 0)
+	for i := range cascades {
+		cascades[i].Recipients, _ = s.ListActiveChannelMemberIDs(ctx, 0, cascades[i].Channel.ID, 0)
+	}
+	return domain.DeleteChannelMessagesResult{
+		Channel: channel, Event: event, DeletedIDs: deleted,
+		Recipients: recipients, DiscussionDeletes: cascades,
+	}, nil
 }
 
 // discussionRefsForMessages 取待删消息携带的讨论组转发根引用。
@@ -161,18 +224,67 @@ func (s *ChannelStore) DeleteChannelHistory(ctx context.Context, req domain.Dele
 	}
 	if !req.ForEveryone {
 		appliedMinID := maxInt(member.AvailableMinID, maxID)
+		changed := appliedMinID > member.AvailableMinID
+		anchorID := member.HistoryClearAnchorID
+		anchorDate := member.HistoryClearAnchorDate
+		if changed {
+			anchorID = appliedMinID
+			anchorDate = req.Date
+			var messageDate int
+			err := tx.QueryRow(ctx, `
+SELECT message_date
+FROM channel_messages
+WHERE channel_id = $1 AND id = $2`, req.ChannelID, appliedMinID).Scan(&messageDate)
+			switch {
+			case err == nil && messageDate > 0:
+				anchorDate = messageDate
+			case errors.Is(err, pgx.ErrNoRows):
+				// max_id may name an already-pruned/hole id. The owner-local
+				// marker is still a valid monotonic boundary; retain request
+				// time so its dialog projection remains loadable.
+			case err != nil:
+				return domain.DeleteChannelHistoryResult{}, fmt.Errorf("select channel clear anchor date: %w", err)
+			}
+			if anchorDate <= 0 {
+				anchorDate = channel.Date
+			}
+		}
 		topID, topDate, err := visibleChannelTopAfter(ctx, tx, req.ChannelID, appliedMinID, channel.Date)
 		if err != nil {
 			return domain.DeleteChannelHistoryResult{}, err
 		}
+		if topID == 0 && anchorID > 0 && anchorID == appliedMinID {
+			topID = anchorID
+			topDate = anchorDate
+		}
 		if _, err := tx.Exec(ctx, `
 UPDATE channel_members
 SET available_min_id = GREATEST(available_min_id, $3),
+    history_clear_anchor_id = CASE WHEN available_min_id < $3 THEN $3 ELSE history_clear_anchor_id END,
+    history_clear_anchor_date = CASE WHEN available_min_id < $3 THEN $4 ELSE history_clear_anchor_date END,
     read_inbox_max_id = GREATEST(read_inbox_max_id, $3),
     unread_mark = false,
     updated_at = now()
-WHERE channel_id = $1 AND user_id = $2`, req.ChannelID, req.UserID, appliedMinID); err != nil {
+WHERE channel_id = $1 AND user_id = $2`, req.ChannelID, req.UserID, appliedMinID, anchorDate); err != nil {
 			return domain.DeleteChannelHistoryResult{}, fmt.Errorf("update channel local clear member: %w", err)
+		}
+		if changed {
+			member.AvailableMinID = appliedMinID
+			member.HistoryClearAnchorID = anchorID
+			member.HistoryClearAnchorDate = anchorDate
+			if err := upsertUserChannelMemberIndexTx(ctx, tx, channel, member); err != nil {
+				return domain.DeleteChannelHistoryResult{}, err
+			}
+			if _, err := tx.Exec(ctx, `
+UPDATE user_channel_member_index
+SET available_min_id = $3,
+    history_clear_anchor_id = $3,
+    history_clear_updated_at = $4,
+    updated_at = now()
+WHERE user_id = $1 AND channel_id = $2`,
+				req.UserID, req.ChannelID, appliedMinID, req.Date); err != nil {
+				return domain.DeleteChannelHistoryResult{}, fmt.Errorf("update channel local clear recovery index: %w", err)
+			}
 		}
 		if err := deleteChannelUnreadMentionsUpToTx(ctx, tx, req.UserID, req.ChannelID, appliedMinID); err != nil {
 			return domain.DeleteChannelHistoryResult{}, err
@@ -197,7 +309,17 @@ ON CONFLICT (user_id, channel_id) DO UPDATE SET
 			return domain.DeleteChannelHistoryResult{}, fmt.Errorf("commit local clear channel history: %w", err)
 		}
 		committed = true
-		return domain.DeleteChannelHistoryResult{Channel: channel, AvailableMinID: appliedMinID}, nil
+		if s.memberCacheActive(s.db) {
+			s.memberCache.delete(req.ChannelID, req.UserID)
+		}
+		if s.dialogCacheActive(s.db) {
+			s.dialogCache.delete(req.UserID, req.ChannelID)
+		}
+		return domain.DeleteChannelHistoryResult{
+			Channel:             channel,
+			AvailableMinID:      appliedMinID,
+			AvailableMinChanged: changed,
+		}, nil
 	}
 	if !canDeleteAnyChannelMessage(member) {
 		return domain.DeleteChannelHistoryResult{}, domain.ErrChannelAdminRequired

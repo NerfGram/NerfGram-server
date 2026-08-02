@@ -45,8 +45,14 @@ func (r *Router) onUpdatesGetChannelDifference(ctx context.Context, req *tg.Upda
 		}
 		return nil, channelInvalidErr(err)
 	}
+	if diff.Channel.Username != "" && diff.Self.Status != domain.ChannelMemberActive {
+		// Telegram's public-channel passive delivery is enabled only after a
+		// successful short-poll difference. The runtime subscription is renewed
+		// by subsequent polls and never creates membership/dialog/read state.
+		r.refreshPublicChannelSubscription(ctx, userID, channelID)
+	}
 	diff = r.enrichChannelDifference(ctx, userID, diff)
-	out := tgChannelDifference(userID, diff)
+	out := r.tgChannelDifference(ctx, userID, diff)
 	if linked, ok := r.linkedDiscussionChat(ctx, userID, channelID); ok {
 		switch value := out.(type) {
 		case *tg.UpdatesChannelDifference:
@@ -139,7 +145,11 @@ func appendChannelStateUpdates(dst *tg.Updates, extra *tg.Updates) {
 	}
 }
 
-func (r *Router) channelStateUpdatesWithLinkedMonoforum(viewerUserID int64, channel domain.Channel, mono domain.Channel, includeMono bool) *tg.Updates {
+// channelStateUpdatesWithLinkedMonoforum builds one recipient's channel-state
+// update. Peer-wide overlays are passed in already resolved rather than read
+// here: this builder runs once per online recipient, so reads inside it would
+// turn one state change into one query per member.
+func (r *Router) channelStateUpdatesWithLinkedMonoforum(viewerUserID int64, channel domain.Channel, mono domain.Channel, includeMono bool, botVerificationIcon int64, usernames map[domain.Peer][]domain.Username) *tg.Updates {
 	updates := r.channelStateUpdates(viewerUserID, channel)
 	// 母广播频道有/曾有关联 monoforum 时,按完整(非 min)形态下发。关闭 Direct Messages 时
 	// linked_monoforum_id 在投影里被隐藏,只有完整频道对象才能覆盖客户端缓存里旧的 linked_monoforum_id,
@@ -152,6 +162,12 @@ func (r *Router) channelStateUpdatesWithLinkedMonoforum(viewerUserID int64, chan
 	if includeMono {
 		updates.Chats = appendUniqueTGChats(updates.Chats, tgChannelChat(viewerUserID, mono, nil))
 	}
+	// The third-party mark travels with the state mutation for the same reason
+	// verified:flags.7 does -- it is part of how the peer identifies itself -- but it
+	// lives in a read model rather than on domain.Channel, so it is stamped on here
+	// instead of being projected from the row.
+	applyBotVerificationIconToChannelChats(updates.Chats, channel.ID, botVerificationIcon)
+	applyUsernamesFromRegistry(nil, updates.Chats, usernames)
 	return updates
 }
 
@@ -167,12 +183,20 @@ func (r *Router) linkedMonoforumForChannelState(ctx context.Context, userID int6
 }
 
 func (r *Router) channelMessageUpdatesWithPeerCache(ctx context.Context, viewerUserID int64, res domain.SendChannelMessageResult, randomID int64, cache *viewerPeerCache) *tg.Updates {
+	updates := r.channelMessageUpdatesWithPeerCacheAndUsernames(ctx, viewerUserID, res, randomID, cache, nil)
+	if updates != nil {
+		r.applyUsernamesToPeerObjects(ctx, updates.Users, updates.Chats)
+	}
+	return updates
+}
+
+func (r *Router) channelMessageUpdatesWithPeerCacheAndUsernames(ctx context.Context, viewerUserID int64, res domain.SendChannelMessageResult, randomID int64, cache *viewerPeerCache, usernames map[domain.Peer][]domain.Username) *tg.Updates {
 	randomIDs := []int64(nil)
 	includeMessageIDs := randomID != 0
 	if includeMessageIDs {
 		randomIDs = []int64{randomID}
 	}
-	return r.channelMessagesUpdatesWithPeerCache(ctx, viewerUserID, []domain.SendChannelMessageResult{res}, randomIDs, includeMessageIDs, nil, cache)
+	return r.channelMessagesUpdatesWithPeerCacheAndUsernames(ctx, viewerUserID, []domain.SendChannelMessageResult{res}, randomIDs, includeMessageIDs, nil, cache, usernames)
 }
 
 func (r *Router) pushChannelDiscussionUpdate(ctx context.Context, originUserID int64, discussion *domain.SendChannelDiscussionResult) {
@@ -193,6 +217,14 @@ func (r *Router) pushChannelDiscussionUpdate(ctx context.Context, originUserID i
 }
 
 func (r *Router) channelMessagesUpdatesWithPeerCache(ctx context.Context, viewerUserID int64, results []domain.SendChannelMessageResult, randomIDs []int64, includeMessageIDs bool, extraUserIDs []int64, cache *viewerPeerCache) *tg.Updates {
+	updates := r.channelMessagesUpdatesWithPeerCacheAndUsernames(ctx, viewerUserID, results, randomIDs, includeMessageIDs, extraUserIDs, cache, nil)
+	if updates != nil {
+		r.applyUsernamesToPeerObjects(ctx, updates.Users, updates.Chats)
+	}
+	return updates
+}
+
+func (r *Router) channelMessagesUpdatesWithPeerCacheAndUsernames(ctx context.Context, viewerUserID int64, results []domain.SendChannelMessageResult, randomIDs []int64, includeMessageIDs bool, extraUserIDs []int64, cache *viewerPeerCache, usernames map[domain.Peer][]domain.Username) *tg.Updates {
 	if cache == nil {
 		cache = newViewerPeerCache(r)
 	}
@@ -245,13 +277,15 @@ func (r *Router) channelMessagesUpdatesWithPeerCache(ctx context.Context, viewer
 	if date == 0 {
 		date = int(r.clock.Now().Unix())
 	}
-	return &tg.Updates{
+	out := &tg.Updates{
 		Updates: updates,
 		Users:   tgUsersForViewer(viewerUserID, cache.usersForIDs(ctx, viewerUserID, peerIDMapKeys(userIDs))),
 		Chats:   chats,
 		Date:    date,
 		Seq:     0,
 	}
+	applyUsernamesFromRegistry(out.Users, out.Chats, usernames)
+	return out
 }
 
 func (r *Router) channelEditMessageUpdates(ctx context.Context, viewerUserID int64, res domain.EditChannelMessageResult) *tg.Updates {
@@ -259,6 +293,14 @@ func (r *Router) channelEditMessageUpdates(ctx context.Context, viewerUserID int
 }
 
 func (r *Router) channelEditMessageUpdatesWithPeerCache(ctx context.Context, viewerUserID int64, res domain.EditChannelMessageResult, cache *viewerPeerCache) *tg.Updates {
+	updates := r.channelEditMessageUpdatesWithPeerCacheAndUsernames(ctx, viewerUserID, res, cache, nil)
+	if updates != nil {
+		r.applyUsernamesToPeerObjects(ctx, updates.Users, updates.Chats)
+	}
+	return updates
+}
+
+func (r *Router) channelEditMessageUpdatesWithPeerCacheAndUsernames(ctx context.Context, viewerUserID int64, res domain.EditChannelMessageResult, cache *viewerPeerCache, usernames map[domain.Peer][]domain.Username) *tg.Updates {
 	if cache == nil {
 		cache = newViewerPeerCache(r)
 	}
@@ -281,13 +323,15 @@ func (r *Router) channelEditMessageUpdatesWithPeerCache(ctx context.Context, vie
 	}
 	chats := []tg.ChatClass{tgChannelChatMin(viewerUserID, res.Channel)}
 	chats = append(chats, tgChannels(viewerUserID, cache.channelsForIDs(ctx, viewerUserID, peerIDsExcept(peerIDMapKeys(channelIDs), res.Channel.ID)))...)
-	return &tg.Updates{
+	out := &tg.Updates{
 		Updates: updates,
 		Users:   tgUsersForViewer(viewerUserID, cache.usersForIDs(ctx, viewerUserID, peerIDMapKeys(userIDs))),
 		Chats:   chats,
 		Date:    int(r.clock.Now().Unix()),
 		Seq:     0,
 	}
+	applyUsernamesFromRegistry(out.Users, out.Chats, usernames)
+	return out
 }
 
 func (r *Router) channelDeleteMessagesUpdates(viewerUserID int64, channel domain.Channel, event domain.ChannelUpdateEvent) *tg.Updates {

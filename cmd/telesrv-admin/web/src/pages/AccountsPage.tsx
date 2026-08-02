@@ -1,9 +1,10 @@
 import { ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
-import { Alert, Badge, EmptyRow, Metric, PageFrame, QueryPanel } from "../components/ui";
+import { Alert, Badge, EmptyRow, Metric, PageFrame, QueryPanel, UsernameCell } from "../components/ui";
+import { ScamFakeBadges } from "../components/flags";
 import { useI18n } from "../i18n";
-import { displayName, displayPhone, displayUsername, formatDate, formatUnix } from "../lib/format";
+import { displayName, displayPhone, formatDate, formatUnix } from "../lib/format";
 import { accountMetrics } from "../lib/metrics";
 import type { Navigate } from "../routing";
 import type { AccountListResponse } from "../types";
@@ -106,12 +107,12 @@ export function AccountsPage({ navigate }: { navigate: Navigate }) {
               <tr key={row.ID}>
                 <td className="mono">{row.ID}</td>
                 <td>{displayPhone(row.Phone)}</td>
-                <td>{displayUsername(row.Username)}</td>
+                <td><UsernameCell username={row.Username} collectibles={row.Collectibles} /></td>
                 <td>{displayName(row)}</td>
                 <td>{row.DeviceCount}</td>
                 <td>{formatDate(row.LastActiveAt)}</td>
                 <td>{row.PremiumUntil > 0 ? <Badge tone="good">{t("account.premium")} {formatUnix(row.PremiumUntil)}</Badge> : <Badge>{t("common.none")}</Badge>}</td>
-                <td>{row.Verified ? <Badge tone="good">{t("common.verified")}</Badge> : <Badge>{t("account.notVerified")}</Badge>}</td>
+                <td>{row.Verified ? <Badge tone="good">{t("common.verified")}</Badge> : <Badge>{t("account.notVerified")}</Badge>} <ScamFakeBadges scam={row.Scam} fake={row.Fake} /></td>
                 <td>{row.Frozen ? <Badge tone="danger">{t("account.frozen")}</Badge> : <Badge>{t("common.normal")}</Badge>}</td>
                 <td>{formatDate(row.UpdatedAt)}</td>
                 <td><button className="row-link" onClick={() => navigate(`/accounts/${row.ID}`)}>{t("common.detail")} <ChevronRight size={14} /></button></td>

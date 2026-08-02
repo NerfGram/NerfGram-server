@@ -170,7 +170,7 @@ func (s *AccountLifecycleStore) ExecuteAccountDeletion(ctx context.Context, user
 	if err := purgeDeletedAccountPrivateState(ctx, tx, userID, now); err != nil {
 		return domain.AccountDeletionResult{}, err
 	}
-	if err := replacePeerUsernameTx(ctx, tx, peerUsernameTypeUser, userID, ""); err != nil {
+	if err := replacePeerUsernameTx(ctx, tx, peerUsernameTypeUser, userID, "", ""); err != nil {
 		return domain.AccountDeletionResult{}, fmt.Errorf("release deleted account username: %w", err)
 	}
 	reason = strings.TrimSpace(reason)
@@ -505,7 +505,10 @@ FROM authorizations WHERE auth_key_id = $1 AND user_id = $2 FOR UPDATE`, id, use
 	if !found {
 		return nil, nil
 	}
-	if err := deleteRevocationTargetsTx(ctx, tx, []int64{id}); err != nil {
+	// Cancelling a pending account deletion deliberately retires the requester
+	// protocol identity; unlike remote device revocation, this path does not need
+	// to preserve the key for a client-visible RPC 401 transition.
+	if err := deleteProtocolAuthIdentitiesTx(ctx, tx, []int64{id}); err != nil {
 		return nil, err
 	}
 	return []domain.Authorization{a}, nil

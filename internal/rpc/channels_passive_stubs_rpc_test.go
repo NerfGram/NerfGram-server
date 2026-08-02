@@ -3,7 +3,11 @@ package rpc
 import (
 	"github.com/iamxvbaba/td/tg"
 	"strings"
+	apptelemetry "telesrv/internal/app/clienttelemetry"
+	appmessages "telesrv/internal/app/messages"
+	appmoderation "telesrv/internal/app/moderation"
 	"telesrv/internal/domain"
+	"telesrv/internal/store/memory"
 	"testing"
 	"time"
 )
@@ -11,6 +15,14 @@ import (
 func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	f := newRPCChannelFixture(t)
 	r := f.router
+	moderationReports := memory.NewModerationReportStore()
+	telemetryEvents := memory.NewClientTelemetryStore()
+	r.deps.ClientTelemetry = apptelemetry.NewService(telemetryEvents)
+	r.deps.Moderation = appmoderation.NewService(
+		moderationReports,
+		appmoderation.WithMessageReaders(nil, r.deps.Channels),
+		appmoderation.WithPeerReaders(r.deps.Users, r.deps.Channels),
+	)
 	owner := f.user(41, "15550002101", "Owner")
 	friend := f.user(42, "15550002102", "Friend")
 	invited := f.user(43, "15550002103", "Invited")
@@ -438,6 +450,36 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	if ok, err := r.onMessagesReportSpam(ownerCtx, inputPeerChannel(channel)); err != nil || !ok {
 		t.Fatalf("messages.reportSpam = ok %v err %v, want true nil", ok, err)
 	}
+	if _, err := r.onMessagesReport(ownerCtx, &tg.MessagesReportRequest{
+		Peer: inputPeerChannel(channel),
+	}); err == nil || !strings.Contains(err.Error(), "MESSAGE_ID_REQUIRED") {
+		t.Fatalf("desktop messages.report without ids err = %v, want MESSAGE_ID_REQUIRED", err)
+	}
+	androidReportOptions, err := r.onMessagesReport(
+		WithClientInfo(ownerCtx, ClientInfo{
+			Type:       ClientTypeAndroid,
+			AppVersion: "12.9.0 (69669) pbeta",
+		}),
+		&tg.MessagesReportRequest{Peer: inputPeerChannel(channel)},
+	)
+	if err != nil {
+		t.Fatalf("android messages.report initial options: %v", err)
+	}
+	if choices, ok := androidReportOptions.(*tg.ReportResultChooseOption); !ok || len(choices.Options) == 0 {
+		t.Fatalf("android messages.report initial options = %#v, want chooseOption", androidReportOptions)
+	}
+	if got := moderationReports.Reports(); len(got) != 1 {
+		t.Fatalf("android initial report option discovery persisted reports = %+v, want only earlier reportSpam", got)
+	}
+	if _, err := r.onMessagesReport(
+		WithClientInfo(ownerCtx, ClientInfo{Type: ClientTypeAndroid}),
+		&tg.MessagesReportRequest{
+			Peer:   inputPeerChannel(channel),
+			Option: []byte("spam"),
+		},
+	); err == nil || !strings.Contains(err.Error(), "MESSAGE_ID_REQUIRED") {
+		t.Fatalf("android selected report option without ids err = %v, want MESSAGE_ID_REQUIRED", err)
+	}
 	reportOptions, err := r.onMessagesReport(ownerCtx, &tg.MessagesReportRequest{
 		Peer: inputPeerChannel(channel),
 		ID:   []int{1},
@@ -470,19 +512,15 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	if _, ok := reported.(*tg.ReportResultReported); !ok {
 		t.Fatalf("messages.report spam = %#v, want reported", reported)
 	}
+	if got := moderationReports.Reports(); len(got) != 2 {
+		t.Fatalf("moderation reports = %+v, want peer-spam and message reports", got)
+	}
 	if _, err := r.onMessagesReport(ownerCtx, &tg.MessagesReportRequest{
 		Peer:   inputPeerChannel(channel),
 		ID:     []int{1},
 		Option: []byte("bogus"),
 	}); err == nil || !strings.Contains(err.Error(), "OPTION_INVALID") {
 		t.Fatalf("messages.report invalid option err = %v, want OPTION_INVALID", err)
-	}
-	if ok, err := r.onMessagesReportReaction(ownerCtx, &tg.MessagesReportReactionRequest{
-		Peer:         inputPeerChannel(channel),
-		ID:           1,
-		ReactionPeer: &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
-	}); err != nil || !ok {
-		t.Fatalf("messages.reportReaction = ok %v err %v, want true nil", ok, err)
 	}
 	if ok, err := r.onMessagesReportMessagesDelivery(ownerCtx, &tg.MessagesReportMessagesDeliveryRequest{
 		Peer: inputPeerChannel(channel),
@@ -503,11 +541,45 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	}); err != nil || !ok {
 		t.Fatalf("messages.reportReadMetrics = ok %v err %v, want true nil", ok, err)
 	}
+	if events := telemetryEvents.Events(); len(events) != 2 ||
+		events[0].Kind != domain.ClientTelemetryMessageDelivery ||
+		events[1].Kind != domain.ClientTelemetryReadMetrics ||
+		len(moderationReports.Reports()) != 2 {
+		t.Fatalf("telemetry=%+v moderation=%+v, want separate durable streams",
+			events, moderationReports.Reports())
+	}
 	if ok, err := r.onMessagesReportMusicListen(ownerCtx, &tg.MessagesReportMusicListenRequest{
 		ID:               &tg.InputDocument{ID: 1, AccessHash: 2},
 		ListenedDuration: 1,
-	}); err != nil || !ok {
-		t.Fatalf("messages.reportMusicListen = ok %v err %v, want true nil", ok, err)
+	}); err == nil || ok || !strings.Contains(err.Error(), "DOCUMENT_INVALID") {
+		t.Fatalf("messages.reportMusicListen = ok %v err %v, want DOCUMENT_INVALID", ok, err)
+	}
+	if _, err := r.onMessagesReportSponsoredMessage(ownerCtx, &tg.MessagesReportSponsoredMessageRequest{
+		RandomID: []byte("unseen-ad"),
+	}); err == nil || !strings.Contains(err.Error(), "RANDOM_ID_INVALID") {
+		t.Fatalf("unseen sponsored report err=%v, want RANDOM_ID_INVALID", err)
+	}
+	impression, err := domain.NewSponsoredMessageImpression(
+		owner.ID, []byte("ad"),
+		domain.Peer{Type: domain.PeerTypeChannel, ID: channel.ID},
+		0, []byte(`{"schema_version":1,"text":"test sponsored message"}`),
+		time.Now().UTC(), time.Now().UTC().Add(time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := moderationReports.CreateSponsoredMessageImpression(ownerCtx, impression); err != nil {
+		t.Fatal(err)
+	}
+	sponsoredOptions, err := r.onMessagesReportSponsoredMessage(ownerCtx, &tg.MessagesReportSponsoredMessageRequest{
+		RandomID: []byte("ad"),
+	})
+	if err != nil {
+		t.Fatalf("messages.reportSponsoredMessage options: %v", err)
+	}
+	if choices, ok := sponsoredOptions.(*tg.ChannelsSponsoredMessageReportResultChooseOption); !ok ||
+		len(choices.Options) == 0 {
+		t.Fatalf("sponsored options=%#v, want chooseOption", sponsoredOptions)
 	}
 	sponsoredReport, err := r.onMessagesReportSponsoredMessage(ownerCtx, &tg.MessagesReportSponsoredMessageRequest{
 		RandomID: []byte("ad"),
@@ -576,6 +648,13 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	friendReactionReq.SetReaction(friendReactionReq.Reaction)
 	if _, err := r.onMessagesSendReaction(friendCtx, friendReactionReq); err != nil {
 		t.Fatalf("messages.sendReaction by friend: %v", err)
+	}
+	if ok, err := r.onMessagesReportReaction(ownerCtx, &tg.MessagesReportReactionRequest{
+		Peer:         inputPeerChannel(channel),
+		ID:           viewedID,
+		ReactionPeer: &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
+	}); err != nil || !ok {
+		t.Fatalf("messages.reportReaction = ok %v err %v, want true nil", ok, err)
 	}
 	unreadReactions, err := r.onMessagesGetUnreadReactions(ownerCtx, &tg.MessagesGetUnreadReactionsRequest{
 		Peer:  inputPeerChannel(channel),
@@ -787,28 +866,22 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	if !ok || staleEmptyPage.Hash != 0 || len(staleEmptyPage.Tags) != 0 {
 		t.Fatalf("messages.getSavedReactionTags stale empty hash = %#v, want empty page hash 0", staleEmptyTags)
 	}
+	r.deps.Messages = appmessages.NewService(memory.NewMessageStore(), nil)
+	if _, err := f.users.SetPremiumUntil(ownerCtx, owner.ID, int(time.Now().Add(time.Hour).Unix())); err != nil {
+		t.Fatalf("grant owner premium for saved tag rename: %v", err)
+	}
 	updateTagReq := &tg.MessagesUpdateSavedReactionTagRequest{Reaction: &tg.ReactionEmoji{Emoticon: "ok"}}
 	updateTagReq.SetTitle("Work")
-	if ok, err := r.onMessagesUpdateSavedReactionTag(ownerCtx, updateTagReq); err != nil || !ok {
-		t.Fatalf("messages.updateSavedReactionTag = ok %v err %v, want true nil", ok, err)
+	if _, err := r.onMessagesUpdateSavedReactionTag(ownerCtx, updateTagReq); err == nil || !strings.Contains(err.Error(), "REACTION_INVALID") {
+		t.Fatalf("messages.updateSavedReactionTag unassigned err = %v, want REACTION_INVALID", err)
 	}
 	globalTags, err := r.onMessagesGetSavedReactionTags(ownerCtx, &tg.MessagesGetSavedReactionTagsRequest{})
 	if err != nil {
 		t.Fatalf("messages.getSavedReactionTags global: %v", err)
 	}
 	globalPage, ok := globalTags.(*tg.MessagesSavedReactionTags)
-	if !ok || globalPage.Hash == 0 || len(globalPage.Tags) != 1 {
-		t.Fatalf("messages.getSavedReactionTags global = %#v, want one hashable tag", globalTags)
-	}
-	if emoji, ok := globalPage.Tags[0].Reaction.(*tg.ReactionEmoji); !ok || emoji.Emoticon != "ok" || globalPage.Tags[0].Title != "Work" || globalPage.Tags[0].Count != 0 {
-		t.Fatalf("messages.getSavedReactionTags tag = %+v, want ok/Work/count0", globalPage.Tags[0])
-	}
-	globalNotModified, err := r.onMessagesGetSavedReactionTags(ownerCtx, &tg.MessagesGetSavedReactionTagsRequest{Hash: globalPage.Hash})
-	if err != nil {
-		t.Fatalf("messages.getSavedReactionTags hash: %v", err)
-	}
-	if _, ok := globalNotModified.(*tg.MessagesSavedReactionTagsNotModified); !ok {
-		t.Fatalf("messages.getSavedReactionTags hash = %#v, want notModified", globalNotModified)
+	if !ok || globalPage.Hash != 0 || len(globalPage.Tags) != 0 {
+		t.Fatalf("messages.getSavedReactionTags global = %#v, want empty", globalTags)
 	}
 	peerTagsAfterUpdate, err := r.onMessagesGetSavedReactionTags(ownerCtx, savedTagsReq)
 	if err != nil {
@@ -831,9 +904,11 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("messages.getDefaultTagReactions: %v", err)
 	}
-	if got := tagReactions.(*tg.MessagesReactions).Reactions; len(got) != 0 {
-		t.Fatalf("messages.getDefaultTagReactions = %+v, want empty", got)
+	defaultPage, ok := tagReactions.(*tg.MessagesReactions)
+	if !ok || defaultPage.Hash == 0 || len(defaultPage.Reactions) == 0 {
+		t.Fatalf("messages.getDefaultTagReactions = %#v, want non-empty hashable catalog", tagReactions)
 	}
+	r.deps.Messages = nil
 	// poll 链路已是真实现：对非 poll 消息一律 MESSAGE_ID_INVALID（与官方一致）。
 	if _, err := r.onMessagesSendVote(ownerCtx, &tg.MessagesSendVoteRequest{
 		Peer:    inputPeerChannel(channel),
@@ -886,6 +961,16 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "MESSAGE_ID_INVALID") {
 		t.Fatalf("messages.deletePollAnswer err = %v, want MESSAGE_ID_INVALID without poll store", err)
 	}
+	verify := newFakeBotVerifications()
+	r.deps.BotVerifications = verify
+	const unreadPollIcon = int64(8800024)
+	unreadPollPeer := domain.Peer{Type: domain.PeerTypeChannel, ID: channel.ID}
+	verify.marks[unreadPollPeer] = domain.CustomVerification{
+		VerifierBotID:  777000123,
+		Peer:           unreadPollPeer,
+		IconDocumentID: unreadPollIcon,
+		Description:    "Verified poll peer",
+	}
 	unreadPollVotes, err := r.onMessagesGetUnreadPollVotes(ownerCtx, &tg.MessagesGetUnreadPollVotesRequest{
 		Peer:  inputPeerChannel(channel),
 		Limit: 10,
@@ -893,6 +978,7 @@ func TestTDesktopPassiveChannelStubs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("messages.getUnreadPollVotes: %v", err)
 	}
+	assertMessagesEnvelopeBotVerificationIcon(t, unreadPollVotes, unreadPollPeer, unreadPollIcon)
 	if len(unreadPollVotes.(*tg.MessagesMessages).Messages) != 0 {
 		t.Fatalf("messages.getUnreadPollVotes = %+v, want empty messages", unreadPollVotes)
 	}

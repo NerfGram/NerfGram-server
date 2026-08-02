@@ -27,6 +27,9 @@ func tgUpdatesDifference(viewerUserID int64, diff domain.UpdateDifference) tg.Up
 				out.NewMessages = append(out.NewMessages, msg)
 				addMessageUsers(out, seenUsers, event.Message)
 			}
+			if balance := tgGiftStarsBalanceUpdate(event.Message); balance != nil {
+				out.OtherUpdates = append(out.OtherUpdates, balance)
+			}
 		case domain.UpdateEventReadHistoryInbox:
 			if update := tgReadHistoryInboxUpdate(event); update != nil {
 				out.OtherUpdates = append(out.OtherUpdates, update)
@@ -35,7 +38,7 @@ func tgUpdatesDifference(viewerUserID int64, diff domain.UpdateDifference) tg.Up
 			if update := tgReadHistoryOutboxUpdate(event); update != nil {
 				out.OtherUpdates = append(out.OtherUpdates, update)
 			}
-		case domain.UpdateEventMessageReactions, domain.UpdateEventMessagePoll:
+		case domain.UpdateEventMessagePoll:
 			// 同时下发消息快照（含最新聚合）与对应通知 update；事件无 TL pts，
 			// pts 推进靠 difference state 本身。
 			if msg := tgMessage(event.Message); msg != nil {
@@ -55,11 +58,23 @@ func tgUpdatesDifference(viewerUserID int64, diff domain.UpdateDifference) tg.Up
 		if nudge.ChannelID == 0 {
 			continue
 		}
-		update := &tg.UpdateChannelTooLong{ChannelID: nudge.ChannelID}
-		if nudge.Pts > 0 {
-			update.SetPts(nudge.Pts)
+		if nudge.AvailableMinID > 0 {
+			out.OtherUpdates = append(out.OtherUpdates, &tg.UpdateChannelAvailableMessages{
+				ChannelID:      nudge.ChannelID,
+				AvailableMinID: nudge.AvailableMinID,
+			})
 		}
-		out.OtherUpdates = append(out.OtherUpdates, update)
+		// Preserve compatibility for older domain callers that only supplied
+		// Pts: a nudge without an owner-local boundary is a shared channel
+		// update nudge. New store results set ChannelUpdatesDirty explicitly so
+		// a channel can carry both absolute clear and too-long updates.
+		if nudge.ChannelUpdatesDirty || nudge.AvailableMinID == 0 {
+			update := &tg.UpdateChannelTooLong{ChannelID: nudge.ChannelID}
+			if nudge.Pts > 0 {
+				update.SetPts(nudge.Pts)
+			}
+			out.OtherUpdates = append(out.OtherUpdates, update)
+		}
 		if nudge.Channel != nil && nudge.Channel.Channel.ID != 0 {
 			addChannelNudgeChat(out, seenChats, tgChannelChatForView(viewerUserID, *nudge.Channel))
 		}
@@ -464,32 +479,6 @@ func tgOtherUpdateFromEvent(event domain.UpdateEvent) tg.UpdateClass {
 			return nil
 		}
 		return tgUpdateMessagePoll(pollPeer, event.Message.ID, media.Poll)
-	case domain.UpdateEventMessageReactions:
-		if event.Message.ID <= 0 || event.Message.ID > domain.MaxMessageBoxID {
-			return nil
-		}
-		peer := event.Message.Peer
-		if peer.Type == "" || peer.ID == 0 {
-			peer = event.Peer
-		}
-		outPeer := tgPeer(peer)
-		if outPeer == nil {
-			return nil
-		}
-		reactions := event.Message.Reactions
-		if reactions == nil {
-			empty := domain.ChannelMessageReactions{CanSeeList: true, Results: []domain.ChannelMessageReactionCount{}, Recent: []domain.ChannelMessagePeerReaction{}}
-			reactions = &empty
-		}
-		converted := tgMessageReactions(event.UserID, reactions)
-		if converted == nil {
-			converted = &tg.MessageReactions{Results: []tg.ReactionCount{}}
-		}
-		return &tg.UpdateMessageReactions{
-			Peer:      outPeer,
-			MsgID:     event.Message.ID,
-			Reactions: *converted,
-		}
 	case domain.UpdateEventDialogFilter:
 		update := &tg.UpdateDialogFilter{ID: event.FilterID}
 		if event.DialogFilter != nil {
@@ -508,14 +497,6 @@ func tgOtherUpdateFromEvent(event domain.UpdateEvent) tg.UpdateClass {
 			FolderPeers: tgFolderPeers(event.FolderPeers),
 			Pts:         event.Pts,
 			PtsCount:    event.PtsCount,
-		}
-	case domain.UpdateEventChannelAvailable:
-		if event.Peer.Type != domain.PeerTypeChannel || event.Peer.ID == 0 || event.MaxID <= 0 {
-			return nil
-		}
-		return &tg.UpdateChannelAvailableMessages{
-			ChannelID:      event.Peer.ID,
-			AvailableMinID: event.MaxID,
 		}
 	default:
 		return nil

@@ -400,31 +400,9 @@ func (s *Service) PublishNewMessage(ctx context.Context, userID int64, msg domai
 	}, true, 0, false)
 }
 
-// RecordMessageReactions records a durable marker for message reaction changes.
-//
-// updateMessageReactions has no pts fields in Layer 225, but TDesktop still
-// needs getDifference to advance account pts and carry the latest reaction
-// aggregate for offline devices.
-func (s *Service) RecordMessageReactions(ctx context.Context, authKeyID [8]byte, userID int64, msg domain.Message) (domain.UpdateEvent, domain.UpdateState, error) {
-	if userID == 0 {
-		userID = msg.OwnerUserID
-	}
-	date := msg.Date
-	if date == 0 {
-		date = int(time.Now().Unix())
-	}
-	return s.recordEventWithoutState(ctx, userID, domain.UpdateEvent{
-		Type:     domain.UpdateEventMessageReactions,
-		Date:     date,
-		Message:  msg,
-		Peer:     msg.Peer,
-		PtsCount: 1,
-	})
-}
-
 // RecordMessagePoll records a durable marker for message poll state changes
 // (vote / close). updateMessagePoll has no pts fields in Layer 225 — same
-// bookkeeping shape as RecordMessageReactions.
+// historical bookkeeping shape pending its own audit.
 func (s *Service) RecordMessagePoll(ctx context.Context, authKeyID [8]byte, userID int64, msg domain.Message) (domain.UpdateEvent, domain.UpdateState, error) {
 	if userID == 0 {
 		userID = msg.OwnerUserID
@@ -750,16 +728,6 @@ func (s *Service) RecordFolderPeers(ctx context.Context, stateAuthKeyID [8]byte,
 		Type:        domain.UpdateEventFolderPeers,
 		FolderPeers: append([]domain.FolderPeerUpdate(nil), peers...),
 		PtsCount:    1,
-	}, true, excludeSessionID)
-}
-
-// RecordChannelAvailableMessages records a local channel history clear for multi-device sync.
-func (s *Service) RecordChannelAvailableMessages(ctx context.Context, stateAuthKeyID [8]byte, userID, channelID int64, availableMinID int, excludeAuthKeyID [8]byte, excludeSessionID int64) (domain.UpdateEvent, domain.UpdateState, error) {
-	return s.recordEvent(ctx, stateAuthKeyID, excludeAuthKeyID, userID, domain.UpdateEvent{
-		Type:     domain.UpdateEventChannelAvailable,
-		Peer:     domain.Peer{Type: domain.PeerTypeChannel, ID: channelID},
-		MaxID:    availableMinID,
-		PtsCount: 1,
 	}, true, excludeSessionID)
 }
 

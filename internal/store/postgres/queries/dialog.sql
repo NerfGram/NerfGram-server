@@ -880,30 +880,6 @@ WHERE d.user_id = sqlc.arg(user_id)::bigint
   AND d.peer_type = sqlc.arg(peer_type)::text
   AND d.peer_id = sqlc.arg(peer_id)::bigint;
 
--- name: ClearDialogAfterHistoryDelete :exec
-UPDATE dialogs d
-SET
-  top_message_id = 0,
-  top_message_date = 0,
-  read_inbox_max_id = GREATEST(d.read_inbox_max_id, d.top_message_id),
-  read_outbox_max_id = GREATEST(d.read_outbox_max_id, d.top_message_id),
-  unread_count = 0,
-  unread_mark = false,
-  unread_mentions_count = 0,
-  unread_reactions_count = (
-    SELECT COUNT(*)::int
-    FROM message_boxes m2
-    WHERE m2.owner_user_id = d.user_id
-      AND m2.peer_type = d.peer_type
-      AND m2.peer_id = d.peer_id
-      AND NOT m2.deleted
-      AND m2.reaction_unread
-  ),
-  updated_at = now()
-WHERE d.user_id = sqlc.arg(user_id)::bigint
-  AND d.peer_type = sqlc.arg(peer_type)::text
-  AND d.peer_id = sqlc.arg(peer_id)::bigint;
-
 -- name: DeleteDialogByPeer :exec
 WITH dropped_drafts AS (
     -- 删除会话同时丢弃该 peer 的云草稿，避免对端重建会话后旧草稿复活。

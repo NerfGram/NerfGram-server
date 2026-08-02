@@ -27,9 +27,12 @@ import (
 	"telesrv/internal/app/account"
 	aiapp "telesrv/internal/app/ai"
 	"telesrv/internal/app/auth"
+	authdiagnosticsapp "telesrv/internal/app/authdiagnostics"
 	botsapp "telesrv/internal/app/bots"
+	botverificationapp "telesrv/internal/app/botverification"
 	channelapp "telesrv/internal/app/channels"
 	chatlistsapp "telesrv/internal/app/chatlists"
+	clienttelemetryapp "telesrv/internal/app/clienttelemetry"
 	communitiesapp "telesrv/internal/app/communities"
 	"telesrv/internal/app/contacts"
 	"telesrv/internal/app/dialogs"
@@ -41,23 +44,29 @@ import (
 	"telesrv/internal/app/livestream"
 	"telesrv/internal/app/maintenance"
 	messageapp "telesrv/internal/app/messages"
+	moderationapp "telesrv/internal/app/moderation"
 	passkeyapp "telesrv/internal/app/passkey"
 	phoneapp "telesrv/internal/app/phone"
 	pollsapp "telesrv/internal/app/polls"
 	privacyapp "telesrv/internal/app/privacy"
+	ratingapp "telesrv/internal/app/rating"
 	secretchatapp "telesrv/internal/app/secretchat"
 	"telesrv/internal/app/stargifts"
 	"telesrv/internal/app/stars"
 	storiesapp "telesrv/internal/app/stories"
+	telegramloginapp "telesrv/internal/app/telegramlogin"
 	themesapp "telesrv/internal/app/themes"
 	translationapp "telesrv/internal/app/translation"
 	"telesrv/internal/app/updates"
+	usernamesapp "telesrv/internal/app/usernames"
 	"telesrv/internal/app/userprojection"
 	"telesrv/internal/app/users"
+	verificationapp "telesrv/internal/app/verification"
 	"telesrv/internal/botapi"
 	"telesrv/internal/config"
 	"telesrv/internal/domain"
 	"telesrv/internal/mtprotoedge"
+	obsmetrics "telesrv/internal/observability/metrics"
 	"telesrv/internal/officialgifts"
 	"telesrv/internal/otpdelivery"
 	otpsmtp "telesrv/internal/otpdelivery/smtp"
@@ -69,6 +78,7 @@ import (
 	"telesrv/internal/store/memory"
 	"telesrv/internal/store/postgres"
 	"telesrv/internal/store/redisstore"
+	"telesrv/internal/telegramloginhttp"
 	"telesrv/internal/turnsrv"
 	"telesrv/internal/web"
 )
@@ -82,7 +92,7 @@ func main() {
 	defer func() { _ = logger.Sync() }()
 
 	if err := run(logger); err != nil {
-		logger.Error("telesrv exited", zap.Error(err))
+		logger.Error("telesrv 退出", zap.Error(err))
 		_ = logger.Sync() // os.Exit 跳过 defer；缓冲写需显式 flush 错误日志
 		os.Exit(1)
 	}
@@ -133,7 +143,7 @@ func newBusinessAutomationOptions(cfg config.Config, online messageapp.BusinessA
 		opts = append(opts, messageapp.WithBusinessAutomationReplyProvider(messageapp.NewAIBusinessAutomationProvider(generator)))
 		logger.Info("Business automation reply provider", zap.String("provider", "ai"))
 	default:
-		logger.Warn("unknown Business automation AI provider; falling back to quick reply templates", zap.String("provider", cfg.BusinessAIProvider))
+		logger.Warn("未知 Business automation AI provider，回退 quick reply 模板", zap.String("provider", cfg.BusinessAIProvider))
 	}
 	return opts
 }
@@ -162,11 +172,11 @@ func newAIComposeOptions(cfg config.Config, limiter aiapp.RateLimiter, premium a
 			Thinking:        pc.Thinking,
 		})
 		if err != nil {
-			logger.Warn("AI compose provider skipped", zap.String("provider", pc.Name), zap.String("kind", pc.Kind), zap.Error(err))
+			logger.Warn("AI compose provider 已跳过", zap.String("provider", pc.Name), zap.String("kind", pc.Kind), zap.Error(err))
 			continue
 		}
 		providers = append(providers, provider)
-		logger.Info("AI compose provider enabled", zap.String("provider", provider.Name()), zap.String("kind", pc.Kind))
+		logger.Info("AI compose provider 已启用", zap.String("provider", provider.Name()), zap.String("kind", pc.Kind))
 	}
 	if len(providers) > 0 {
 		opts = append(opts, aiapp.WithProviders(providers...))
@@ -201,16 +211,16 @@ func newTranslationOptions(cfg config.Config, limiter translationapp.RateLimiter
 			OmitTemperature: pc.OmitTemperature, Thinking: pc.Thinking,
 		})
 		if err != nil {
-			logger.Warn("translation provider skipped", zap.String("provider", pc.Name), zap.Error(err))
+			logger.Warn("translation provider 已跳过", zap.String("provider", pc.Name), zap.Error(err))
 			continue
 		}
 		providers = append(providers, translationapp.NewAIProvider(provider))
-		logger.Info("translation provider enabled", zap.String("provider", provider.Name()), zap.String("kind", pc.Kind))
+		logger.Info("translation provider 已启用", zap.String("provider", provider.Name()), zap.String("kind", pc.Kind))
 	}
 	if len(providers) > 0 {
 		opts = append(opts, translationapp.WithProviders(providers...))
 	} else if cfg.TranslationEnabled {
-		logger.Warn("translation enabled but no remote provider; messages.translateText will return TRANSLATIONS_DISABLED")
+		logger.Warn("translation 已启用但没有远程 provider；messages.translateText 将返回 TRANSLATIONS_DISABLED")
 	}
 	return opts
 }
@@ -225,7 +235,7 @@ func newTranslationOptions(cfg config.Config, limiter translationapp.RateLimiter
 //   - /debug/pprof/allocs   累计分配（带宽/序列化热点常与之相关）
 //
 // mutex/block 采样在低流量测试环境开销可忽略；高流量生产如担心扰动，置空 DebugAddr 关闭整端点。
-func startDebugServer(ctx context.Context, addr string, logger *zap.Logger) {
+func startDebugServer(ctx context.Context, addr string, metricsHandler http.Handler, logger *zap.Logger) {
 	if addr == "" {
 		return
 	}
@@ -238,13 +248,16 @@ func startDebugServer(ctx context.Context, addr string, logger *zap.Logger) {
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	if metricsHandler != nil {
+		mux.Handle("/metrics", metricsHandler)
+	}
 
 	srv := &http.Server{Addr: addr, Handler: mux}
 	go func() {
-		logger.Info("pprof debug endpoint enabled", zap.String("addr", addr),
+		logger.Info("pprof 调试端点已启用", zap.String("addr", addr),
 			zap.String("hint", "go tool pprof http://"+addr+"/debug/pprof/profile?seconds=30"))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Warn("pprof endpoint exited", zap.Error(err))
+			logger.Warn("pprof 端点退出", zap.Error(err))
 		}
 	}()
 	go func() {
@@ -253,6 +266,55 @@ func startDebugServer(ctx context.Context, addr string, logger *zap.Logger) {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
+}
+
+func goRuntimeGaugeSamples() []obsmetrics.GaugeSample {
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	return []obsmetrics.GaugeSample{
+		{Name: "telesrv_go_goroutines", Value: float64(runtime.NumGoroutine())},
+		{Name: "telesrv_go_heap_alloc_bytes", Value: float64(mem.HeapAlloc)},
+		{Name: "telesrv_go_heap_inuse_bytes", Value: float64(mem.HeapInuse)},
+		{Name: "telesrv_go_heap_objects", Value: float64(mem.HeapObjects)},
+		{Name: "telesrv_go_stack_inuse_bytes", Value: float64(mem.StackInuse)},
+		{Name: "telesrv_go_sys_bytes", Value: float64(mem.Sys)},
+		{Name: "telesrv_go_gc_cycles", Value: float64(mem.NumGC)},
+		{Name: "telesrv_go_gc_pause_seconds", Value: time.Duration(mem.PauseTotalNs).Seconds()},
+	}
+}
+
+func mtprotoRuntimeGaugeSamples(snapshot mtprotoedge.RuntimeSnapshot) []obsmetrics.GaugeSample {
+	return []obsmetrics.GaugeSample{
+		{Name: "telesrv_mtproto_raw_connections", Value: float64(snapshot.RawConnections)},
+		{Name: "telesrv_mtproto_raw_connection_limit", Value: float64(snapshot.RawConnectionLimit)},
+		{Name: "telesrv_mtproto_handshakes_active", Value: float64(snapshot.Handshakes)},
+		{Name: "telesrv_mtproto_handshake_limit", Value: float64(snapshot.HandshakeLimit)},
+		{Name: "telesrv_mtproto_sessions", Labels: []obsmetrics.Label{{Name: "state", Value: "active"}}, Value: float64(snapshot.ActiveSessions)},
+		{Name: "telesrv_mtproto_sessions", Labels: []obsmetrics.Label{{Name: "state", Value: "provisional"}}, Value: float64(snapshot.ProvisionalSessions)},
+		{Name: "telesrv_mtproto_logical_sessions", Labels: []obsmetrics.Label{{Name: "state", Value: "retained"}}, Value: float64(snapshot.LogicalSessions)},
+		{Name: "telesrv_mtproto_logical_sessions", Labels: []obsmetrics.Label{{Name: "state", Value: "offline"}}, Value: float64(snapshot.OfflineLogicalSessions)},
+		{Name: "telesrv_mtproto_logical_outbox_frames", Value: float64(snapshot.LogicalOutboxFrames)},
+		{Name: "telesrv_mtproto_logical_outbox_bytes", Value: float64(snapshot.LogicalOutboxBytes)},
+		{Name: "telesrv_mtproto_pending_push_bytes", Value: float64(snapshot.PendingPushBytes)},
+		{Name: "telesrv_mtproto_inbound_rpc_tasks", Value: float64(snapshot.InboundRPCTasks)},
+		{Name: "telesrv_mtproto_inbound_rpc_bytes", Value: float64(snapshot.InboundRPCBytes)},
+		{Name: "telesrv_mtproto_inbound_rpc_ready_connections", Value: float64(snapshot.InboundRPCReadyConnections)},
+		{Name: "telesrv_mtproto_inbound_rpc_task_limit", Value: float64(snapshot.InboundRPCMaxTasks)},
+		{Name: "telesrv_mtproto_inbound_rpc_byte_limit", Value: float64(snapshot.InboundRPCMaxBytes)},
+		{Name: "telesrv_mtproto_inbound_frame_bytes", Value: float64(snapshot.InboundFrameBytes)},
+		{Name: "telesrv_mtproto_inbound_frame_byte_limit", Value: float64(snapshot.InboundFrameMaxBytes)},
+		{Name: "telesrv_mtproto_outbound_tracked_bytes", Labels: []obsmetrics.Label{{Name: "kind", Value: "body"}}, Value: float64(snapshot.OutboundTrackedBytes)},
+		{Name: "telesrv_mtproto_outbound_tracked_bytes", Labels: []obsmetrics.Label{{Name: "kind", Value: "control"}}, Value: float64(snapshot.OutboundControlBytes)},
+		{Name: "telesrv_mtproto_outbound_tracked_byte_limit", Labels: []obsmetrics.Label{{Name: "kind", Value: "body"}}, Value: float64(snapshot.OutboundTrackedMaxBytes)},
+		{Name: "telesrv_mtproto_outbound_tracked_byte_limit", Labels: []obsmetrics.Label{{Name: "kind", Value: "control"}}, Value: float64(snapshot.OutboundControlMaxBytes)},
+		{Name: "telesrv_mtproto_outbound_write_bytes", Value: float64(snapshot.OutboundWriteBytes)},
+		{Name: "telesrv_mtproto_outbound_write_byte_limit", Value: float64(snapshot.OutboundWriteMaxBytes)},
+		{Name: "telesrv_mtproto_rpc_execution_owners", Value: float64(snapshot.RPCExecutionOwners)},
+		{Name: "telesrv_mtproto_rpc_execution_reserved_entries", Value: float64(snapshot.RPCExecutionReservedEntries)},
+		{Name: "telesrv_mtproto_rpc_execution_receipts", Value: float64(snapshot.RPCExecutionReceipts)},
+		{Name: "telesrv_mtproto_rpc_execution_receipt_budget_bytes", Value: float64(snapshot.RPCExecutionReceiptBudgetBytes)},
+		{Name: "telesrv_mtproto_rpc_execution_subscribers", Value: float64(snapshot.RPCExecutionSubscribers)},
+	}
 }
 
 // externalMediaOption 按配置启用外链媒体抓取；禁用时返回 nil（NewService 跳过 nil option）。
@@ -264,6 +326,172 @@ func liveStreamDep(s *livestream.Service) rpc.LiveStreamsService {
 	}
 	return s
 }
+
+// verificationPeerVerifier writes the platform verification flag onto the peer
+// record for app/verification.
+//
+// It is called from *inside* the store transaction that decides the application,
+// which is the whole point of the port: "approved" and "target carries the badge"
+// must commit together. That is why the transaction is taken from the context
+// (postgres.VerificationTxFromContext) and written through — a write on a separate
+// pool connection would survive a rollback of the decision and leave a peer
+// wearing a badge no approved application backs.
+//
+// The app-service path is only the fallback for a context that carries no
+// transaction (a non-postgres store, or a direct call): there is nothing to join
+// then, and going through the services keeps their cache refresh behaviour.
+type verificationPeerVerifier struct {
+	users interface {
+		SetVerified(ctx context.Context, userID int64, verified bool) (domain.User, error)
+	}
+	channels interface {
+		SetVerified(ctx context.Context, channelID int64, verified bool) (domain.Channel, error)
+	}
+	// channelRowCache is handed to the transaction-scoped channel store so the
+	// cached channel row is dropped on the flag write, exactly as the pooled store
+	// does it.
+	channelRowCache *postgres.ChannelRowCache
+}
+
+func (v verificationPeerVerifier) SetUserVerified(ctx context.Context, userID int64, verified bool) error {
+	if tx, ok := postgres.VerificationTxFromContext(ctx); ok {
+		_, err := postgres.NewUserStore(tx).SetVerified(ctx, userID, verified)
+		return err
+	}
+	if v.users == nil {
+		return fmt.Errorf("verification peer verifier: user service is not wired")
+	}
+	_, err := v.users.SetVerified(ctx, userID, verified)
+	return err
+}
+
+func (v verificationPeerVerifier) SetChannelVerified(ctx context.Context, channelID int64, verified bool) error {
+	if tx, ok := postgres.VerificationTxFromContext(ctx); ok {
+		opts := []postgres.ChannelStoreOption(nil)
+		if v.channelRowCache != nil {
+			opts = append(opts, postgres.WithChannelRowCache(v.channelRowCache))
+		}
+		_, err := postgres.NewChannelStore(tx, opts...).SetChannelVerified(ctx, channelID, verified)
+		return err
+	}
+	if v.channels == nil {
+		return fmt.Errorf("verification peer verifier: channel service is not wired")
+	}
+	_, err := v.channels.SetVerified(ctx, channelID, verified)
+	return err
+}
+
+var _ verificationapp.PeerVerifier = verificationPeerVerifier{}
+
+// botVerificationMarkApplier writes a third-party mark on the decision's own
+// transaction when there is one.
+//
+// postgres.DecideCustomVerificationRequest hands its callback a context carrying
+// the transaction, and the pooled store would open a second, independently
+// committing one -- so an approval whose mark write failed would leave the request
+// approved with no mark. This adapter is what makes "approved implies mark exists"
+// survive a rollback, exactly as verificationPeerVerifier does for the official flag.
+type botVerificationMarkApplier struct {
+	store storepkg.BotVerificationStore
+}
+
+func (a botVerificationMarkApplier) GrantCustomVerification(ctx context.Context, mark domain.CustomVerification) (domain.CustomVerification, bool, error) {
+	if tx, ok := postgres.VerificationTxFromContext(ctx); ok {
+		return postgres.NewBotVerificationStore(tx).GrantCustomVerification(ctx, mark)
+	}
+	return a.store.GrantCustomVerification(ctx, mark)
+}
+
+func (a botVerificationMarkApplier) RevokeCustomVerification(ctx context.Context, verifierBotID int64, peer domain.Peer) (bool, error) {
+	if tx, ok := postgres.VerificationTxFromContext(ctx); ok {
+		return postgres.NewBotVerificationStore(tx).RevokeCustomVerification(ctx, verifierBotID, peer)
+	}
+	return a.store.RevokeCustomVerification(ctx, verifierBotID, peer)
+}
+
+var _ botverificationapp.MarkApplier = botVerificationMarkApplier{}
+
+// compositeBotVerificationNotifier drops the cached peer projections before the
+// edge rebuilds and pushes the peer, so a mark change cannot be pushed with a
+// stale badge.
+type compositeBotVerificationNotifier struct {
+	cache rpcProjectionVerificationNotifier
+	edge  botverificationapp.PeerNotifier
+}
+
+func (n compositeBotVerificationNotifier) NotifyPeerBotVerification(ctx context.Context, peer domain.Peer) error {
+	if err := n.cache.NotifyPeerVerified(ctx, peer); err != nil && n.cache.log != nil {
+		n.cache.log.Warn("invalidate peer caches after third-party verification change",
+			zap.String("peer_type", string(peer.Type)), zap.Int64("peer_id", peer.ID), zap.Error(err))
+	}
+	if n.edge == nil {
+		return nil
+	}
+	return n.edge.NotifyPeerBotVerification(ctx, peer)
+}
+
+var _ botverificationapp.PeerNotifier = compositeBotVerificationNotifier{}
+
+// rpcProjectionVerificationNotifier is the fallback badge-change hook, the same
+// shape and for the same reason as rpcProjectionUsernameNotifier: the RPC edge
+// owns both the cached peer projections and the tg.* push, and until it exposes
+// NotifyPeerVerified only the invalidation half can be wired here. Invalidation is
+// the half that must not be skipped — a decided application whose peer projection
+// still says "not verified" would keep showing the old badge state to every client
+// that reads from cache.
+type rpcProjectionVerificationNotifier struct {
+	invalidator interface {
+		InvalidateRPCProjectionReadModelForUser(userID int64)
+		InvalidateRPCProjectionReadModelForChannel(channelID int64)
+	}
+	users storepkg.UserCache
+	log   *zap.Logger
+}
+
+func (n rpcProjectionVerificationNotifier) NotifyPeerVerified(ctx context.Context, peer domain.Peer) error {
+	if n.invalidator == nil {
+		return nil
+	}
+	switch peer.Type {
+	case domain.PeerTypeUser:
+		n.invalidator.InvalidateRPCProjectionReadModelForUser(peer.ID)
+		// The shared user:base cache is the source the projection rebuilds from, so
+		// dropping only the projection would let it rebuild from a stale row.
+		if n.users != nil {
+			if err := n.users.Delete(ctx, []int64{peer.ID}); err != nil && n.log != nil {
+				n.log.Warn("invalidate base user cache after verification change",
+					zap.Int64("user_id", peer.ID), zap.Error(err))
+			}
+		}
+	case domain.PeerTypeChannel:
+		n.invalidator.InvalidateRPCProjectionReadModelForChannel(peer.ID)
+	}
+	return nil
+}
+
+// compositeVerificationNotifier drops the cached peer projections first and only
+// then lets the protocol edge push the change, so the pushed peer is rebuilt from
+// the committed row rather than from a cache entry written before the decision.
+// A cache failure must not swallow the push: the push is what online clients see.
+type compositeVerificationNotifier struct {
+	cache rpcProjectionVerificationNotifier
+	edge  verificationapp.PeerNotifier
+}
+
+func (n compositeVerificationNotifier) NotifyPeerVerified(ctx context.Context, peer domain.Peer) error {
+	if err := n.cache.NotifyPeerVerified(ctx, peer); err != nil && n.cache.log != nil {
+		n.cache.log.Warn("invalidate peer caches after verification change",
+			zap.String("peer_type", string(peer.Type)), zap.Int64("peer_id", peer.ID), zap.Error(err))
+	}
+	if n.edge == nil {
+		return nil
+	}
+	return n.edge.NotifyPeerVerified(ctx, peer)
+}
+
+var _ verificationapp.PeerNotifier = compositeVerificationNotifier{}
+
+var _ verificationapp.PeerNotifier = rpcProjectionVerificationNotifier{}
 
 func externalMediaOption(cfg config.Config) filesapp.Option {
 	if !cfg.ExternalMediaEnable {
@@ -304,9 +532,10 @@ func run(logger *zap.Logger) error {
 
 	// tg.Layer 由当前导入的 canonical schema 生成；纳入未来 Layer 后无需
 	// 在 telesrv 另维护一份常量。
-	logger.Info("telesrv starting",
+	logger.Info("telesrv 启动",
 		zap.String("listen", cfg.ListenAddr),
 		zap.Int("dc", cfg.DC),
+		zap.String("default_country_code", cfg.DefaultCountryCode),
 		zap.String("advertise", net.JoinHostPort(cfg.AdvertiseIP, portStr)),
 		zap.Int("tl_layer", tg.Layer),
 		zap.String("git_commit", buildMeta.Commit),
@@ -320,10 +549,12 @@ func run(logger *zap.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	metricRegistry := obsmetrics.New()
+	metricRegistry.AddGaugeProvider(goRuntimeGaugeSamples)
 
 	// pprof 调试端点：telesrv 是宿主进程（不在 docker 内，docker stats 看不到它），CPU/内存/
 	// goroutine/锁竞争的定位全靠此端点。早于重负载初始化启动，连 seed/预热阶段也可剖析。
-	startDebugServer(ctx, cfg.DebugAddr, logger)
+	startDebugServer(ctx, cfg.DebugAddr, metricRegistry, logger)
 
 	// 持久化依赖：先迁移 schema，再建立连接。auth key 与业务事实落 PostgreSQL，
 	// Redis 只承载可重建的短 TTL 状态、缓存、计数器和限流。
@@ -332,7 +563,7 @@ func run(logger *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("postgres migrate: %w", err)
 	}
-	logger.Info("PostgreSQL schema migrated",
+	logger.Info("PostgreSQL schema 已迁移",
 		zap.Uint("schema_version", migrationStatus.Version),
 		zap.Bool("schema_dirty", migrationStatus.Dirty),
 		zap.Bool("schema_empty", migrationStatus.Empty),
@@ -345,13 +576,88 @@ func run(logger *zap.Logger) error {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
 	defer pool.Close()
+	metricRegistry.AddGaugeProvider(func() []obsmetrics.GaugeSample {
+		stat := pool.Stat()
+		return []obsmetrics.GaugeSample{
+			{Name: "telesrv_postgres_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "total"}}, Value: float64(stat.TotalConns())},
+			{Name: "telesrv_postgres_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "acquired"}}, Value: float64(stat.AcquiredConns())},
+			{Name: "telesrv_postgres_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "idle"}}, Value: float64(stat.IdleConns())},
+			{Name: "telesrv_postgres_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "constructing"}}, Value: float64(stat.ConstructingConns())},
+			{Name: "telesrv_postgres_pool_max_connections", Value: float64(stat.MaxConns())},
+			{Name: "telesrv_postgres_pool_acquire_count", Value: float64(stat.AcquireCount())},
+			{Name: "telesrv_postgres_pool_acquire_wait_seconds", Value: stat.AcquireDuration().Seconds()},
+			{Name: "telesrv_postgres_pool_empty_acquire_count", Value: float64(stat.EmptyAcquireCount())},
+			{Name: "telesrv_postgres_pool_canceled_acquire_count", Value: float64(stat.CanceledAcquireCount())},
+		}
+	})
+
+	var telegramLoginService *telegramloginapp.Service
+	var telegramLoginIDTokens *telegramloginapp.IDTokenIssuer
+	var telegramLoginHTTPHandler http.Handler
+	if cfg.TelegramLoginEnabled {
+		codeSealer, err := telegramloginapp.LoadCodeSealer(cfg.TelegramLoginCodeKeysFile)
+		if err != nil {
+			return fmt.Errorf("load telegram login code keys: %w", err)
+		}
+		clientSecretPepper, err := telegramloginapp.LoadClientSecretPepper(cfg.TelegramLoginSecretPepperFile)
+		if err != nil {
+			return fmt.Errorf("load telegram login client-secret pepper: %w", err)
+		}
+		signingKeys, err := telegramloginapp.LoadSigningKeyRing(cfg.TelegramLoginSigningKeysFile, time.Now)
+		if err != nil {
+			return fmt.Errorf("load telegram login signing keys: %w", err)
+		}
+		telegramLoginService, err = telegramloginapp.NewService(postgres.NewTelegramLoginStore(pool), codeSealer, telegramloginapp.Config{
+			Issuer: cfg.TelegramLoginIssuer, AppScheme: cfg.PublicAppScheme, AppLinkBase: cfg.PublicAppLinkBase,
+			AllowHTTP:                  cfg.TelegramLoginAllowHTTP,
+			ClientSecretPepper:         clientSecretPepper,
+			SupportedSigningAlgorithms: signingKeys.ActiveAlgorithms(),
+			RequestTTL:                 cfg.TelegramLoginRequestTTL, CodeTTL: cfg.TelegramLoginCodeTTL,
+		})
+		if err != nil {
+			return fmt.Errorf("initialize telegram login service: %w", err)
+		}
+		telegramLoginIDTokens, err = telegramloginapp.NewIDTokenIssuer(signingKeys, telegramloginapp.IDTokenIssuerConfig{
+			Issuer: cfg.TelegramLoginIssuer, TTL: cfg.TelegramLoginIDTokenTTL, AllowHTTP: cfg.TelegramLoginAllowHTTP,
+		})
+		if err != nil {
+			return fmt.Errorf("initialize telegram login ID-token issuer: %w", err)
+		}
+	}
 
 	rdb, err := redisstore.Open(ctx, cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
 	if err != nil {
 		return fmt.Errorf("connect redis: %w", err)
 	}
 	defer func() { _ = rdb.Close() }()
-	logger.Info("persistence dependencies ready", zap.String("redis", cfg.RedisAddr))
+	metricRegistry.AddGaugeProvider(func() []obsmetrics.GaugeSample {
+		stat := rdb.PoolStats()
+		return []obsmetrics.GaugeSample{
+			{Name: "telesrv_redis_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "total"}}, Value: float64(stat.TotalConns)},
+			{Name: "telesrv_redis_pool_connections", Labels: []obsmetrics.Label{{Name: "state", Value: "idle"}}, Value: float64(stat.IdleConns)},
+			{Name: "telesrv_redis_pool_pending_requests", Value: float64(stat.PendingRequests)},
+			{Name: "telesrv_redis_pool_hits", Value: float64(stat.Hits)},
+			{Name: "telesrv_redis_pool_misses", Value: float64(stat.Misses)},
+			{Name: "telesrv_redis_pool_timeouts", Value: float64(stat.Timeouts)},
+			{Name: "telesrv_redis_pool_wait_count", Value: float64(stat.WaitCount)},
+			{Name: "telesrv_redis_pool_wait_seconds", Value: time.Duration(stat.WaitDurationNs).Seconds()},
+		}
+	})
+	logger.Info("持久化依赖就绪", zap.String("redis", cfg.RedisAddr))
+	if cfg.TelegramLoginEnabled {
+		telegramLoginHTTPHandler, err = telegramloginhttp.NewHandler(telegramloginhttp.Config{
+			Service: telegramLoginService, Tokens: telegramLoginIDTokens,
+			Limiter: redisstore.NewRateLimiter(rdb), AppName: cfg.PublicAppName,
+			Logger: logger.Named("telegram-login-http"), TrustedProxyCIDRs: cfg.TelegramLoginTrustedProxyCIDRs,
+			AllowHTTP: cfg.TelegramLoginAllowHTTP,
+		})
+		if err != nil {
+			return fmt.Errorf("initialize telegram login HTTP provider: %w", err)
+		}
+		logger.Info("Telegram Login/OIDC provider enabled",
+			zap.String("issuer", telegramLoginIDTokens.Issuer()),
+			zap.Strings("signing_algorithms", telegramLoginIDTokens.SupportedAlgorithms()))
+	}
 
 	authKeyStore := postgres.NewAuthKeyStore(pool)
 	userStore := postgres.NewUserStore(pool)
@@ -367,6 +673,9 @@ func run(logger *zap.Logger) error {
 	botCallbackStore := redisstore.NewBotCallbackRegistryStore(rdb)
 	ephemeralStore := redisstore.NewEphemeralMessageStore(rdb)
 	ephemeralReportStore := postgres.NewEphemeralReportStore(pool)
+	moderationReportStore := postgres.NewModerationReportStore(pool)
+	authDeliveryReportStore := postgres.NewAuthDeliveryReportStore(pool)
+	clientTelemetryStore := postgres.NewClientTelemetryStore(pool)
 	boxIDAllocator := redisstore.NewBoxIDAllocator(rdb, postgres.NewMessageBoxCounterSource(pool))
 	channelIDAllocator := redisstore.NewChannelIDAllocator(rdb, postgres.NewChannelIDCounterSource(pool))
 	channelMessageIDAllocator := redisstore.NewChannelMessageIDAllocator(rdb, postgres.NewChannelMessageIDCounterSource(pool))
@@ -402,7 +711,7 @@ func run(logger *zap.Logger) error {
 	if err != nil {
 		return fmt.Errorf("init blob backend: %w", err)
 	}
-	logger.Info("blob backend ready",
+	logger.Info("blob backend 就绪",
 		zap.String("backend", "localfs"),
 		zap.String("dir", cfg.BlobDir),
 	)
@@ -417,19 +726,19 @@ func run(logger *zap.Logger) error {
 		externalMediaOption(cfg),
 		webPagePreviewOption(cfg),
 	)
-		if cfg.MapboxToken != "" {
-		logger.Info("map tile thumbnail proxy enabled", zap.String("provider", "mapbox"), zap.String("cache_dir", cfg.MapTileCacheDir))
+	if cfg.MapboxToken != "" {
+		logger.Info("地图缩略图代理已启用", zap.String("provider", "mapbox"), zap.String("cache_dir", cfg.MapTileCacheDir))
 	}
 	if cfg.ExternalMediaEnable {
-		logger.Info("external media fetching enabled", zap.Int64("max_bytes", cfg.ExternalMediaMaxBytes), zap.Int("rate_per_min", cfg.ExternalMediaRatePerMin))
+		logger.Info("外链媒体抓取已启用", zap.Int64("max_bytes", cfg.ExternalMediaMaxBytes), zap.Int("rate_per_min", cfg.ExternalMediaRatePerMin))
 	}
 	if cfg.WebPagePreviewEnable {
-		logger.Info("webpage preview fetching enabled", zap.Int64("max_bytes", cfg.WebPagePreviewMaxBytes), zap.Int("rate_per_min", cfg.WebPagePreviewRatePerMin))
+		logger.Info("链接预览抓取已启用", zap.Int64("max_bytes", cfg.WebPagePreviewMaxBytes), zap.Int("rate_per_min", cfg.WebPagePreviewRatePerMin))
 	}
 	if stats, err := filesService.SeedMedia(ctx, cfg.StickerSeedDir, cfg.StickerSeedMaxSets); err != nil {
 		return fmt.Errorf("seed media: %w", err)
 	} else if !stats.Skipped {
-		logger.Info("media seed import completed",
+		logger.Info("媒体种子导入完成",
 			zap.String("dir", cfg.StickerSeedDir),
 			zap.Int("reactions", stats.Reactions),
 			zap.Int("sticker_sets", stats.StickerSets),
@@ -438,25 +747,29 @@ func run(logger *zap.Logger) error {
 			zap.Int("blobs", stats.Blobs),
 		)
 	}
+	if stats, err := filesService.SeedPremiumPromo(ctx, cfg.PremiumPromoSeedDir); err != nil {
+		return fmt.Errorf("seed premium promo: %w", err)
+	} else if !stats.Skipped {
+		logger.Info("Premium promo 视频种子导入完成",
+			zap.String("dir", cfg.PremiumPromoSeedDir),
+			zap.Int("videos", stats.Videos),
+			zap.Int("blobs", stats.Blobs),
+		)
+	}
 	if stats, err := filesService.SeedAppearance(ctx); err != nil {
 		return fmt.Errorf("seed appearance: %w", err)
 	} else if !stats.Skipped {
-		logger.Info("appearance seed import completed",
+		logger.Info("外观种子导入完成",
 			zap.String("source", "default-seed"),
 			zap.Int("wallpapers", stats.Wallpapers),
 			zap.Int("documents", stats.Documents),
 			zap.Int("blobs", stats.Blobs),
 		)
 	}
-	if seeded, err := filesService.SeedOfficialSystemAvatar(ctx); err != nil {
-		return fmt.Errorf("seed official system avatar: %w", err)
-	} else if seeded {
-		logger.Info("official system account avatar seed import completed", zap.Int64("photo_id", domain.OfficialSystemUserPhotoID))
-	}
 	if stats, err := filesService.WarmCaches(ctx); err != nil {
-		logger.Warn("media resources cache warmup failed", zap.Error(err))
+		logger.Warn("媒体资源缓存预热失败", zap.Error(err))
 	} else if stats.StickerSets > 0 || stats.Documents > 0 || stats.Blobs > 0 {
-		logger.Info("media resources cache warmup completed",
+		logger.Info("媒体资源缓存预热完成",
 			zap.Int("sticker_sets", stats.StickerSets),
 			zap.Int("documents", stats.Documents),
 			zap.Int("blobs", stats.Blobs),
@@ -465,9 +778,9 @@ func run(logger *zap.Logger) error {
 	// 默认 emoji status 系统集：从 animated_emoji 精选合成（幂等，已 seed 的存量
 	// 库重启后自动补上）；缺失时 premium 用户的 status 选择器会是空的。
 	if count, created, err := filesService.EnsureDefaultEmojiStatusSet(ctx); err != nil {
-		logger.Warn("default emoji status synthesis failed", zap.Error(err))
+		logger.Warn("默认 emoji status 系统集合成失败", zap.Error(err))
 	} else if created {
-		logger.Info("default emoji status set created", zap.Int("documents", count))
+		logger.Info("默认 emoji status 系统集已合成", zap.Int("documents", count))
 	}
 	langPackStore := postgres.NewLangPackStore(pool)
 	passwordStore := postgres.NewPasswordStore(pool)
@@ -476,16 +789,14 @@ func run(logger *zap.Logger) error {
 	tempAuthKeyStore := postgres.NewTempAuthKeyBindingStore(pool)
 	inlineRegistryStore := redisstore.NewInlineRegistryStore(rdb)
 	codeStore := redisstore.NewCodeStore(rdb)
+	authDeliveryReportService := authdiagnosticsapp.NewService(codeStore, authDeliveryReportStore)
+	clientTelemetryService := clienttelemetryapp.NewService(clientTelemetryStore)
 	rateLimiter := redisstore.NewRateLimiter(rdb)
 	activeSessions := mtprotoedge.NewSessionManager(logger.Named("mtprotoedge").Named("sessions"))
-	collectibleUsernameStore := postgres.NewCollectibleUsernameStore(pool)
-	userFlagsStore := postgres.NewUserFlagsStore(pool)
 	adminService := adminapp.NewService(adminapp.Dependencies{
-		Commands:             adminStore,
-		Restrictions:         adminStore,
-		OfficialGifts:        officialgifts.New(cfg.OfficialGiftsDir),
-		CollectibleUsernames: collectibleUsernameStore,
-		UserFlags:            userFlagsStore,
+		Commands:      adminStore,
+		Restrictions:  adminStore,
+		OfficialGifts: officialgifts.New(cfg.OfficialGiftsDir),
 	})
 	go maintenance.NewRetentionWorker(dispatchOutboxStore, tempAuthKeyStore, logger.Named("maintenance").Named("retention"),
 		cfg.UpdateEventRetention,
@@ -495,6 +806,9 @@ func run(logger *zap.Logger) error {
 		WithBotAPIUpdateRetention(botAPIUpdateStore, cfg.BotAPIUpdateRetention).
 		WithAuthKeySessionLayerRetention(authKeyStore).
 		WithLoginCodeDeliveryRetention(messageStore).
+		WithClientTelemetryRetention(clientTelemetryStore, 30*24*time.Hour).
+		WithAuthDeliveryReportRetention(authDeliveryReportStore, 30*24*time.Hour).
+		WithModerationRetention(moderationReportStore).
 		WithUserUpdateRetention(updateEventStore).
 		WithChannelUpdateRetention(channelStore).
 		WithOrphanAuthKeyRetention(authKeyStore, activeSessions, cfg.OrphanAuthKeyRetention).
@@ -509,21 +823,22 @@ func run(logger *zap.Logger) error {
 	contactsService := contacts.NewService(contactStore, userStore).Configure(
 		contacts.WithPhotoProvider(cachedPhotos),
 		contacts.WithPrivacyEvaluator(privacyService),
+		contacts.WithAccountFreezeProvider(adminService),
 		contacts.WithReadModelVersions(readModelVersionStore),
 	)
-		if seeded, err := langPackService.SeedDirectory(ctx, cfg.LangPackSeedDir); err != nil {
+	if seeded, err := langPackService.SeedDirectory(ctx, cfg.LangPackSeedDir); err != nil {
 		return fmt.Errorf("seed langpack: %w", err)
 	} else if seeded > 0 {
-		logger.Info("language pack seed import completed", zap.String("dir", cfg.LangPackSeedDir), zap.Int("strings", seeded))
+		logger.Info("语言包种子导入完成", zap.String("dir", cfg.LangPackSeedDir), zap.Int("strings", seeded))
 	}
 	// 国家区号目录:把 catalog 固化的官方全量(~235 国)幂等 upsert 进 PG,覆盖迁移里仅
 	// seed 的 2 国(US/CN)默认值。否则 countries 表非空,ListCountries 返回那 2 行就会
 	// 绕过 catalog,登录页/号码格式只显示 2 国。upsert 失败仅告警不阻断启动(回退旧 2 行)。
 	if cs := catalog.Countries().Countries; len(cs) > 0 {
 		if err := helpStore.UpsertCountries(ctx, cs); err != nil {
-			logger.Warn("country code seed import failed", zap.Error(err))
+			logger.Warn("国家区号种子导入失败", zap.Error(err))
 		} else {
-			logger.Info("country code seed import completed", zap.Int("countries", len(cs)))
+			logger.Info("国家区号种子导入完成", zap.Int("countries", len(cs)))
 		}
 	}
 
@@ -531,6 +846,7 @@ func run(logger *zap.Logger) error {
 	// userCache 与 users 服务共享同一实例：bot 元数据写入（version bump）后必须
 	// 失效缓存，否则 TTL 内 getUsers 回旧 first_name/旧 bot_info_version。
 	userCache := redisstore.NewUserCache(rdb, redisstore.DefaultUserCacheTTL)
+	accountLifecycleStore := postgres.NewAccountLifecycleStore(pool)
 	accountOptions := []account.ServiceOption{
 		account.WithReactionSettings(passwordStore),
 		account.WithAccountSettings(passwordStore),
@@ -541,19 +857,12 @@ func run(logger *zap.Logger) error {
 		account.WithBusinessAutomation(passwordStore),
 		account.WithUsers(userStore),
 		account.WithPhoneChange(phoneChangeStore, authzStore, codeStore, userCache, cfg.DevAuthCode, cfg.AuthCodeTTL, cfg.AuthCodeMaxAttempts),
-		account.WithAccountLifecycle(postgres.NewAccountLifecycleStore(pool)),
+		account.WithAccountLifecycle(accountLifecycleStore),
 		account.WithPublicBaseURL(cfg.PublicBaseURL),
-		account.WithEmailSignup(cfg.EmailSignupEnable),
-		account.WithEmailSignupPhonePrefixes(cfg.EmailSignupPhonePrefixes),
 	}
 	var webhookSender otpdelivery.Sender
-	// EmailSignupEnable also needs a sender: "email as identity" sign-up/login
-	// codes go out on the same loginEmailSender channel as LoginEmailEnable
-	// (see auth.Service.emailSignupEnabled / account.sendChangePhoneCodeByEmail),
-	// so it must gate provider construction identically or those flows silently
-	// get a nil sender when LoginEmailEnable itself is off.
 	if cfg.PhoneCodeDeliveryProvider == "webhook" ||
-		((cfg.LoginEmailEnable || cfg.EmailSignupEnable) && cfg.EmailCodeDeliveryProvider == "webhook") {
+		(cfg.LoginEmailEnable && cfg.EmailCodeDeliveryProvider == "webhook") {
 		configured, err := otpwebhook.New(otpwebhook.Config{
 			URL:     cfg.OTPWebhookURL,
 			Secret:  cfg.OTPWebhookSecret,
@@ -564,9 +873,9 @@ func run(logger *zap.Logger) error {
 			return fmt.Errorf("configure OTP webhook: %w", err)
 		}
 		webhookSender = configured
-		logger.Info("OTP webhook delivery enabled",
+		logger.Info("OTP Webhook 投递已启用",
 			zap.Bool("phone", cfg.PhoneCodeDeliveryProvider == "webhook"),
-			zap.Bool("email", (cfg.LoginEmailEnable || cfg.EmailSignupEnable) && cfg.EmailCodeDeliveryProvider == "webhook"))
+			zap.Bool("email", cfg.LoginEmailEnable && cfg.EmailCodeDeliveryProvider == "webhook"))
 	}
 	var phoneCodeSender otpdelivery.Sender
 	if cfg.PhoneCodeDeliveryProvider == "webhook" {
@@ -574,7 +883,7 @@ func run(logger *zap.Logger) error {
 		accountOptions = append(accountOptions, account.WithPhoneCodeDelivery(phoneCodeSender, cfg.PhoneCodeLength))
 	}
 	var loginEmailSender otpdelivery.Sender
-	if cfg.LoginEmailEnable || cfg.EmailSignupEnable {
+	if cfg.LoginEmailEnable {
 		switch cfg.EmailCodeDeliveryProvider {
 		case "webhook":
 			loginEmailSender = webhookSender
@@ -586,7 +895,6 @@ func run(logger *zap.Logger) error {
 				Password: cfg.SMTPPassword,
 				From:     cfg.SMTPFrom,
 				FromName: cfg.SMTPFromName,
-				AppName:  cfg.PublicAppName,
 				TLSMode:  cfg.SMTPTLSMode,
 				Timeout:  cfg.SMTPTimeout,
 			})
@@ -602,6 +910,8 @@ func run(logger *zap.Logger) error {
 		botsapp.WithUserCache(userCache),
 		botsapp.WithStickerSetCreator(filesService),
 		botsapp.WithUserStickerSets(accountService),
+		botsapp.WithTelegramLogin(telegramLoginService),
+		botsapp.WithDialogRateLimiter(rateLimiter, cfg.VerificationBotRateLimit, cfg.VerificationBotRateWindow),
 		botsapp.WithPublicBaseURL(cfg.PublicBaseURL))
 	groupCallStore := postgres.NewGroupCallStore(pool)
 	groupCallsService := groupcallsapp.NewService(groupCallStore, groupcallsapp.WithPublicBaseURL(cfg.PublicBaseURL))
@@ -672,14 +982,15 @@ func run(logger *zap.Logger) error {
 	// 服务端重启恢复：SFU 状态全失，把全部活跃通话的参与者批量置 left（version++），
 	// 客户端经 checkGroupCall 发现自己 ssrc 消失后自动 rejoin。
 	if calls, err := groupCallsService.ResetAllParticipants(ctx, int(time.Now().Unix())); err != nil {
-		logger.Warn("failed to cleanup group call participants on restart", zap.Error(err))
+		logger.Warn("重启清理群通话参与者失败", zap.Error(err))
 	} else if len(calls) > 0 {
-		logger.Info("cleaned up group call participants on restart", zap.Int("calls", len(calls)))
+		logger.Info("重启清理群通话参与者", zap.Int("calls", len(calls)))
 	}
 	phoneService := phoneapp.NewService(phoneapp.Config{
 		RingTimeout:            cfg.CallRingTimeout,
 		TombstoneTTL:           cfg.CallTombstoneTTL,
 		MaxActivePerUser:       cfg.CallMaxActivePerUser,
+		MaxRegistryEntries:     cfg.CallRegistryMaxEntries,
 		SignalingRatePerSecond: cfg.CallSignalingRate,
 	})
 	// 私聊端对端加密（Secret Chat）握手状态机 + qts 投递队列（盲中继）。
@@ -687,7 +998,10 @@ func run(logger *zap.Logger) error {
 	encryptedQueueStore := postgres.NewEncryptedQueueStore(pool)
 	secretChatService := secretchatapp.NewService(secretChatStore, encryptedQueueStore, secretChatIDAllocator)
 	starsStore := postgres.NewStarsStore(pool)
-	starsService := stars.NewService(starsStore, stars.WithStartingGrant(cfg.StarsStartingGrant))
+	starsPurchaseStore := postgres.NewStarsPurchaseStore(pool, messageStore, channelStore)
+	starsService := stars.NewService(starsStore,
+		stars.WithStartingGrant(cfg.StarsStartingGrant),
+		stars.WithPurchaseStore(starsPurchaseStore))
 	starGiftStore := postgres.NewStarGiftStore(pool)
 	starGiftUpgradeStore := postgres.NewStarGiftUpgradeStore(pool, messageStore, postgres.WithStarGiftLifecyclePolicy(domain.StarGiftLifecyclePolicy{
 		TransferStars: cfg.StarGiftTransferStars, DropOriginalDetailsStars: cfg.StarGiftDropOriginalDetailsStars,
@@ -717,13 +1031,15 @@ func run(logger *zap.Logger) error {
 		passkeyapp.WithAllowedOrigins(cfg.PasskeyAllowedOrigins))
 	// 自定义云主题(Create a New Theme):主题目录与每用户已安装列表均持久化到 postgres。
 	themeService := themesapp.NewService(postgres.NewThemeStore(pool))
-	usersService := users.NewService(userStore, users.WithBaseUserCache(userCache), users.WithContactStore(contactStore), users.WithPhotoProvider(cachedPhotos), users.WithPrivacyEvaluator(privacyService), users.WithCollectibleUsernames(collectibleUsernameStore), users.WithUserFlags(userFlagsStore))
+	usersService := users.NewService(userStore, users.WithBaseUserCache(userCache), users.WithContactStore(contactStore), users.WithPhotoProvider(cachedPhotos), users.WithPrivacyEvaluator(privacyService), users.WithAccountFreezeProvider(adminService))
+	privacyService.ConfigureReadModels(usersService, channelStore)
 	aiComposeService := aiapp.NewService(aiComposeStore, newAIComposeOptions(cfg, rateLimiter, usersService.PremiumActive, logger)...)
 	botsService.SetAIChatGenerator(aiComposeService)
 	dialogsService := dialogs.NewService(dialogStore, channelStore).Configure(
 		dialogs.WithContactStore(contactStore),
 		dialogs.WithPhotoProvider(cachedPhotos),
 		dialogs.WithPrivacyEvaluator(privacyService),
+		dialogs.WithAccountFreezeProvider(adminService),
 		dialogs.WithPremiumChecker(usersService.PremiumActive),
 		dialogs.WithReadModelVersions(readModelVersionStore),
 	)
@@ -737,6 +1053,7 @@ func run(logger *zap.Logger) error {
 	)
 	communitiesService := communitiesapp.NewService(communityStore)
 	ephemeralService := ephemeralapp.NewService(ephemeralStore, channelsService, usersService, botsService)
+	storiesService := storiesapp.NewService(storyStore, storiesapp.WithChannelStoryAccess(channelsService))
 	chatlistsService := chatlistsapp.NewService(
 		chatlistStore,
 		dialogStore,
@@ -748,11 +1065,27 @@ func run(logger *zap.Logger) error {
 		messageapp.WithContactStore(contactStore),
 		messageapp.WithPhotoProvider(cachedPhotos),
 		messageapp.WithPrivacyEvaluator(privacyService),
+		messageapp.WithAccountFreezeProvider(adminService),
 		messageapp.WithReadModelVersions(readModelVersionStore),
 		messageapp.WithBotResponder(botsService),
 		messageapp.WithSendPermissionChecker(adminService),
 		messageapp.WithBusinessAutomation(passwordStore, businessAutomationOptions...),
 	)
+	moderationService := moderationapp.NewService(
+		moderationReportStore,
+		moderationapp.WithMessageReaders(messagesService, channelsService),
+		moderationapp.WithStoryReader(storiesService),
+		moderationapp.WithPeerReaders(usersService, channelsService),
+		moderationapp.WithProfilePhotoReader(filesService),
+	)
+	legacyReportsMigrated, err := moderationService.MigrateLegacyEphemeralReports(ctx, ephemeralReportStore, 500)
+	if err != nil {
+		return fmt.Errorf("migrate legacy ephemeral reports: %w", err)
+	}
+	if legacyReportsMigrated > 0 {
+		logger.Info("旧 ephemeral 举报已迁移到统一审核管线",
+			zap.Int("reports", legacyReportsMigrated))
+	}
 	translationService := translationapp.NewService(
 		messagesService,
 		channelsService,
@@ -769,7 +1102,7 @@ func run(logger *zap.Logger) error {
 		auth.WithCodeMaxAttempts(cfg.AuthCodeMaxAttempts),
 		auth.WithPhoneCodeDelivery(phoneCodeSender, cfg.PhoneCodeLength),
 		auth.WithOTPDeliveryFailureObserver(func(_ context.Context, request otpdelivery.Request, err error) {
-					logger.Named("otp").Warn("additional OTP provider delivery failed, 777000 app-code remains valid",
+			logger.Named("otp").Warn("附加 OTP provider 投递失败，777000 App-code 保持有效",
 				zap.String("delivery_id", request.DeliveryID),
 				zap.String("purpose", string(request.Purpose)),
 				zap.String("channel", string(request.Channel)),
@@ -781,12 +1114,83 @@ func run(logger *zap.Logger) error {
 			CodeLength:   cfg.LoginEmailCodeLength,
 			Store:        accountService,
 			Sender:       loginEmailSender,
+		}))
+	// Collectible (NFT) usernames and the gramsrv composite account rating are
+	// optional read models projected at the protocol edge. The rating worker
+	// computes and persists scores; profile reads never recompute them.
+	collectibleUsernameStore := postgres.NewCollectibleUsernameStore(pool)
+	accountRatingStore := postgres.NewAccountRatingStore(pool)
+	usernamesService := usernamesapp.NewService(
+		usernamesapp.WithRegistryStore(collectibleUsernameStore),
+		usernamesapp.WithCollectibleStore(collectibleUsernameStore),
+		usernamesapp.WithURLTemplate(cfg.CollectibleUsernameURLTemplate),
+		usernamesapp.WithPublicBaseURL(cfg.PublicBaseURL),
+		usernamesapp.WithLogger(logger.Named("app").Named("usernames")),
+	)
+	ratingService := ratingapp.NewService(
+		ratingapp.WithStore(accountRatingStore),
+		ratingapp.WithEnabled(cfg.RatingEnabled),
+		ratingapp.WithWeights(cfg.AccountRatingWeights()),
+		ratingapp.WithPendingDelay(cfg.RatingPendingDelay),
+		ratingapp.WithStaleAfter(cfg.RatingStaleAfter),
+		ratingapp.WithLogger(logger.Named("app").Named("rating")),
+	)
+	// Official platform verification: applications are filed through the built-in
+	// @verifybot and decided in the admin panel. Every eligibility rule lives in
+	// this service; the bot and the panel are only its two surfaces.
+	verificationStore := postgres.NewVerificationStore(pool)
+	verificationLogger := logger.Named("app").Named("verification")
+	verificationService := verificationapp.NewService(
+		verificationapp.WithStore(verificationStore),
+		verificationapp.WithUserDirectory(usersService),
+		verificationapp.WithBotDirectory(botsService),
+		verificationapp.WithChannelDirectory(channelsService),
+		verificationapp.WithAccountFreezeProvider(adminService),
+		verificationapp.WithPeerVerifier(verificationPeerVerifier{
+			users:           usersService,
+			channels:        channelsService,
+			channelRowCache: channelRowCache,
 		}),
-		auth.WithEmailSignup(cfg.EmailSignupEnable),
-		auth.WithEmailSignupPhonePrefixes(cfg.EmailSignupPhonePrefixes))
+		verificationapp.WithRateLimiter(rateLimiter, cfg.VerificationApplyRateLimit, cfg.VerificationApplyRateWindow),
+		verificationapp.WithEnabled(cfg.VerificationEnabled),
+		verificationapp.WithAllowUserTargets(cfg.VerificationAllowUserTargets),
+		verificationapp.WithRejectCooldown(cfg.VerificationRejectCooldown),
+		verificationapp.WithMaxActivePerUser(cfg.VerificationMaxActivePerUser),
+		verificationapp.WithLogger(verificationLogger),
+	)
+	// @verifybot is the applicant surface, and the notifier that carries decisions
+	// back to the applicant as ordinary messages. Both directions are deferred
+	// injections because the bots service is built before the peer directories the
+	// verification service needs.
+	botsService.SetVerification(verificationService)
+	verificationService.SetApplicantNotifier(botsService)
+	// Third-party verification is a SEPARATE mechanism: a verifier bot marks peers
+	// with its own custom-emoji icon and description, which clients render before the
+	// name. It shares no state with the official badge above -- different tables,
+	// different rights, different TL fields (bot_verification_icon / bot_verification
+	// versus verified).
+	botVerificationStore := postgres.NewBotVerificationStore(pool)
+	botVerificationService := botverificationapp.NewService(
+		botverificationapp.WithStore(botVerificationStore),
+		botverificationapp.WithUserDirectory(usersService),
+		botverificationapp.WithBotDirectory(botsService),
+		botverificationapp.WithChannelDirectory(channelsService),
+		// The icon must be a real custom emoji document: an id no client can fetch
+		// renders as nothing, so the badge would be silently invisible.
+		botverificationapp.WithIconResolver(filesService),
+		botverificationapp.WithMarkApplier(botVerificationMarkApplier{store: botVerificationStore}),
+		botverificationapp.WithRateLimiter(rateLimiter, cfg.BotVerificationRequestRateLimit, cfg.BotVerificationRequestRateWindow),
+		botverificationapp.WithEnabled(cfg.BotVerificationEnabled),
+		botverificationapp.WithMaxPerVerifier(cfg.BotVerificationMaxPerVerifier),
+		botverificationapp.WithLogger(logger.Named("app").Named("botverification")),
+	)
+	// @verifierbot files applications with the operator and reports decisions back.
+	botsService.SetCustomVerification(botVerificationService)
+	botVerificationService.SetApplicantNotifier(botsService)
 	updatesService := updates.NewService(updateStateStore, updateEventStore, updates.WithLogger(logger.Named("app").Named("updates")))
 	router := rpc.New(rpc.Config{
 		DC:                       cfg.DC,
+		DefaultCountryCode:       cfg.DefaultCountryCode,
 		IP:                       cfg.AdvertiseIP,
 		Port:                     port,
 		OutboundPushTimeout:      cfg.OutboundPushTimeout,
@@ -803,28 +1207,30 @@ func run(logger *zap.Logger) error {
 		GroupCallMaxParticipants: cfg.GroupCallMaxParticipants,
 		RtmpIngestURL:            cfg.LiveStreamRtmpURL,
 		PublicBaseURL:            cfg.PublicBaseURL,
+		PublicAppScheme:          cfg.PublicAppScheme,
+		PublicAppLinkBase:        cfg.PublicAppLinkBase,
 		// PFS temp→perm 解析缓存：显式撤销会清缓存并断开连接，re-bind 即时失效；
 		// 配置 TTL 只承担跨进程/异常失效兜底，避免大连接数周期性打满 PG。
 		TempKeyResolveCacheTTL:        cfg.TempKeyResolveCacheTTL,
 		TempKeyResolveCacheMaxEntries: cfg.TempKeyResolveCacheMaxEntries,
 	}, rpc.Deps{
 		Auth:                 authService,
+		AuthDeliveryReports:  authDeliveryReportService,
+		ClientTelemetry:      clientTelemetryService,
 		AuthKeySessionLayers: authKeyStore,
 		Account:              accountService,
 		Privacy:              privacyService,
-		Help: help.NewService(helpStore, helpStore,
-			help.WithMapboxToken(cfg.MapboxToken),
-			help.WithEmailSignupEnable(cfg.EmailSignupEnable),
-			help.WithEmailSignupPhonePrefixes(cfg.EmailSignupPhonePrefixes),
-			help.WithAccountFreezeProvider(adminService),
-		),
+		Help:                 help.NewService(helpStore, helpStore, help.WithMapboxToken(cfg.MapboxToken), help.WithAccountFreezeProvider(adminService)),
 		AccountFreeze:        adminService,
 		AICompose:            aiComposeService,
 		Ephemeral:            ephemeralService,
 		EphemeralPush:        ephemeralStore,
-		EphemeralReports:     ephemeralReportStore,
+		Moderation:           moderationService,
 		Users:                usersService,
-		CollectibleUsernames: collectibleUsernameStore,
+		Usernames:            usernamesService,
+		AccountRatings:       ratingService,
+		BotVerifications:     botVerificationService,
+		TelegramLogin:        telegramLoginRPCDependency(telegramLoginService),
 		Updates:              updatesService,
 		BootstrapUpdates:     bootstrapUpdateStore,
 		BotAPIUpdates:        botAPIUpdateStore,
@@ -837,9 +1243,11 @@ func run(logger *zap.Logger) error {
 		Channels:             channelsService,
 		Communities:          communitiesService,
 		Files:                filesService,
+		PremiumPromo:         filesService,
 		Bots:                 botsService,
+		ServiceBotCallbacks:  botsService,
 		Polls:                pollsapp.NewService(pollStore),
-		Stories:              storiesapp.NewService(storyStore, storiesapp.WithChannelStoryAccess(channelsService)),
+		Stories:              storiesService,
 		Phone:                phoneService,
 		SecretChats:          secretChatService,
 		Stars:                starsService,
@@ -852,6 +1260,7 @@ func run(logger *zap.Logger) error {
 		TURN:                 turnService,
 		LangPack:             langPackService,
 		Sessions:             activeSessions,
+		Metrics:              metricRegistry,
 		Inline:               inlineRegistryStore,
 		Limiter:              rateLimiter,
 	}, logger.Named("rpc"), clock.System)
@@ -863,7 +1272,7 @@ func run(logger *zap.Logger) error {
 		ChannelBoosts:      channelBoostCache,
 		Contacts:           postgres.ContactReadModelCaches{contactStore, contactsService},
 		Dialogs:            dialogsService,
-		Privacy:            privacyStore,
+		Privacy:            privacyService,
 		ProfilePhotos:      cachedPhotos,
 		Stories:            router,
 		ChannelFullBots:    router,
@@ -874,21 +1283,106 @@ func run(logger *zap.Logger) error {
 		BaseUsers:          userCache,
 		BotProfiles:        botsService,
 		StarGifts:          giftsService,
+		AccountSettings:    router,
 	}, logger.Named("store").Named("read-model-listener"))
 	go readModelListener.Run(ctx)
 	activeSessions.SetLifecycleObserver(router)
 	adminService.Configure(adminapp.Dependencies{
-		Auth:            authService,
-		Revoker:         router,
-		Users:           usersService,
-		Stars:           starsService,
-		StarsNotifier:   router,
-		UserNotifier:    router,
-		Channels:        channelsService,
-		ChannelNotifier: router,
-		Messages:        messagesService,
-		Gifts:           giftsService,
+		Auth:                   authService,
+		Revoker:                router,
+		Users:                  usersService,
+		Stars:                  starsService,
+		StarsNotifier:          router,
+		UserNotifier:           router,
+		UserModerationNotifier: router,
+		FreezeNotifier:         router,
+		Channels:               channelsService,
+		ChannelNotifier:        router,
+		Messages:               messagesService,
+		Gifts:                  giftsService,
+		GiftGranter:            router,
+		Bots:                   botsService,
+		Emoji:                  filesService,
+		Moderation:             moderationService,
+		Usernames:              usernamesService,
+		Rating:                 ratingService,
+		Verification:           verificationService,
+		BotVerification:        botVerificationService,
 	})
+	// The RPC edge owns the tg.* projection cache and the standard non-PTS
+	// updateUser/updateChannel refresh, so committed registry mutations are
+	// visible to online viewers immediately.
+	usernamesService.SetPeerUsernameNotifier(router)
+	// The badge change is a peer fact the protocol edge caches and pushes, so the
+	// verification service gets the same hook the username registry uses. The
+	// assertion is deliberately dynamic: NotifyPeerVerified lands with the edge
+	// agent, and until then only projection invalidation is wired — a decision can
+	// then never be masked by a stale projection, and clients converge on their next
+	// authoritative peer read.
+	if notifier, ok := any(router).(verificationapp.PeerNotifier); ok {
+		// Compose rather than choose: the decision writes users.verified inside the
+		// verification transaction (through postgres.VerificationTxFromContext), so it
+		// bypasses users.Service and its cache refresh. Dropping the shared user:base
+		// entry before the edge builds the pushed tg.User is what keeps the badge in
+		// that push from being one beat stale; the cross-instance read-model listener
+		// would otherwise only catch up asynchronously.
+		verificationService.SetPeerNotifier(compositeVerificationNotifier{
+			cache: rpcProjectionVerificationNotifier{
+				invalidator: router,
+				users:       userCache,
+				log:         verificationLogger,
+			},
+			edge: notifier,
+		})
+	} else {
+		verificationService.SetPeerNotifier(rpcProjectionVerificationNotifier{
+			invalidator: router,
+			users:       userCache,
+			log:         verificationLogger,
+		})
+		logger.Warn("verification badge update push is not implemented by the RPC edge; only projection invalidation is wired",
+			zap.String("expected_hook", "rpc.Router.NotifyPeerVerified"))
+	}
+	// The third-party mark lives on the same peer projections as the official flag,
+	// so it needs the same edge hook. Composed with the cache drop for the same reason:
+	// the mark can be written on the decision's own transaction, bypassing the app
+	// services that would otherwise refresh the shared user:base entry.
+	if notifier, ok := any(router).(botverificationapp.PeerNotifier); ok {
+		botVerificationService.SetPeerNotifier(compositeBotVerificationNotifier{
+			cache: rpcProjectionVerificationNotifier{
+				invalidator: router,
+				users:       userCache,
+				log:         verificationLogger,
+			},
+			edge: notifier,
+		})
+	} else {
+		logger.Warn("third-party verification push is not implemented by the RPC edge",
+			zap.String("expected_hook", "rpc.Router.NotifyPeerBotVerification"))
+	}
+	go ratingapp.NewRecomputeWorker(ratingService, logger.Named("rating").Named("recompute"),
+		cfg.RatingRecomputeInterval, cfg.RatingRecomputeBatch).Run(ctx)
+	// Applicant notifications are delivered from a durable outbox, never inside the
+	// decision transaction: @verifybot may be blocked and the panel must not wait on
+	// a message send.
+	go verificationapp.NewNotificationWorker(verificationService, logger.Named("verification").Named("notify"),
+		cfg.VerificationNotifyInterval, cfg.VerificationNotifyBatch).Run(ctx)
+	moderationActionOptions := []moderationapp.ActionExecutorOption{}
+	if cfg.PublicLinkWebAddr != "" {
+		moderationActionOptions = append(
+			moderationActionOptions,
+			moderationapp.WithAppealLinks(moderationService, cfg.PublicBaseURL),
+		)
+	}
+	moderationActionExecutor := moderationapp.NewActionExecutor(
+		adminService, channelsService, router, accountLifecycleStore,
+		moderationActionOptions...,
+	)
+	go moderationapp.NewActionWorker(
+		moderationReportStore,
+		moderationActionExecutor,
+		logger.Named("moderation").Named("actions"),
+	).Run(ctx)
 	// bot session 撤销、在线通知与 @ChatBot 流式草稿推送经 router 实现（需 tg.* 边界），
 	// router 创建后注入。
 	botsService.SetRouterHooks(router)
@@ -898,10 +1392,12 @@ func run(logger *zap.Logger) error {
 		rpc.WithOutboxBatch(cfg.OutboxBatch),
 		rpc.WithOutboxInterval(cfg.OutboxInterval),
 		rpc.WithOutboxPushTimeout(cfg.OutboundPushTimeout),
+		rpc.WithOutboxMetrics(metricRegistry),
 		rpc.WithOutboxUpdateBuilder(router.BuildOutboxUpdates),
 	).Run(ctx)
 	go rpc.NewBootstrapUpdateDispatcher(router, logger.Named("rpc").Named("bootstrap")).Run(ctx)
 	go rpc.NewScheduledDispatcher(router, logger.Named("rpc").Named("scheduled")).Run(ctx)
+	go rpc.NewSuggestedPostDispatcher(router, logger.Named("rpc").Named("suggested-post")).Run(ctx)
 	go rpc.NewExpiryDispatcher(router, logger.Named("rpc").Named("expiry")).Run(ctx)
 	go rpc.NewPhoneExpiryDispatcher(router, logger.Named("rpc").Named("phone-expiry"), cfg.CallExpiryInterval).Run(ctx)
 	go rpc.NewGroupCallSweepDispatcher(router, logger.Named("rpc").Named("groupcall-sweep"), cfg.GroupCallSweepInterval, cfg.GroupCallCheckTTL).Run(ctx)
@@ -911,6 +1407,10 @@ func run(logger *zap.Logger) error {
 	go activeSessions.RunPendingSweeper(ctx, time.Minute)
 	go router.RunPremiumSweeper(ctx, cfg.PremiumSweepInterval, cfg.PremiumSweepBatch)
 	go router.RunAccountLifecycle(ctx, time.Minute, 500)
+	go router.RunAccountFreezeNotifications(ctx, time.Minute, 500)
+	if telegramLoginService != nil {
+		go runTelegramLoginRetention(ctx, telegramLoginService, cfg.TelegramLoginRetention, cfg.TelegramLoginSweepInterval, cfg.TelegramLoginSweepBatch, logger.Named("telegram-login-retention"))
+	}
 	go func() {
 		interval := cfg.StarGiftSweepInterval
 		if interval <= 0 {
@@ -943,61 +1443,75 @@ func run(logger *zap.Logger) error {
 	if _, err := botapi.Start(ctx, cfg.BotAPIAddr, botsService, usersService, router, router, logger.Named("botapi")); err != nil {
 		return fmt.Errorf("start bot api: %w", err)
 	}
-	if _, err := adminapi.Start(ctx, adminapi.Config{Addr: cfg.AdminAPIAddr, Token: cfg.AdminAPIToken}, adminService, logger.Named("adminapi")); err != nil {
+	// Scoped tokens carry a bounded permission set; the master token stays
+	// unrestricted, so a deployment that configures none behaves exactly as before.
+	adminScopedTokens := make([]adminapi.ScopedToken, 0, len(cfg.AdminScopedTokens))
+	for _, item := range cfg.AdminScopedTokens {
+		adminScopedTokens = append(adminScopedTokens, adminapi.ScopedToken{
+			Name:        item.Name,
+			Token:       item.Token,
+			Permissions: item.Permissions,
+		})
+	}
+	if _, err := adminapi.Start(ctx, adminapi.Config{
+		Addr:         cfg.AdminAPIAddr,
+		Token:        cfg.AdminAPIToken,
+		ScopedTokens: adminScopedTokens,
+	}, adminService, logger.Named("adminapi")); err != nil {
 		return fmt.Errorf("start admin api: %w", err)
 	}
 	if _, err := web.Start(ctx, web.Config{
-		Addr:            cfg.PublicLinkWebAddr,
-		PublicBaseURL:   cfg.PublicBaseURL,
-		AppScheme:       cfg.PublicAppScheme,
-		WebBaseURL:      cfg.PublicWebBaseURL,
-		AppName:         cfg.PublicAppName,
-		DownloadURL:     cfg.PublicDownloadURL,
-		StickerSets:     filesService,
-		Users:           userStore,
-		Channels:        channelStore,
-		Privacy:         privacyService,
-		Photos:          filesService,
-		UniqueGifts:     giftsService,
-		GiftWithdrawals: giftsService,
+		Addr:              cfg.PublicLinkWebAddr,
+		PublicBaseURL:     cfg.PublicBaseURL,
+		AppScheme:         cfg.PublicAppScheme,
+		AppLinkBase:       cfg.PublicAppLinkBase,
+		WebBaseURL:        cfg.PublicWebBaseURL,
+		AppName:           cfg.PublicAppName,
+		StickerSets:       filesService,
+		Users:             userStore,
+		Channels:          channelStore,
+		Privacy:           privacyService,
+		Photos:            filesService,
+		UniqueGifts:       giftsService,
+		GiftWithdrawals:   giftsService,
+		ModerationAppeals: moderationService,
+		TelegramLogin:     telegramLoginHTTPHandler,
 	}, logger.Named("public-web")); err != nil {
 		return fmt.Errorf("start public Web: %w", err)
 	}
 
 	srv := mtprotoedge.New(mtprotoedge.Options{
-		Logger:                          logger.Named("mtprotoedge"),
-		DC:                              cfg.DC,
-		StrictDC:                        cfg.StrictDCCheck,
-		RSAKey:                          rsaKey,
-		LayerRPC:                        router,
-		AuthKeys:                        authKeyStore,
-		ActiveSessions:                  activeSessions,
-		ObfuscatedTCP:                   true,
-		WebSocket:                       cfg.WebSocketEnable,
-		WebSocketAllowedOrigins:         cfg.WebSocketAllowedOrigins,
-		MaxConnections:                  cfg.MTProtoMaxConnections,
-		MaxConnectionsPerIP:             cfg.MTProtoMaxConnectionsPerIP,
-		MaxConcurrentHandshakes:         cfg.MTProtoMaxConcurrentHandshakes,
-		RPCMaxInflight:                  cfg.MTProtoRPCMaxInflight,
-		RPCQueueSize:                    cfg.MTProtoRPCQueueSize,
-		RPCTimeout:                      cfg.MTProtoRPCTimeout,
-		RPCGlobalWorkers:                cfg.MTProtoRPCGlobalWorkers,
-		RPCGlobalMaxTasks:               cfg.MTProtoRPCGlobalMaxTasks,
-		RPCGlobalMaxBytes:               cfg.MTProtoRPCGlobalMaxBytes,
-		RPCResultCacheMaxEntries:        cfg.MTProtoRPCResultCacheMaxEntries,
-		RPCResultCacheMaxBytes:          cfg.MTProtoRPCResultCacheMaxBytes,
-		RPCResultCacheAuthMaxEntries:    cfg.MTProtoRPCResultCacheAuthMaxEntries,
-		RPCResultCacheAuthMaxBytes:      cfg.MTProtoRPCResultCacheAuthMaxBytes,
-		RPCResultCacheSessionMaxEntries: cfg.MTProtoRPCResultCacheSessionMaxEntries,
-		RPCResultCacheSessionMaxBytes:   cfg.MTProtoRPCResultCacheSessionMaxBytes,
-		RPCResultPendingPerAuth:         cfg.MTProtoRPCResultPendingPerAuth,
-		InboundFrameGlobalMaxBytes:      cfg.MTProtoInboundFrameGlobalMaxBytes,
-		OutboundQueueSize:               cfg.MTProtoOutboundQueueSize,
-		OutboundControlQueueSize:        cfg.MTProtoOutboundControlQueueSize,
-		OutboundTrackedGlobalMaxBytes:   cfg.MTProtoOutboundTrackedGlobalMaxBytes,
-		OutboundWriteGlobalMaxBytes:     cfg.MTProtoOutboundWriteGlobalMaxBytes,
+		Logger:                        logger.Named("mtprotoedge"),
+		DC:                            cfg.DC,
+		StrictDC:                      cfg.StrictDCCheck,
+		RSAKey:                        rsaKey,
+		LayerRPC:                      router,
+		AuthKeys:                      authKeyStore,
+		ActiveSessions:                activeSessions,
+		Metrics:                       metricRegistry,
+		ObfuscatedTCP:                 true,
+		WebSocket:                     cfg.WebSocketEnable,
+		WebSocketAllowedOrigins:       cfg.WebSocketAllowedOrigins,
+		MaxConnections:                cfg.MTProtoMaxConnections,
+		MaxConnectionsPerIP:           cfg.MTProtoMaxConnectionsPerIP,
+		MaxConcurrentHandshakes:       cfg.MTProtoMaxConcurrentHandshakes,
+		RPCMaxInflight:                cfg.MTProtoRPCMaxInflight,
+		RPCQueueSize:                  cfg.MTProtoRPCQueueSize,
+		RPCTimeout:                    cfg.MTProtoRPCTimeout,
+		RPCGlobalWorkers:              cfg.MTProtoRPCGlobalWorkers,
+		RPCGlobalMaxTasks:             cfg.MTProtoRPCGlobalMaxTasks,
+		RPCGlobalMaxBytes:             cfg.MTProtoRPCGlobalMaxBytes,
+		RPCExecutionMaxEntries:        cfg.MTProtoRPCExecutionMaxEntries,
+		RPCExecutionAuthMaxEntries:    cfg.MTProtoRPCExecutionAuthMaxEntries,
+		RPCExecutionSessionMaxEntries: cfg.MTProtoRPCExecutionSessionMaxEntries,
+		RPCExecutionPendingPerAuth:    cfg.MTProtoRPCExecutionPendingPerAuth,
+		InboundFrameGlobalMaxBytes:    cfg.MTProtoInboundFrameGlobalMaxBytes,
+		OutboundQueueSize:             cfg.MTProtoOutboundQueueSize,
+		OutboundControlQueueSize:      cfg.MTProtoOutboundControlQueueSize,
+		OutboundTrackedGlobalMaxBytes: cfg.MTProtoOutboundTrackedGlobalMaxBytes,
+		OutboundWriteGlobalMaxBytes:   cfg.MTProtoOutboundWriteGlobalMaxBytes,
 		OnServing: func(_ net.Addr) {
-			logger.Info("telesrv service ready",
+			logger.Info("telesrv 服务就绪",
 				zap.String("listen", cfg.ListenAddr),
 				zap.String("advertise", net.JoinHostPort(cfg.AdvertiseIP, portStr)),
 				zap.Int("pid", os.Getpid()),
@@ -1007,7 +1521,56 @@ func run(logger *zap.Logger) error {
 			)
 		},
 	})
+	metricRegistry.AddGaugeProvider(func() []obsmetrics.GaugeSample {
+		return mtprotoRuntimeGaugeSamples(srv.RuntimeSnapshot())
+	})
 	// This is intentionally the final startup operation. ListenAndServe owns the
 	// public listener so no seed/prewarm work can run after port 2398 is exposed.
 	return srv.ListenAndServe(ctx, cfg.ListenAddr)
+}
+
+// telegramLoginRPCDependency preserves a disabled Telegram Login service as a
+// nil interface. Assigning the nil *Service directly to rpc.Deps would create a
+// non-nil interface with a nil concrete pointer and bypass Router availability
+// checks.
+func telegramLoginRPCDependency(service *telegramloginapp.Service) rpc.TelegramLoginService {
+	if service == nil {
+		return nil
+	}
+	return service
+}
+
+func runTelegramLoginRetention(ctx context.Context, service *telegramloginapp.Service, retention, interval time.Duration, batch int, logger *zap.Logger) {
+	run := func() {
+		var total int64
+		// Bound one tick even when a deployment accumulated years of stale data;
+		// subsequent ticks continue without monopolizing the database pool.
+		for range 10 {
+			deleted, err := service.DeleteExpiredArtifacts(ctx, time.Now().UTC().Add(-retention), batch)
+			if err != nil {
+				if ctx.Err() == nil {
+					logger.Warn("telegram_login_retention_failed", zap.Error(err))
+				}
+				return
+			}
+			total += deleted
+			if deleted < int64(batch) {
+				break
+			}
+		}
+		if total > 0 {
+			logger.Info("telegram_login_retention_completed", zap.Int64("deleted", total))
+		}
+	}
+	run()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
 }

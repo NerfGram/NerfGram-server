@@ -45,6 +45,16 @@ func TestSendPrivateTextConcurrentNoPtsGap(t *testing.T) {
 		_, _ = pool.Exec(ctx, "DELETE FROM dialogs WHERE user_id = ANY($1::bigint[])", ids)
 		_, _ = pool.Exec(ctx, "DELETE FROM users WHERE id = ANY($1::bigint[])", ids)
 	})
+	var initialWatermarks int
+	if err := pool.QueryRow(ctx, `
+SELECT count(*)::int
+FROM user_update_watermarks
+WHERE user_id = ANY($1::bigint[])`, ids).Scan(&initialWatermarks); err != nil {
+		t.Fatalf("count initial watermarks: %v", err)
+	}
+	if initialWatermarks != 0 {
+		t.Fatalf("initial watermarks = %d, want 0 so concurrency covers first upsert", initialWatermarks)
+	}
 
 	messages := NewMessageStore(pool, WithMessageAllocators(&perUserCounterAllocator{}))
 

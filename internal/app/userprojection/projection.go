@@ -2,6 +2,7 @@ package userprojection
 
 import (
 	"context"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -22,6 +23,12 @@ type ProfilePhotoKindProvider interface {
 // PrivacyEvaluator answers viewer-specific visibility for one user privacy key.
 type PrivacyEvaluator interface {
 	CanSee(ctx context.Context, ownerUserID, viewerUserID int64, key domain.PrivacyKey) (bool, error)
+}
+
+// AccountFreezeProvider returns durable account freeze facts for a bounded
+// batch. The projector only exposes them to viewers other than the frozen user.
+type AccountFreezeProvider interface {
+	AccountFreezes(ctx context.Context, userIDs []int64) (map[int64]domain.AccountFreeze, error)
 }
 
 // BatchPrivacyEvaluator 批量评估多 owner 对单 viewer 的可见性，消除 projectBatch / fan-out
@@ -52,6 +59,7 @@ type Projector struct {
 	contacts store.ContactStore
 	photos   ProfilePhotoProvider
 	privacy  PrivacyEvaluator
+	freezes  AccountFreezeProvider
 }
 
 // Option configures a Projector.
@@ -72,6 +80,11 @@ func WithPrivacyEvaluator(privacy PrivacyEvaluator) Option {
 	return func(p *Projector) { p.privacy = privacy }
 }
 
+// WithAccountFreezeProvider enables viewer-scoped frozen-account visibility.
+func WithAccountFreezeProvider(provider AccountFreezeProvider) Option {
+	return func(p *Projector) { p.freezes = provider }
+}
+
 // New creates a user projector.
 func New(opts ...Option) *Projector {
 	p := &Projector{}
@@ -87,7 +100,7 @@ func (p *Projector) ForViewer(ctx context.Context, viewerUserID int64, users []d
 	if p == nil {
 		return users, nil
 	}
-	return projectBatch(ctx, p.contacts, p.photos, p.privacy, viewerUserID, users)
+	return projectBatch(ctx, p.contacts, p.photos, p.privacy, p.freezes, viewerUserID, users)
 }
 
 // One applies ForViewer to a single user.
@@ -136,6 +149,7 @@ func (p *Projector) ForViewers(ctx context.Context, viewerUserIDs []int64, users
 		fallbackRefs     map[int64]domain.ProfilePhotoRef
 		contactsByViewer map[int64]map[int64]domain.Contact
 		matrix           map[int64]map[int64]map[domain.PrivacyKey]bool
+		freezes          map[int64]domain.AccountFreeze
 	)
 	g, gctx := errgroup.WithContext(ctx)
 	// 1) 共享头像：profile/fallback 一次批量，跨全部 viewer 复用；personal photo v1 跳过（见 doc）。
@@ -156,6 +170,13 @@ func (p *Projector) ForViewers(ctx context.Context, viewerUserIDs []int64, users
 		g.Go(func() error {
 			var err error
 			matrix, err = me.CanSeeMatrix(gctx, ids, viewers, privacyProjectionKeys)
+			return err
+		})
+	}
+	if p.freezes != nil && len(ids) > 0 {
+		g.Go(func() error {
+			var err error
+			freezes, err = p.freezes.AccountFreezes(gctx, ids)
 			return err
 		})
 	}
@@ -189,11 +210,13 @@ func (p *Projector) ForViewers(ctx context.Context, viewerUserIDs []int64, users
 					vis = matrix[u.ID][viewer]
 				}
 				var perr error
-				pj, perr = applyPrivacy(ctx, p.privacy, viewer, pj, found, vis, profileRefs, fallbackRefs, nil)
+				hasKnownContactPhone := found && contact.Phone != ""
+				pj, perr = applyPrivacy(ctx, p.privacy, viewer, pj, hasKnownContactPhone, vis, profileRefs, fallbackRefs, nil)
 				if perr != nil {
 					return nil, perr
 				}
 			}
+			pj = applyAccountFreezeProjection(pj, viewer, freezes[u.ID])
 			cache[u.ID] = pj
 			projected[i] = pj
 		}
@@ -260,6 +283,10 @@ func cloneUsers(users []domain.User) []domain.User {
 	}
 	out := make([]domain.User, len(users))
 	copy(out, users)
+	for i := range out {
+		out[i].ContactNoteEntities = append([]domain.MessageEntity(nil), out[i].ContactNoteEntities...)
+		out[i].RestrictionReasons = append([]domain.UserRestrictionReason(nil), out[i].RestrictionReasons...)
+	}
 	return out
 }
 
@@ -316,8 +343,9 @@ func WithProfilePhotos(ctx context.Context, photos ProfilePhotoProvider, users [
 }
 
 // ForViewer applies the owner-specific user view that Telegram clients expect.
-// In particular, phone is visible for self and contacts; non-contacts should not
-// receive a phone field because TDesktop will prefer it over the public name.
+// A contact relationship alone never grants phone visibility. A viewer may retain
+// an owner-scoped phone it explicitly supplied, while the target account phone is
+// governed by PhoneNumber privacy.
 func ForViewer(ctx context.Context, contacts store.ContactStore, viewerUserID int64, users []domain.User) ([]domain.User, error) {
 	users = sanitizeDeletedUsers(users)
 	if contacts == nil || viewerUserID == 0 || len(users) == 0 {
@@ -354,7 +382,7 @@ func One(ctx context.Context, contacts store.ContactStore, viewerUserID int64, u
 	return projected[0], nil
 }
 
-func projectBatch(ctx context.Context, contacts store.ContactStore, photos ProfilePhotoProvider, privacy PrivacyEvaluator, viewerUserID int64, users []domain.User) ([]domain.User, error) {
+func projectBatch(ctx context.Context, contacts store.ContactStore, photos ProfilePhotoProvider, privacy PrivacyEvaluator, freezesProvider AccountFreezeProvider, viewerUserID int64, users []domain.User) ([]domain.User, error) {
 	if len(users) == 0 {
 		return users, nil
 	}
@@ -368,6 +396,7 @@ func projectBatch(ctx context.Context, contacts store.ContactStore, photos Profi
 		personalRefs = map[int64]domain.ProfilePhotoRef{}
 		contactsByID map[int64]domain.Contact
 		visibility   map[int64]map[domain.PrivacyKey]bool
+		freezes      map[int64]domain.AccountFreeze
 	)
 	// 这些预取查询互不依赖（头像 profile/fallback、联系人 GetMany/PersonalPhotos、privacy 可见性），
 	// 并发执行把 ~6 次串行 round-trip 收敛成一波；每个 goroutine 只写自己那一个变量，组装循环在
@@ -430,6 +459,16 @@ func projectBatch(ctx context.Context, contacts store.ContactStore, photos Profi
 		visibility = v
 		return nil
 	})
+	if freezesProvider != nil && len(ids) > 0 {
+		g.Go(func() error {
+			m, err := freezesProvider.AccountFreezes(gctx, ids)
+			if err != nil {
+				return err
+			}
+			freezes = m
+			return nil
+		})
+	}
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
@@ -453,16 +492,28 @@ func projectBatch(ctx context.Context, contacts store.ContactStore, photos Profi
 		if viewerUserID != 0 && u.ID != viewerUserID && u.ID != domain.OfficialSystemUserID && !u.Bot {
 			contact, found := contactsByID[u.ID]
 			projected = applyContactProjection(projected, contact, found)
+			hasKnownContactPhone := found && contact.Phone != ""
 			var err error
-			projected, err = applyPrivacy(ctx, privacy, viewerUserID, projected, found, visibility[u.ID], profileRefs, fallbackRefs, personalRefs)
+			projected, err = applyPrivacy(ctx, privacy, viewerUserID, projected, hasKnownContactPhone, visibility[u.ID], profileRefs, fallbackRefs, personalRefs)
 			if err != nil {
 				return nil, err
 			}
 		}
+		projected = applyAccountFreezeProjection(projected, viewerUserID, freezes[u.ID])
 		cache[u.ID] = projected
 		out[i] = projected
 	}
 	return out, nil
+}
+
+func applyAccountFreezeProjection(user domain.User, viewerUserID int64, freeze domain.AccountFreeze) domain.User {
+	// Base users and self users must never retain a viewer-scoped restriction.
+	user.RestrictionReasons = nil
+	if user.Deleted || viewerUserID == 0 || user.ID == 0 || user.ID == viewerUserID || !freeze.Frozen {
+		return user
+	}
+	user.RestrictionReasons = domain.AccountFrozenRestrictionReasons()
+	return user
 }
 
 func prefetchPrivacyVisibility(ctx context.Context, privacy PrivacyEvaluator, viewerUserID int64, users []domain.User) (map[int64]map[domain.PrivacyKey]bool, error) {
@@ -499,30 +550,7 @@ func projectOne(ctx context.Context, contacts store.ContactStore, viewerUserID i
 	if err != nil {
 		return domain.User{}, err
 	}
-	if !found {
-		user.Phone = ""
-		user.Contact = false
-		user.Mutual = false
-		user.CloseFriend = false
-		return user, nil
-	}
-	projected := user
-	projected.Contact = true
-	projected.Mutual = contact.Mutual || contact.User.Mutual
-	projected.CloseFriend = contact.CloseFriend || contact.User.CloseFriend
-	if contact.User.Phone != "" {
-		projected.Phone = contact.User.Phone
-	} else {
-		projected.Phone = contact.Phone
-	}
-	if contact.User.FirstName != "" || contact.User.LastName != "" {
-		projected.FirstName = contact.User.FirstName
-		projected.LastName = contact.User.LastName
-	} else if contact.FirstName != "" || contact.LastName != "" {
-		projected.FirstName = contact.FirstName
-		projected.LastName = contact.LastName
-	}
-	return projected, nil
+	return applyContactProjection(user, contact, found), nil
 }
 
 func uniqueUserIDs(users []domain.User) []int64 {
@@ -575,14 +603,20 @@ func applyContactProjection(user domain.User, contact domain.Contact, found bool
 		user.Contact = false
 		user.Mutual = false
 		user.CloseFriend = false
+		user.ContactNote = ""
+		user.ContactNoteEntities = nil
 		return user
 	}
 	user.Contact = true
 	user.Mutual = contact.Mutual || contact.User.Mutual
 	user.CloseFriend = contact.CloseFriend || contact.User.CloseFriend
-	if contact.User.Phone != "" {
-		user.Phone = contact.User.Phone
-	} else {
+	user.ContactNote = contact.Note
+	user.ContactNoteEntities = append([]domain.MessageEntity(nil), contact.NoteEntities...)
+	// contact.Phone is an owner-local fact supplied by this viewer. It may differ
+	// from the target's current account phone and is safe to preserve because the
+	// viewer already knew it. An empty contact.Phone must not replace or authorize
+	// the target account phone carried by user.Phone.
+	if contact.Phone != "" {
 		user.Phone = contact.Phone
 	}
 	if contact.User.FirstName != "" || contact.User.LastName != "" {
@@ -595,11 +629,16 @@ func applyContactProjection(user domain.User, contact domain.Contact, found bool
 	return user
 }
 
-func applyPrivacy(ctx context.Context, privacy PrivacyEvaluator, viewerUserID int64, user domain.User, isContact bool, vis map[domain.PrivacyKey]bool, profileRefs, fallbackRefs, personalRefs map[int64]domain.ProfilePhotoRef) (domain.User, error) {
+func applyPrivacy(ctx context.Context, privacy PrivacyEvaluator, viewerUserID int64, user domain.User, hasKnownContactPhone bool, vis map[domain.PrivacyKey]bool, profileRefs, fallbackRefs, personalRefs map[int64]domain.ProfilePhotoRef) (domain.User, error) {
 	if user.Deleted {
 		return user.DeletedTombstone(), nil
 	}
 	if privacy == nil {
+		// Missing privacy wiring must fail closed for an account phone. The only
+		// safe exception is an owner-scoped phone the viewer explicitly supplied.
+		if !hasKnownContactPhone {
+			user.Phone = ""
+		}
 		return user, nil
 	}
 	// vis 为批量预取结果（projectBatch 一次 ListPrivacyRules+GetReverseContacts 算得）；
@@ -614,7 +653,7 @@ func applyPrivacy(ctx context.Context, privacy PrivacyEvaluator, viewerUserID in
 	if err != nil {
 		return domain.User{}, err
 	}
-	if !phoneAllowed && !isContact {
+	if !phoneAllowed && !hasKnownContactPhone {
 		user.Phone = ""
 	}
 	statusAllowed, err := canSee(domain.PrivacyKeyStatusTimestamp)
@@ -622,10 +661,8 @@ func applyPrivacy(ctx context.Context, privacy PrivacyEvaluator, viewerUserID in
 		return domain.User{}, err
 	}
 	if !statusAllowed {
+		user.Status = domain.ApproximateUserStatus(user.LastSeenAt, int(time.Now().Unix()))
 		user.LastSeenAt = 0
-		if user.Status.Kind == domain.UserStatusOnline || user.Status.Kind == domain.UserStatusOffline {
-			user.Status = domain.UserStatus{Kind: domain.UserStatusRecently}
-		}
 	}
 	if ref, ok := personalRefs[user.ID]; ok && ref.PhotoID != 0 {
 		ref.Personal = true

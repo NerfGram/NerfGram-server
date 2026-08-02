@@ -100,7 +100,9 @@ func (r *Router) onChannelsSearchPosts(ctx context.Context, req *tg.ChannelsSear
 		return nil, channelInvalidErr(err)
 	}
 	history = r.enrichChannelHistory(ctx, userID, history)
-	return tgChannelSearchPostsMessages(userID, history), nil
+	result := tgChannelSearchPostsMessages(userID, history)
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result, nil
 }
 
 func validateChannelSearchPostsRequest(req *tg.ChannelsSearchPostsRequest) error {
@@ -293,11 +295,13 @@ func (r *Router) onChannelsGetMessages(ctx context.Context, req *tg.ChannelsGetM
 			messages = append(messages, &tg.MessageEmpty{ID: id})
 		}
 	}
-	return &tg.MessagesMessages{
+	result := &tg.MessagesMessages{
 		Messages: messages,
 		Chats:    tgChannels(userID, []domain.Channel{history.Channel}),
 		Users:    r.tgUsersForViewer(userID, history.Users), // viewer 补拉自己的消息（含置顶）须带 self
-	}, nil
+	}
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result, nil
 }
 
 func (r *Router) onChannelsDeleteMessages(ctx context.Context, req *tg.ChannelsDeleteMessagesRequest) (*tg.MessagesAffectedMessages, error) {
@@ -335,19 +339,37 @@ func (r *Router) onChannelsDeleteMessages(ctx context.Context, req *tg.ChannelsD
 	if res.Event.Pts != 0 {
 		// 删除 fan-out 异步化（设计 Phase 0）。channelDeleteMessagesUpdates 是纯 CPU 构建
 		// （不碰 PG、不取 ctx），async 无竞态；同 channel 串行保 pts 单调。
-		r.enqueueChannelFanout(ctx, channelFanoutMembers, userID, res.Channel.ID, res.Event.Pts, res.Recipients, func(_ context.Context, viewerUserID int64) *tg.Updates {
+		r.enqueueChannelFanout(ctx, channelFanoutMessageBox, userID, res.Channel.ID, res.Event.Pts, res.Recipients, func(_ context.Context, viewerUserID int64) *tg.Updates {
 			return r.channelDeleteMessagesUpdates(viewerUserID, res.Channel, res.Event)
 		})
 		// 被删 broadcast post 的讨论组转发根级联删除同样要让讨论组成员收敛。
 		for _, cascade := range res.DiscussionDeletes {
 			cascade := cascade
-			r.enqueueChannelFanout(ctx, channelFanoutMembers, userID, cascade.Channel.ID, cascade.Event.Pts, cascade.Recipients, func(_ context.Context, viewerUserID int64) *tg.Updates {
+			r.enqueueChannelFanout(ctx, channelFanoutMessageBox, userID, cascade.Channel.ID, cascade.Event.Pts, cascade.Recipients, func(_ context.Context, viewerUserID int64) *tg.Updates {
 				return r.channelDeleteMessagesUpdates(viewerUserID, cascade.Channel, cascade.Event)
 			})
 		}
 		return &tg.MessagesAffectedMessages{Pts: res.Event.Pts, PtsCount: res.Event.PtsCount}, nil
 	}
 	return &tg.MessagesAffectedMessages{Pts: res.Channel.Pts, PtsCount: 0}, nil
+}
+
+// NotifyModerationChannelDeletion performs the online accelerator for a
+// server-authority deletion already committed by the moderation action worker.
+// Durable channel update events remain the offline recovery source.
+func (r *Router) NotifyModerationChannelDeletion(ctx context.Context, res domain.DeleteChannelMessagesResult) {
+	if r == nil || res.Event.Pts == 0 {
+		return
+	}
+	r.enqueueChannelFanout(ctx, channelFanoutMessageBox, domain.OfficialSystemUserID, res.Channel.ID, res.Event.Pts, res.Recipients, func(_ context.Context, viewerUserID int64) *tg.Updates {
+		return r.channelDeleteMessagesUpdates(viewerUserID, res.Channel, res.Event)
+	})
+	for _, cascade := range res.DiscussionDeletes {
+		cascade := cascade
+		r.enqueueChannelFanout(ctx, channelFanoutMessageBox, domain.OfficialSystemUserID, cascade.Channel.ID, cascade.Event.Pts, cascade.Recipients, func(_ context.Context, viewerUserID int64) *tg.Updates {
+			return r.channelDeleteMessagesUpdates(viewerUserID, cascade.Channel, cascade.Event)
+		})
+	}
 }
 
 func (r *Router) onChannelsDeleteHistory(ctx context.Context, req *tg.ChannelsDeleteHistoryRequest) (tg.UpdatesClass, error) {
@@ -376,16 +398,20 @@ func (r *Router) onChannelsDeleteHistory(ctx context.Context, req *tg.ChannelsDe
 		return nil, channelDeleteErr(err)
 	}
 	if res.Event.Pts == 0 {
-		event := r.recordChannelAvailableMessages(ctx, userID, res.Channel.ID, res.AvailableMinID)
-		updates := r.channelAvailableMessagesUpdates(userID, res.Channel, event.MaxID)
-		updates.Updates = appendAuxPtsBookkeeping(updates.Updates, event)
-		r.pushUserUpdates(ctx, userID, updates)
+		updates := r.channelAvailableMessagesUpdates(userID, res.Channel, res.AvailableMinID)
+		if res.AvailableMinChanged {
+			// updateChannelAvailableMessages is an absolute owner-local boundary
+			// with no account/channel pts. Other online sessions consume it
+			// immediately; future cold/offline sessions discover the same
+			// boundary through account/channel difference recovery.
+			r.pushUserUpdates(ctx, userID, updates)
+		}
 		return updates, nil
 	}
 	pushBatch := func(batch domain.DeleteChannelHistoryResult) *tg.Updates {
 		out := r.channelDeleteMessagesUpdates(userID, batch.Channel, batch.Event)
 		// 每批 fan-out 异步化；批次按 pts 递增顺序入同一 channel 分片 → FIFO 保单调。
-		r.enqueueChannelFanout(ctx, channelFanoutMembers, userID, batch.Channel.ID, batch.Event.Pts, batch.Recipients, func(_ context.Context, viewerUserID int64) *tg.Updates {
+		r.enqueueChannelFanout(ctx, channelFanoutMessageBox, userID, batch.Channel.ID, batch.Event.Pts, batch.Recipients, func(_ context.Context, viewerUserID int64) *tg.Updates {
 			return r.channelDeleteMessagesUpdates(viewerUserID, batch.Channel, batch.Event)
 		})
 		return out

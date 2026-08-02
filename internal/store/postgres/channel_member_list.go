@@ -128,7 +128,8 @@ func (s *ChannelStore) GetParticipants(ctx context.Context, viewerUserID, channe
 	}
 	rows, err := s.db.Query(ctx, `
 SELECT channel_id, user_id, inviter_user_id, role, status, joined_at, left_at, admin_rights::text, banned_rights::text,
-       rank, available_min_id, available_min_pts, read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
+       rank, available_min_id, available_min_pts, history_clear_anchor_id, history_clear_anchor_date,
+       read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
 `+from+`
 WHERE `+strings.Join(where, " AND ")+`
 ORDER BY CASE role WHEN 'creator' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, user_id
@@ -221,7 +222,8 @@ func (s *ChannelStore) ListActiveChannelMembers(ctx context.Context, viewerUserI
 	}
 	rows, err := s.db.Query(ctx, `
 SELECT channel_id, user_id, inviter_user_id, role, status, joined_at, left_at, admin_rights::text, banned_rights::text,
-       rank, available_min_id, available_min_pts, read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
+       rank, available_min_id, available_min_pts, history_clear_anchor_id, history_clear_anchor_date,
+       read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
 FROM channel_members
 WHERE channel_id = $1 AND status = 'active'
 ORDER BY user_id
@@ -264,6 +266,7 @@ func (s *ChannelStore) ListActiveChannelBotMembers(ctx context.Context, viewerUs
 	rows, err := s.db.Query(ctx, `
 SELECT m.channel_id, m.user_id, m.inviter_user_id, m.role, m.status, m.joined_at, m.left_at,
        m.admin_rights::text, m.banned_rights::text, m.rank, m.available_min_id, m.available_min_pts,
+       m.history_clear_anchor_id, m.history_clear_anchor_date,
        m.read_inbox_max_id, m.read_outbox_max_id, m.unread_mark, m.slowmode_last_send_date,
        COUNT(*) OVER()::int
 FROM bots b
@@ -358,5 +361,54 @@ ORDER BY user_id`, channelID, candidates[start:end])
 		rows.Close()
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func (s *ChannelStore) FilterChannelMessageAudienceIDs(ctx context.Context, channelID int64, userIDs []int64) ([]int64, error) {
+	if channelID == 0 || len(userIDs) == 0 {
+		return nil, nil
+	}
+	candidates := uniqueChannelUserIDs(userIDs, 0)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	out := make([]int64, 0, len(candidates))
+	for start := 0; start < len(candidates); start += channelMemberFilterBatch {
+		end := start + channelMemberFilterBatch
+		if end > len(candidates) {
+			end = len(candidates)
+		}
+		rows, err := s.db.Query(ctx, `
+SELECT candidate.user_id
+FROM channels c
+CROSS JOIN unnest($2::bigint[]) AS candidate(user_id)
+LEFT JOIN channel_members m
+  ON m.channel_id = c.id AND m.user_id = candidate.user_id
+WHERE c.id = $1
+  AND NOT c.deleted
+  AND NOT COALESCE((m.banned_rights->>'ViewMessages')::boolean, false)
+  AND COALESCE(m.status, '') NOT IN ('kicked', 'banned')
+  AND (
+    m.status = 'active'
+    OR (COALESCE(c.username, '') <> '' AND COALESCE(m.status, 'left') = 'left')
+  )
+ORDER BY candidate.user_id`, channelID, candidates[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("filter channel message audience: %w", err)
+		}
+		for rows.Next() {
+			var userID int64
+			if err := rows.Scan(&userID); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out = append(out, userID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
 	return out, nil
 }

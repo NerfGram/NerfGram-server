@@ -65,6 +65,12 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 		sendErr = internalErr()
 		return nil, sendErr
 	}
+	// 自动实体必须在普通/频道/monoforum 分流前完成，保证所有文本写路径持久化同一份
+	// 服务端补全结果。指纹仍基于原始请求，派生实体不改变 random_id 幂等语义。
+	entities := req.Entities
+	if req.RichMessage == nil {
+		entities = r.augmentAutoEntities(req.Message, entities)
+	}
 	suggestedInput, hasSuggestedPost := req.GetSuggestedPost()
 	// monoforum 普通用户发送不带 reply_to，saved_peer 必须由服务端推导为自己；管理员回复才必须
 	// 显式携带 monoforum_peer_id。仅凭 reply_to 判路由会把用户请求误送进普通 megagroup 路径。
@@ -127,7 +133,7 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 			IdempotencyFingerprint: idempotencyFingerprint,
 			IdempotencyPreflighted: replay.checked,
 			Message:                req.Message,
-			Entities:               domainMessageEntities(req.Entities),
+			Entities:               domainMessageEntities(entities),
 			ReplyTo:                replyTo,
 			Silent:                 req.Silent,
 			NoForwards:             req.Noforwards,
@@ -140,10 +146,6 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 			return nil, sendErr
 		}
 		return updates, nil
-	}
-	if req.AllowPaidStars > 0 {
-		sendErr = paymentUnsupportedErr()
-		return nil, sendErr
 	}
 	replay, err := r.lookupOutgoingReplay(ctx, userID, peer, req.RandomID, idempotencyFingerprint)
 	if err != nil {
@@ -184,8 +186,8 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 			return nil, sendErr
 		}
 	}
-	// rich_message（Layer 227 富文本）：解析 blocks + 内嵌媒体快照；普通消息恒 nil。
-	// Phase 1 仅认 inputRichMessage（blocks 形态），HTML/Markdown 变体返回错误。
+	// rich_message（Layer 228 富文本）：blocks、HTML、Markdown 均在边界归一为
+	// PageBlock + 内嵌媒体快照；普通消息恒 nil。
 	var richMessage *domain.MessageRichMessage
 	if req.RichMessage != nil {
 		richMessage, err = r.domainRichMessageFromInput(ctx, req.RichMessage)
@@ -194,20 +196,19 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 			return nil, sendErr
 		}
 	}
+	if req.Message != "" && richMessage != nil {
+		sendErr = mediaInvalidErr()
+		return nil, sendErr
+	}
 	if req.Message == "" && richMessage == nil {
 		sendErr = messageEmptyErr()
 		return nil, sendErr
-	}
-	// 自动实体高亮：客户端未带 url/@mention/#hashtag/bot command 等「可自动识别」实体时，服务端
-	// 检测原文补充（官方服务端行为），否则 @username/链接等不渲染为可点蓝色。富文本走独立结构，不处理。
-	if richMessage == nil {
-		req.Entities = augmentAutoEntities(req.Message, req.Entities)
 	}
 	// 链接预览：纯文本消息（私聊或频道）含可预览 URL 且未抑制时，挂 pending 占位，异步解析回填。
 	// 富文本消息有独立媒体语义，不叠加。
 	var previewMedia *domain.MessageMedia
 	if richMessage == nil {
-		previewMedia = r.webPageMediaFromText(ctx, req.Message, req.Entities, req.NoWebpage, req.InvertMedia)
+		previewMedia = r.webPageMediaFromText(ctx, req.Message, entities, req.NoWebpage, req.InvertMedia)
 	}
 	if req.ScheduleDate != 0 && !scheduleDateIsImmediate(req.ScheduleDate, int(r.clock.Now().Unix())) {
 		updates, err := r.scheduleOutgoing(ctx, userID, peer, outgoingSend{
@@ -215,7 +216,7 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 			idempotencyFingerprint: idempotencyFingerprint,
 			idempotencyPreflighted: replay.checked,
 			message:                req.Message,
-			entities:               req.Entities,
+			entities:               entities,
 			media:                  previewMedia,
 			silent:                 req.Silent,
 			noforwards:             req.Noforwards,
@@ -223,6 +224,7 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 			sendAsInput:            req.SendAs,
 			clearDraft:             req.ClearDraft,
 			richMessage:            richMessage,
+			allowPaidStars:         req.AllowPaidStars,
 		}, req.ScheduleDate, req.ScheduleRepeatPeriod)
 		if err != nil {
 			sendErr = err
@@ -235,7 +237,7 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 		idempotencyFingerprint: idempotencyFingerprint,
 		idempotencyPreflighted: replay.checked,
 		message:                req.Message,
-		entities:               req.Entities,
+		entities:               entities,
 		media:                  previewMedia,
 		silent:                 req.Silent,
 		noforwards:             req.Noforwards,
@@ -245,6 +247,7 @@ func (r *Router) onMessagesSendMessage(ctx context.Context, req *tg.MessagesSend
 		replyMarkup:            replyMarkup,
 		richMessage:            richMessage,
 		effect:                 req.Effect,
+		allowPaidStars:         req.AllowPaidStars,
 	})
 	duplicate = dup
 	if err != nil {
@@ -504,6 +507,9 @@ func tgPrivateMessageUpdates(event domain.UpdateEvent, msg domain.Message, rando
 		Pts:      event.Pts,
 		PtsCount: event.PtsCount,
 	})
+	if balance := tgGiftStarsBalanceUpdate(msg); balance != nil {
+		updates = append(updates, balance)
+	}
 	date := event.Date
 	if date == 0 {
 		date = msg.Date
@@ -515,6 +521,18 @@ func tgPrivateMessageUpdates(event domain.UpdateEvent, msg domain.Message, rando
 		Date:    date,
 		Seq:     0, // 私聊不维护账号级 seq，恒 0（客户端仅靠 pts 同步）
 	}
+}
+
+func tgGiftStarsBalanceUpdate(msg domain.Message) tg.UpdateClass {
+	if msg.Out || msg.Media == nil || msg.Media.ServiceAction == nil ||
+		msg.Media.ServiceAction.Kind != domain.MessageServiceActionGiftStars {
+		return nil
+	}
+	action := msg.Media.ServiceAction.GiftStars
+	if action == nil || action.BalanceAfter < 0 {
+		return nil
+	}
+	return &tg.UpdateStarsBalance{Balance: &tg.StarsAmount{Amount: action.BalanceAfter}}
 }
 
 // tgPrivateSendResultUpdates returns a complete send acknowledgement for exact
@@ -594,6 +612,10 @@ func (r *Router) usersForMessageUpdate(ctx context.Context, ownerUserID int64, m
 	if msg.Media != nil && msg.Media.Contact != nil {
 		add(msg.Media.Contact.UserID)
 	}
+	// A non-min User replaces the cached peer on iOS. Keep the complete
+	// username vector on synchronous message echoes instead of letting this
+	// response regress a previously hydrated profile to the legacy scalar.
+	r.applyUsernamesToPeerObjects(ctx, users, nil)
 	return users
 }
 
@@ -656,6 +678,7 @@ func (r *Router) usersForMessageUpdates(ctx context.Context, ownerUserID int64, 
 			}
 		}
 	}
+	r.applyUsernamesToPeerObjects(ctx, users, nil)
 	return users
 }
 

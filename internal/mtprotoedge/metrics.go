@@ -2,8 +2,8 @@ package mtprotoedge
 
 import "time"
 
-// Metrics 接收连接层运行指标。实现可对接 Prometheus 等监控系统；
-// 默认 NopMetrics（零开销）。第一阶段仅预留钩子，正式指标后续接入。
+// Metrics 接收连接层运行指标。生产入口接入有界 Prometheus exporter；
+// 其它 embedder 可继续使用 NopMetrics（零开销）。
 type Metrics interface {
 	// ConnOpened 在接受一个连接时调用。
 	ConnOpened()
@@ -37,6 +37,14 @@ type Metrics interface {
 type RPCResultMetrics interface {
 	RPCResultPrepared(method, priority string, innerBytes, wireBytes int, compressed bool)
 	RPCResultDelivered(method string, egressLatency time.Duration, wireBytes int, err error)
+}
+
+// LogicalOutboxMetrics observes the sole owner of unacknowledged server frames.
+// It is intentionally optional: embedders can keep the small Metrics surface,
+// while production capacity tests can distinguish physical delivery from the
+// later client ACK that actually releases retained bytes.
+type LogicalOutboxMetrics interface {
+	LogicalOutboxAcknowledged(bytes int, retainedFor time.Duration, rpcResult bool)
 }
 
 // ConnectionIntakeMetrics is an optional extension for the pre-session

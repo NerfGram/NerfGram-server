@@ -29,6 +29,10 @@ func (r *Router) onMessagesCreateChat(ctx context.Context, req *tg.MessagesCreat
 		return nil, err
 	}
 	memberIDs = createChatInviteMemberIDs(memberIDs, userID)
+	memberIDs, missingInvitees, err := r.filterChatInvitePrivacy(ctx, userID, memberIDs)
+	if err != nil {
+		return nil, internalErr()
+	}
 	date := int(r.clock.Now().Unix())
 	r.log.Debug("messages.createChat resolved users",
 		zap.Int("input_users", len(req.Users)),
@@ -60,22 +64,31 @@ func (r *Router) onMessagesCreateChat(ctx context.Context, req *tg.MessagesCreat
 	}
 
 	cache := newViewerPeerCache(r)
-	updates := r.channelOperationUpdatesWithPeerCache(ctx, userID, responseRes, cache)
+	canonicalUpdates := r.channelOperationUpdatesWithPeerCache(ctx, userID, responseRes, cache)
+	var inviteUpdates *tg.Updates
+	if inviteRes.Event.Pts != 0 {
+		inviteUpdates = r.channelOperationUpdatesWithPeerCache(ctx, userID, inviteRes, cache)
+		if inviteUpdates != nil {
+			canonicalUpdates.Updates = append(canonicalUpdates.Updates, inviteUpdates.Updates...)
+		}
+	}
+	updates := canonicalUpdates
 	if createChatNeedsLegacyChat(ctx) {
 		updates = r.tdesktopCreateChatUpdatesWithPeerCache(ctx, userID, responseRes, cache)
-	}
-	if inviteRes.Event.Pts != 0 {
-		inviteUpdates := r.channelOperationUpdatesWithPeerCache(ctx, userID, inviteRes, cache)
 		if inviteUpdates != nil {
 			updates.Updates = append(updates.Updates, inviteUpdates.Updates...)
 		}
 	}
+	// The rpc_result reaches only the calling session. Keep the creator's other
+	// sessions in sync with the same canonical channel state; compatibility-only
+	// legacy chat projection is needed solely by the synchronous create callback.
+	r.pushUserUpdates(ctx, userID, canonicalUpdates)
 	if inviteRes.Event.Pts != 0 {
 		r.pushChannelExplicitUpdates(ctx, userID, inviteRes.Channel.ID, memberIDs, func(viewerUserID int64) *tg.Updates {
 			return r.channelOperationUpdatesWithPeerCache(ctx, viewerUserID, inviteRes, cache)
 		})
 	}
-	return &tg.MessagesInvitedUsers{Updates: updates, MissingInvitees: []tg.MissingInvitee{}}, nil
+	return &tg.MessagesInvitedUsers{Updates: updates, MissingInvitees: missingInvitees}, nil
 }
 
 func (r *Router) onMessagesMigrateChat(ctx context.Context, chatID int64) (tg.UpdatesClass, error) {
@@ -602,7 +615,7 @@ func (r *Router) enqueueChannelWallpaperFanout(ctx context.Context, originUserID
 	}
 	fanoutCache := newViewerPeerCache(r)
 	ownerIDs := channelMessageFanoutOwnerIDs(sendRes, nil)
-	r.enqueueChannelFanoutWithPrefetch(ctx, channelFanoutMembers, originUserID, res.Channel.ID, res.Event.Pts, res.Recipients,
+	r.enqueueChannelFanoutWithPrefetch(ctx, channelFanoutMessageBox, originUserID, res.Channel.ID, res.Event.Pts, res.Recipients,
 		0,
 		func(bgCtx context.Context, viewers []int64) {
 			r.prefetchChannelFanoutUsers(bgCtx, fanoutCache, viewers, ownerIDs)
@@ -610,25 +623,6 @@ func (r *Router) enqueueChannelWallpaperFanout(ctx context.Context, originUserID
 		func(bgCtx context.Context, viewerUserID int64) *tg.Updates {
 			return r.channelWallpaperUpdatesWithPeerCache(bgCtx, viewerUserID, res, fanoutCache)
 		})
-}
-
-func (r *Router) onMessagesToggleNoForwards(ctx context.Context, req *tg.MessagesToggleNoForwardsRequest) (tg.UpdatesClass, error) {
-	if r.deps.Channels == nil {
-		return nil, notImplementedErr()
-	}
-	userID, _, err := r.currentUserID(ctx)
-	if err != nil {
-		return nil, internalErr()
-	}
-	channelID, err := r.channelIDFromLegacyInputPeerChecked(ctx, userID, req.Peer)
-	if err != nil {
-		return nil, err
-	}
-	channel, err := r.deps.Channels.SetNoForwards(ctx, userID, channelID, req.Enabled)
-	if err != nil {
-		return nil, channelAdminErr(err)
-	}
-	return r.channelStateMutationUpdates(ctx, userID, channel), nil
 }
 
 func (r *Router) onMessagesSetChatAvailableReactions(ctx context.Context, req *tg.MessagesSetChatAvailableReactionsRequest) (tg.UpdatesClass, error) {

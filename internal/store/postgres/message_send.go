@@ -65,36 +65,51 @@ func ensureOfficialSystemUserWithDB(ctx context.Context, db sqlcgen.DBTX, msg do
 	if !ok {
 		return nil
 	}
-	// Upsert users row first (single statement).
 	if _, err := db.Exec(ctx, `
-INSERT INTO users (id, access_hash, phone, first_name, last_name, username, country_code, verified, support, about, is_bot, bot_info_version)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-ON CONFLICT (id) DO UPDATE SET
-	access_hash = EXCLUDED.access_hash,
-	phone = EXCLUDED.phone,
-	first_name = EXCLUDED.first_name,
-	last_name = EXCLUDED.last_name,
+WITH desired (
+	id, access_hash, phone, first_name, last_name, username,
+	country_code, verified, support, about, is_bot, bot_info_version
+) AS (
+	VALUES ($1::bigint, $2::bigint, $3::text, $4::text, $5::text, $6::text,
+		$7::text, $8::boolean, $9::boolean, $10::text, $11::boolean, $12::integer)
+), upserted AS (
+	INSERT INTO users (id, access_hash, phone, first_name, last_name, username, country_code, verified, support, about, is_bot, bot_info_version)
+	SELECT id, access_hash, phone, first_name, last_name, username, country_code, verified, support, about, is_bot, bot_info_version
+	FROM desired
+	ON CONFLICT (id) DO UPDATE SET
+		access_hash = EXCLUDED.access_hash,
+		phone = EXCLUDED.phone,
+		first_name = EXCLUDED.first_name,
+		last_name = EXCLUDED.last_name,
+		username = EXCLUDED.username,
+		country_code = EXCLUDED.country_code,
+		verified = EXCLUDED.verified,
+		support = EXCLUDED.support,
+		about = EXCLUDED.about,
+		is_bot = EXCLUDED.is_bot,
+		bot_info_version = EXCLUDED.bot_info_version,
+		updated_at = now()
+	WHERE (
+		users.access_hash, users.phone, users.first_name, users.last_name,
+		users.username, users.country_code, users.verified, users.support,
+		users.about, users.is_bot, users.bot_info_version
+	) IS DISTINCT FROM (
+		EXCLUDED.access_hash, EXCLUDED.phone, EXCLUDED.first_name, EXCLUDED.last_name,
+		EXCLUDED.username, EXCLUDED.country_code, EXCLUDED.verified, EXCLUDED.support,
+		EXCLUDED.about, EXCLUDED.is_bot, EXCLUDED.bot_info_version
+	)
+)
+INSERT INTO peer_usernames (username_lower, username, peer_type, peer_id, active, editable, sort_order)
+SELECT lower(username), username, 'user', id, true, true, 0
+FROM desired
+ON CONFLICT (peer_type, peer_id) WHERE editable DO UPDATE SET
+	username_lower = EXCLUDED.username_lower,
 	username = EXCLUDED.username,
-	country_code = EXCLUDED.country_code,
-	verified = EXCLUDED.verified,
-	support = EXCLUDED.support,
-	about = EXCLUDED.about,
-	is_bot = EXCLUDED.is_bot,
-	bot_info_version = EXCLUDED.bot_info_version,
 	updated_at = now()
-WHERE (users.access_hash, users.phone, users.first_name, users.last_name, users.username, users.country_code, users.verified, users.support, users.about, users.is_bot, users.bot_info_version)
-      IS DISTINCT FROM (EXCLUDED.access_hash, EXCLUDED.phone, EXCLUDED.first_name, EXCLUDED.last_name, EXCLUDED.username, EXCLUDED.country_code, EXCLUDED.verified, EXCLUDED.support, EXCLUDED.about, EXCLUDED.is_bot, EXCLUDED.bot_info_version)
+WHERE (peer_usernames.username_lower, peer_usernames.username)
+	IS DISTINCT FROM (EXCLUDED.username_lower, EXCLUDED.username)
 `, u.ID, u.AccessHash, u.Phone, u.FirstName, u.LastName, u.Username, u.CountryCode, u.Verified, u.Support, u.About, u.Bot, u.BotInfoVersion); err != nil {
 		return fmt.Errorf("ensure official system user: %w", err)
-	}
-	// Delete existing editable username for this user and insert new one if present.
-	if _, err := db.Exec(ctx, `DELETE FROM peer_usernames WHERE peer_type = 'user' AND peer_id = $1 AND is_editable`, u.ID); err != nil {
-		return fmt.Errorf("ensure official system user: %w", err)
-	}
-	if u.Username != "" {
-		if _, err := db.Exec(ctx, `INSERT INTO peer_usernames (username_lower, peer_type, peer_id, is_editable) VALUES (lower($1), 'user', $2, true)`, u.Username, u.ID); err != nil {
-			return fmt.Errorf("ensure official system user: %w", err)
-		}
 	}
 	return nil
 }
@@ -104,8 +119,24 @@ func (s *MessageStore) SendPrivateText(ctx context.Context, req domain.SendPriva
 }
 
 type privateSendTxHooks struct {
-	before func(context.Context, pgx.Tx, *domain.SendPrivateTextRequest) error
-	after  func(context.Context, pgx.Tx, domain.SendPrivateTextResult) error
+	before       func(context.Context, pgx.Tx, *domain.SendPrivateTextRequest) error
+	projectMedia func(context.Context, pgx.Tx, *domain.SendPrivateTextRequest) (privateSendMediaProjection, error)
+	// afterAllocate runs after the immutable logical message and both box IDs
+	// exist, but before either box, update event or replay snapshot is written.
+	// It may finalize req.Media using those IDs; all of its writes remain in the
+	// same private-send transaction.
+	afterAllocate func(context.Context, pgx.Tx, *domain.SendPrivateTextRequest, int, int) error
+	after         func(context.Context, pgx.Tx, domain.SendPrivateTextResult) error
+}
+
+// privateSendMediaProjection separates the logical private-message payload
+// from the two account-local message-box projections. Most messages use the
+// same media for all three fields. Service actions that carry message ids must
+// project those ids per account because box ids are not shared by both users.
+type privateSendMediaProjection struct {
+	Shared    *domain.MessageMedia
+	Sender    *domain.MessageMedia
+	Recipient *domain.MessageMedia
 }
 
 func (s *MessageStore) sendPrivateTextWithHooks(ctx context.Context, req domain.SendPrivateTextRequest, hooks privateSendTxHooks) (res domain.SendPrivateTextResult, err error) {
@@ -215,7 +246,22 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 			return domain.SendPrivateTextResult{}, err
 		}
 	}
-	mediaJSON, err := encodeMessageMedia(req.Media)
+	media := privateSendMediaProjection{Shared: req.Media, Sender: req.Media, Recipient: req.Media}
+	if hooks.projectMedia != nil {
+		media, err = hooks.projectMedia(ctx, tx, &req)
+		if err != nil {
+			return domain.SendPrivateTextResult{}, err
+		}
+	}
+	sharedMediaJSON, err := encodeMessageMedia(media.Shared)
+	if err != nil {
+		return domain.SendPrivateTextResult{}, err
+	}
+	senderMediaJSON, err := encodeMessageMedia(media.Sender)
+	if err != nil {
+		return domain.SendPrivateTextResult{}, err
+	}
+	recipientMediaJSON, err := encodeMessageMedia(media.Recipient)
 	if err != nil {
 		return domain.SendPrivateTextResult{}, err
 	}
@@ -242,7 +288,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 		TtlPeriod:          int32(ttlPeriod),
 		ExpiresAt:          int32(expiresAt),
 		EntitiesJson:       entities,
-		MediaJson:          mediaJSON,
+		MediaJson:          sharedMediaJSON,
 		ReplyMarkupJson:    replyMarkupJSON,
 		RichMessageJson:    richMessageJSON,
 		ViaBotID:           req.ViaBotID,
@@ -286,6 +332,44 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 			return domain.SendPrivateTextResult{}, fmt.Errorf("allocate recipient pts: %w", err)
 		}
 	}
+	if hooks.afterAllocate != nil {
+		// A callback may replace the media after the ordinary request
+		// fingerprint was computed. Requiring a complete caller-owned
+		// fingerprint keeps random_id replay bound to the final aggregate intent.
+		if err := store.ValidateSendFingerprint(req.IdempotencyFingerprint, "after-allocate private send"); err != nil {
+			return domain.SendPrivateTextResult{}, err
+		}
+		if err := hooks.afterAllocate(ctx, tx, &req, senderBoxID, recipientBoxID); err != nil {
+			return domain.SendPrivateTextResult{}, err
+		}
+		media = privateSendMediaProjection{Shared: req.Media, Sender: req.Media, Recipient: req.Media}
+		if hooks.projectMedia != nil {
+			media, err = hooks.projectMedia(ctx, tx, &req)
+			if err != nil {
+				return domain.SendPrivateTextResult{}, err
+			}
+		}
+		sharedMediaJSON, err = encodeMessageMedia(media.Shared)
+		if err != nil {
+			return domain.SendPrivateTextResult{}, err
+		}
+		senderMediaJSON, err = encodeMessageMedia(media.Sender)
+		if err != nil {
+			return domain.SendPrivateTextResult{}, err
+		}
+		recipientMediaJSON, err = encodeMessageMedia(media.Recipient)
+		if err != nil {
+			return domain.SendPrivateTextResult{}, err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE private_messages SET media=$3
+WHERE sender_user_id=$1 AND id=$2`, req.SenderUserID, pm.ID, sharedMediaJSON)
+		if err != nil {
+			return domain.SendPrivateTextResult{}, fmt.Errorf("finalize private message media: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return domain.SendPrivateTextResult{}, fmt.Errorf("finalize private message media: logical message disappeared")
+		}
+	}
 
 	senderArg := sqlcgen.CreateMessageBoxParams{
 		OwnerUserID:      req.SenderUserID,
@@ -302,7 +386,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 		ExpiresAt:        int32(expiresAt),
 		EntitiesJson:     entities,
 		Pts:              int32(senderPts),
-		MediaJson:        mediaJSON,
+		MediaJson:        senderMediaJSON,
 		ReplyMarkupJson:  replyMarkupJSON,
 		RichMessageJson:  richMessageJSON,
 		ViaBotID:         req.ViaBotID,
@@ -310,7 +394,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 		Effect:           req.Effect,
 		// voice/round 在发送者自己的副本上也保持"未听"，直到对端
 		// readMessageContents 触发 sender 侧清除；发给自己无人可听，恒已读。
-		MediaUnread:    req.Media.HasUnreadPayload() && !selfMessage,
+		MediaUnread:    media.Sender.HasUnreadPayload() && !selfMessage,
 		ReactionUnread: false,
 	}
 	applyCreateMessageBoxMetadata(&senderArg, senderMeta)
@@ -321,7 +405,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 	sender := messageFromBoxRow(senderRow)
 	sender.RandomID = req.RandomID
 	// 共享媒体索引(0118):发送者侧 box 按媒体类别建索引(peer=收件人)。
-	if err := insertMessageBoxMediaIndexTx(ctx, tx, req.SenderUserID, req.RecipientUserID, int(senderBoxID), req.Date, req.Media, req.Entities); err != nil {
+	if err := insertMessageBoxMediaIndexTx(ctx, tx, req.SenderUserID, req.RecipientUserID, int(senderBoxID), req.Date, media.Sender, req.Entities); err != nil {
 		return domain.SendPrivateTextResult{}, err
 	}
 	if err := qtx.UpsertOutboxDialog(ctx, sqlcgen.UpsertOutboxDialogParams{
@@ -375,13 +459,13 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 			ExpiresAt:        int32(expiresAt),
 			EntitiesJson:     entities,
 			Pts:              int32(recipientPts),
-			MediaJson:        mediaJSON,
+			MediaJson:        recipientMediaJSON,
 			ReplyMarkupJson:  replyMarkupJSON,
 			RichMessageJson:  richMessageJSON,
 			ViaBotID:         req.ViaBotID,
 			GroupedID:        req.GroupedID,
 			Effect:           req.Effect,
-			MediaUnread:      req.Media.HasUnreadPayload(),
+			MediaUnread:      media.Recipient.HasUnreadPayload(),
 			ReactionUnread:   false,
 		}
 		applyCreateMessageBoxMetadata(&recipientArg, recipientMeta)
@@ -392,7 +476,7 @@ func (s *MessageStore) sendPrivateTextOnce(ctx context.Context, req domain.SendP
 		recipient = messageFromBoxRow(recipientRow)
 		recipient.RandomID = req.RandomID
 		// 共享媒体索引(0118):收件人侧 box 按媒体类别建索引(peer=发送者)。
-		if err := insertMessageBoxMediaIndexTx(ctx, tx, req.RecipientUserID, req.SenderUserID, int(recipientBoxID), req.Date, req.Media, req.Entities); err != nil {
+		if err := insertMessageBoxMediaIndexTx(ctx, tx, req.RecipientUserID, req.SenderUserID, int(recipientBoxID), req.Date, media.Recipient, req.Entities); err != nil {
 			return domain.SendPrivateTextResult{}, err
 		}
 		if err := qtx.UpsertInboxDialog(ctx, sqlcgen.UpsertInboxDialogParams{

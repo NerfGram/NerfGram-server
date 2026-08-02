@@ -15,6 +15,22 @@ func TestPasswordErrMapsOccupiedLoginEmailToNotAllowed(t *testing.T) {
 	}
 }
 
+func TestPasswordErrMapsRecoveryState(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{domain.ErrRecoveryCodeEmpty, "CODE_EMPTY"},
+		{domain.ErrRecoveryCodeInvalid, "CODE_INVALID"},
+		{domain.ErrPasswordRecoveryExpired, "PASSWORD_RECOVERY_EXPIRED"},
+	}
+	for _, tc := range tests {
+		if err := passwordErr(tc.err); !tgerr.Is(err, tc.want) {
+			t.Fatalf("passwordErr(%v)=%v, want %s", tc.err, err, tc.want)
+		}
+	}
+}
+
 func TestBindTempAuthKeyErrPreservesRecoverableRotationErrors(t *testing.T) {
 	tests := []struct {
 		err  error

@@ -918,12 +918,13 @@ func downloadPartSize(expectedSize int64) int {
 	if expectedSize <= 0 || expectedSize >= max {
 		return int(max)
 	}
-	// Choose a valid 4 KiB-aligned limit strictly larger than the file whenever
-	// possible, so downloader.Stream recognizes the first short chunk as final
-	// without an extra EOF probe.
-	partSize := ((expectedSize + 1 + unit - 1) / unit) * unit
-	if partSize > max {
-		partSize = max
+	// Non-precise upload.getFile limits must use the client-compatible chunk
+	// ladder (4, 8, ..., 512 KiB), whose values also divide a 1 MiB window.
+	// Merely rounding to an arbitrary 4 KiB multiple (for example 48 KiB)
+	// is rejected with LIMIT_INVALID by some official file DCs.
+	partSize := unit
+	for partSize <= expectedSize && partSize < max {
+		partSize *= 2
 	}
 	return int(partSize)
 }

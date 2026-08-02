@@ -135,6 +135,25 @@ func tgMessageMedia(m *domain.MessageMedia) tg.MessageMediaClass {
 			return &tg.MessageMediaEmpty{}
 		}
 		return tgWebPageMedia(*m.WebPage)
+	case domain.MessageMediaKindGiveaway:
+		if m.Giveaway == nil {
+			return &tg.MessageMediaEmpty{}
+		}
+		out := &tg.MessageMediaGiveaway{
+			OnlyNewSubscribers: m.Giveaway.OnlyNewSubscribers,
+			WinnersAreVisible:  m.Giveaway.WinnersAreVisible,
+			Channels:           append([]int64(nil), m.Giveaway.Channels...),
+			Quantity:           m.Giveaway.Quantity,
+			UntilDate:          m.Giveaway.UntilDate,
+		}
+		if m.Giveaway.CountriesISO2 != nil {
+			out.SetCountriesISO2(append([]string(nil), m.Giveaway.CountriesISO2...))
+		}
+		if m.Giveaway.PrizeDescription != "" {
+			out.SetPrizeDescription(m.Giveaway.PrizeDescription)
+		}
+		out.SetStars(m.Giveaway.Stars)
+		return out
 	default:
 		return &tg.MessageMediaEmpty{}
 	}

@@ -80,7 +80,7 @@ func TestCachedRPCResultReplayUsesPreReservedBodyWithoutDoubleCharge(t *testing.
 
 	done := make(chan error, 1)
 	go func() {
-		done <- s.sendCachedRPCResult(context.Background(), c, encoded)
+		done <- s.sendReplayedRPCResult(context.Background(), c, encoded)
 	}()
 	select {
 	case <-tr.started:
@@ -162,7 +162,7 @@ func TestOutboundActorRetargetRequiresSecondBodyReservation(t *testing.T) {
 	state := newOutboundState(budget)
 	var terminalErr error
 	var terminalBytes int64
-	c.handleOutboundSend(state, outboundOp{
+	op := outboundOp{
 		kind:              outboundSend,
 		ctx:               context.Background(),
 		msgType:           proto.MessageServerResponse,
@@ -174,12 +174,14 @@ func TestOutboundActorRetargetRequiresSecondBodyReservation(t *testing.T) {
 			terminalErr = err
 			terminalBytes = budget.snapshot()
 		},
-	})
+	}
+	err := c.handleOutboundSend(state, op)
+	op.finish(outboundResult{err: err})
 	if !errors.Is(terminalErr, ErrOutboundTrackedBudget) {
 		t.Fatalf("retarget terminal error = %v, want %v", terminalErr, ErrOutboundTrackedBudget)
 	}
-	if terminalBytes != int64(len(encoded.body)) {
-		t.Fatalf("bytes visible to terminal = %d, want original body %d retained", terminalBytes, len(encoded.body))
+	if terminalBytes != 0 {
+		t.Fatalf("bytes visible to terminal = %d, want producer reservation released", terminalBytes)
 	}
 	if got := tr.sends.Load(); got != 0 {
 		t.Fatalf("retarget under one-body budget wrote %d frames, want 0", got)
@@ -213,7 +215,7 @@ func TestOutboundActorRetargetTransfersOnlyReplacementToPending(t *testing.T) {
 	state := newOutboundState(budget)
 	var terminalErr error
 	var terminalBytes int64
-	c.handleOutboundSend(state, outboundOp{
+	op := outboundOp{
 		kind:              outboundSend,
 		ctx:               context.Background(),
 		msgType:           proto.MessageServerResponse,
@@ -225,12 +227,14 @@ func TestOutboundActorRetargetTransfersOnlyReplacementToPending(t *testing.T) {
 			terminalErr = err
 			terminalBytes = budget.snapshot()
 		},
-	})
+	}
+	err := c.handleOutboundSend(state, op)
+	op.finish(outboundResult{err: err})
 	if terminalErr != nil {
 		t.Fatalf("retarget terminal error: %v", terminalErr)
 	}
-	if terminalBytes != int64(2*perBody) {
-		t.Fatalf("bytes visible to terminal = %d, want original+replacement %d", terminalBytes, 2*perBody)
+	if terminalBytes != int64(perBody) {
+		t.Fatalf("bytes visible to terminal = %d, want only pending replacement %d", terminalBytes, perBody)
 	}
 	if got := budget.snapshot(); got != int64(perBody) {
 		t.Fatalf("bytes after terminal = %d, want one pending replacement %d", got, perBody)

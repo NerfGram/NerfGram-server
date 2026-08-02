@@ -113,6 +113,9 @@ func tgChannelMessage(viewerUserID int64, m domain.ChannelMessage) tg.MessageCla
 		if msg.Action == nil {
 			msg.Action = &tg.MessageActionEmpty{}
 		}
+		if m.SavedPeer.ID != 0 {
+			msg.SetSavedPeerID(tgPeer(m.SavedPeer))
+		}
 		if reply := tgMessageReplyHeader(domain.Message{
 			Peer:    domain.Peer{Type: domain.PeerTypeChannel, ID: m.ChannelID},
 			ReplyTo: m.ReplyTo,
@@ -140,7 +143,18 @@ func tgChannelMessage(viewerUserID int64, m domain.ChannelMessage) tg.MessageCla
 		msg.SetSavedPeerID(tgPeer(m.SavedPeer))
 	}
 	if suggested, ok := tgSuggestedPost(m.SuggestedPost); ok {
-		msg.SetSuggestedPost(suggested)
+		if m.Post {
+			if m.SuggestedPost != nil && m.SuggestedPost.Accepted && m.SuggestedPost.Price != nil {
+				switch m.SuggestedPost.Price.Kind {
+				case domain.SuggestedPostPriceStars:
+					msg.SetPaidSuggestedPostStars(true)
+				case domain.SuggestedPostPriceTON:
+					msg.SetPaidSuggestedPostTon(true)
+				}
+			}
+		} else {
+			msg.SetSuggestedPost(suggested)
+		}
 	}
 	if m.PaidMessageStars > 0 {
 		msg.SetPaidMessageStars(m.PaidMessageStars)
@@ -208,6 +222,8 @@ func tgChannelMessageAction(action domain.ChannelMessageAction) tg.MessageAction
 	switch action.Type {
 	case domain.ChannelActionCreate:
 		return &tg.MessageActionChannelCreate{Title: action.Title}
+	case domain.ChannelActionHistoryClear:
+		return &tg.MessageActionHistoryClear{}
 	case domain.ChannelActionChatAddUser, domain.ChannelActionChatJoined:
 		return &tg.MessageActionChatAddUser{Users: append([]int64(nil), action.UserIDs...)}
 	case domain.ChannelActionChatJoinedByLink:
@@ -303,6 +319,42 @@ func tgChannelMessageAction(action domain.ChannelMessageAction) tg.MessageAction
 			out.SetCommunityID(action.CommunityID)
 		}
 		return out
+	case domain.ChannelActionSuggestedPostApproval:
+		out := &tg.MessageActionSuggestedPostApproval{
+			Rejected:      action.SuggestedPostRejected,
+			BalanceTooLow: action.SuggestedPostBalanceTooLow,
+		}
+		if action.SuggestedPostRejectComment != "" {
+			out.SetRejectComment(action.SuggestedPostRejectComment)
+		}
+		if action.SuggestedPostScheduleDate > 0 {
+			out.SetScheduleDate(action.SuggestedPostScheduleDate)
+		}
+		if price := tgSuggestedPostPrice(action.SuggestedPostPrice); price != nil {
+			out.SetPrice(price)
+		}
+		return out
+	case domain.ChannelActionSuggestedPostSuccess:
+		if price := tgSuggestedPostPrice(action.SuggestedPostPrice); price != nil {
+			return &tg.MessageActionSuggestedPostSuccess{Price: price}
+		}
+		return nil
+	case domain.ChannelActionSuggestedPostRefund:
+		return &tg.MessageActionSuggestedPostRefund{PayerInitiated: action.SuggestedPostPayerInitiated}
+	default:
+		return nil
+	}
+}
+
+func tgSuggestedPostPrice(price *domain.SuggestedPostPrice) tg.StarsAmountClass {
+	if price == nil {
+		return nil
+	}
+	switch price.Kind {
+	case domain.SuggestedPostPriceStars:
+		return &tg.StarsAmount{Amount: price.Amount, Nanos: price.Nanos}
+	case domain.SuggestedPostPriceTON:
+		return &tg.StarsTonAmount{Amount: price.Amount}
 	default:
 		return nil
 	}
@@ -400,6 +452,9 @@ func tgChannel(viewerUserID int64, ch domain.Channel, self *domain.ChannelMember
 	out := &tg.Channel{
 		Creator:    ch.CreatorUserID == viewerUserID && viewerUserID != 0,
 		Verified:   ch.Verified,
+		Scam:       ch.Scam,
+		Fake:       ch.Fake,
+		Gigagroup:  ch.Gigagroup,
 		Broadcast:  ch.Broadcast,
 		Megagroup:  ch.Megagroup,
 		Forum:      ch.Forum,
@@ -442,7 +497,6 @@ func tgChannel(viewerUserID int64, ch domain.Channel, self *domain.ChannelMember
 	}
 	if ch.Username != "" {
 		out.SetUsername(ch.Username)
-		out.SetUsernames(tgUsernames(ch.Username, nil))
 	}
 	if color := tgPeerColor(ch.Color); color != nil {
 		out.SetColor(color)
@@ -500,13 +554,15 @@ func tgChannelFull(view domain.ChannelView, publicBaseURL ...string) *tg.Channel
 		CanSetUsername:      view.Self.Role == domain.ChannelRoleCreator,
 		CanDeleteChannel:    view.Self.Role == domain.ChannelRoleCreator,
 		ID:                  ch.ID,
-		About:               ch.About,
-		ReadInboxMaxID:      view.Dialog.ReadInboxMaxID,
-		ReadOutboxMaxID:     view.Dialog.ReadOutboxMaxID,
-		UnreadCount:         view.Dialog.UnreadCount,
-		ChatPhoto:           tgChannelChatPhotoFull(ch),
-		NotifySettings:      *tdesktop.NotifySettings(),
-		Pts:                 ch.Pts,
+		// Official clients render localized warnings from scam/fake flags.
+		// About remains the owner's unmodified description.
+		About:           ch.About,
+		ReadInboxMaxID:  view.Dialog.ReadInboxMaxID,
+		ReadOutboxMaxID: view.Dialog.ReadOutboxMaxID,
+		UnreadCount:     view.Dialog.UnreadCount,
+		ChatPhoto:       tgChannelChatPhotoFull(ch),
+		NotifySettings:  *tdesktop.NotifySettings(),
+		Pts:             ch.Pts,
 	}
 	if ch.ParticipantsCount > 0 {
 		full.SetParticipantsCount(ch.ParticipantsCount)

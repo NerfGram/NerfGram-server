@@ -57,13 +57,17 @@ const layerRPCReplayRestoreTimeout = 5 * time.Second
 // touching auth/session stores. The MTProto edge must call it before acquiring
 // an RPC flight/cache slot or scheduling business work.
 func (r *Router) AdmitLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
+	return r.AdmitLayerWithOptions(profile, b, tlprofile.AdmissionOptions{Limits: limits})
+}
+
+func (r *Router) AdmitLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
 	if r == nil || r.dispatcher == nil {
 		return tlprofile.Admission{}, internalErr()
 	}
 	if b == nil {
 		return tlprofile.Admission{}, inputRequestInvalidErr()
 	}
-	return r.dispatcher.Admit(profile, b, limits)
+	return r.dispatcher.AdmitWithOptions(profile, b, options)
 }
 
 // AdmitDefaultLayer admits a request using an inherited auth-key profile as
@@ -71,13 +75,17 @@ func (r *Router) AdmitLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlp
 // same wrapper chain to correct that default. Generated admission preserves
 // the distinction through EffectiveProfile and ProfileEvidence.
 func (r *Router) AdmitDefaultLayer(profile tlprofile.Profile, b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
+	return r.AdmitDefaultLayerWithOptions(profile, b, tlprofile.AdmissionOptions{Limits: limits})
+}
+
+func (r *Router) AdmitDefaultLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
 	if r == nil || r.dispatcher == nil {
 		return tlprofile.Admission{}, internalErr()
 	}
 	if b == nil {
 		return tlprofile.Admission{}, inputRequestInvalidErr()
 	}
-	return r.dispatcher.AdmitDefault(profile, b, limits)
+	return r.dispatcher.AdmitDefaultWithOptions(profile, b, options)
 }
 
 // registerAndroidLayerRPCAdapter installs the only client-private schema seam.
@@ -191,10 +199,14 @@ func (r *Router) PrepareAdmittedReplay(
 // a closed terminal whose complete request and result wire graphs were proven
 // invariant across every generated profile. The latter never freezes a layer.
 func (r *Router) AdmitUnprofiled(b *bin.Buffer, limits tlprofile.Limits) (tlprofile.Admission, error) {
+	return r.AdmitUnprofiledWithOptions(b, tlprofile.AdmissionOptions{Limits: limits})
+}
+
+func (r *Router) AdmitUnprofiledWithOptions(b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error) {
 	if r == nil || r.dispatcher == nil {
 		return tlprofile.Admission{}, internalErr()
 	}
-	return r.dispatcher.AdmitUnprofiled(b, limits)
+	return r.dispatcher.AdmitUnprofiledWithOptions(b, options)
 }
 
 // DispatchAdmitted executes one generated admission lease. invokeAfterMsg(s)

@@ -65,7 +65,7 @@ func TestStarsLedgerPostgres(t *testing.T) {
 	}
 
 	// 流水：grant(+1000) / debit(-300) / credit(+50) 共 3 条，倒序最新在前。
-	page, err := st.ListTransactions(ctx, u.ID, "", 2)
+	page, err := st.ListTransactions(ctx, u.ID, domain.StarsTransactionQuery{Limit: 2})
 	if err != nil {
 		t.Fatalf("list page1: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestStarsLedgerPostgres(t *testing.T) {
 	if page.Balance != 750 {
 		t.Fatalf("page balance = %d, want 750", page.Balance)
 	}
-	page2, err := st.ListTransactions(ctx, u.ID, page.NextOffset, 2)
+	page2, err := st.ListTransactions(ctx, u.ID, domain.StarsTransactionQuery{Offset: page.NextOffset, Limit: 2})
 	if err != nil {
 		t.Fatalf("list page2: %v", err)
 	}
@@ -87,5 +87,42 @@ func TestStarsLedgerPostgres(t *testing.T) {
 	}
 	if page2.Transactions[0].Reason != domain.StarsReasonGrant || page2.Transactions[0].Amount != 1000 {
 		t.Fatalf("page2[0] = %+v, want +1000 grant (oldest)", page2.Transactions[0])
+	}
+
+	incoming1, err := st.ListTransactions(ctx, u.ID, domain.StarsTransactionQuery{
+		Limit: 1, Direction: domain.StarsTransactionDirectionIncoming,
+	})
+	if err != nil {
+		t.Fatalf("incoming page1: %v", err)
+	}
+	if len(incoming1.Transactions) != 1 || incoming1.Transactions[0].Amount != 50 || incoming1.NextOffset == "" {
+		t.Fatalf("incoming page1 = %+v next=%q, want +50 and next", incoming1.Transactions, incoming1.NextOffset)
+	}
+	incoming2, err := st.ListTransactions(ctx, u.ID, domain.StarsTransactionQuery{
+		Offset: incoming1.NextOffset, Limit: 1, Direction: domain.StarsTransactionDirectionIncoming,
+	})
+	if err != nil {
+		t.Fatalf("incoming page2: %v", err)
+	}
+	if len(incoming2.Transactions) != 1 || incoming2.Transactions[0].Amount != 1000 || incoming2.NextOffset != "" {
+		t.Fatalf("incoming page2 = %+v next=%q, want +1000 terminal", incoming2.Transactions, incoming2.NextOffset)
+	}
+
+	outgoing, err := st.ListTransactions(ctx, u.ID, domain.StarsTransactionQuery{
+		Limit: 10, Direction: domain.StarsTransactionDirectionOutgoing,
+	})
+	if err != nil || len(outgoing.Transactions) != 1 || outgoing.Transactions[0].Amount != -300 {
+		t.Fatalf("outgoing = %+v err=%v, want only -300", outgoing.Transactions, err)
+	}
+
+	ascending, err := st.ListTransactions(ctx, u.ID, domain.StarsTransactionQuery{Limit: 10, Ascending: true})
+	if err != nil || len(ascending.Transactions) != 3 {
+		t.Fatalf("ascending = %+v err=%v", ascending.Transactions, err)
+	}
+	wantAscending := []int64{1000, -300, 50}
+	for i, amount := range wantAscending {
+		if ascending.Transactions[i].Amount != amount {
+			t.Fatalf("ascending[%d].amount = %d, want %d", i, ascending.Transactions[i].Amount, amount)
+		}
 	}
 }

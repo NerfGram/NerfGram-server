@@ -154,7 +154,7 @@ type Message struct {
 	// ReplyMarkup 是 bot 消息携带的 reply/inline keyboard 快照。仅 bot 出站消息可
 	// 非空；普通用户消息恒 nil（发送侧 is_bot 闸门）。双盒持同一快照（无 per-viewer 差异）。
 	ReplyMarkup *MessageReplyMarkup
-	// RichMessage 是 Layer 227 富文本消息（richMessage）快照，可选；普通消息恒 nil。
+	// RichMessage 是 Layer 228 富文本消息（richMessage）快照，可选；普通消息恒 nil。
 	RichMessage *MessageRichMessage
 	// Pinned 是 owner 视角的置顶标志（官方私聊多置顶语义：双方各自
 	// 的 box 行独立持有，非 pm_oneside 操作两侧同步翻转）。
@@ -165,15 +165,45 @@ type Message struct {
 	SavedPeer Peer
 }
 
-// MessageRichMessage 是 Layer 227 富文本消息（richMessage）的协议中立快照：一组 IV
+// NewHistoryClearMessage 把一个 owner 视角的现有 box 原位投影为
+// messageActionHistoryClear 服务消息。调用方只传递仍需保留的身份字段；
+// 其余正文、媒体、reply、reaction、TTL、pin 等载荷全部按不变量清空。
+func NewHistoryClearMessage(ownerUserID int64, peer Peer, boxID int, uid int64, date, pts int) Message {
+	self := Peer{Type: PeerTypeUser, ID: ownerUserID}
+	return Message{
+		ID:          boxID,
+		UID:         uid,
+		OwnerUserID: ownerUserID,
+		Peer:        peer,
+		From:        self,
+		Date:        date,
+		Out:         true,
+		Pts:         pts,
+		Media: &MessageMedia{
+			Kind: MessageMediaKindService,
+			ServiceAction: &MessageServiceAction{
+				Kind: MessageServiceActionHistoryClear,
+			},
+		},
+	}
+}
+
+// IsHistoryClearServiceMessage 报告该 box 是否已经是清空历史锚点。
+func IsHistoryClearServiceMessage(msg Message) bool {
+	return msg.Media != nil &&
+		msg.Media.Kind == MessageMediaKindService &&
+		msg.Media.ServiceAction != nil &&
+		msg.Media.ServiceAction.Kind == MessageServiceActionHistoryClear
+}
+
+// MessageRichMessage 是 Layer 228 富文本消息（richMessage）的协议中立快照：一组 IV
 // PageBlock（Blocks）+ 内嵌已解析的 Photos/Documents。
 //
 // Blocks 存 gotd TL 序列化后的 []tg.PageBlockClass 不透明字节——PageBlock 体系庞大且
 // input(inputRichMessage.blocks) 与 output(richMessage.blocks) 同构、原样透传，故不在
 // domain 逐类型建模；rpc 层负责 tg.PageBlock 向量 ↔ bytes 的序列化（domain 不依赖 tg）。
 // 与 message media 同理，Photos/Documents 存已解析快照（含 viewer 无关的 access_hash），
-// 投影复用 tgPhoto/tgDocument。Phase 1 仅支持 inputRichMessage（blocks 形态），不解析
-// HTML/Markdown 变体。
+// 投影复用 tgPhoto/tgDocument。HTML/Markdown 输入也会在 RPC 边界归一为同一组 Blocks。
 //
 // 已知局限：Blocks 是 gotd 线格式不透明字节，跨 gotd 版本（PageBlock 构造器变更）可能
 // 失效——富文本消息为全新实验特性、无存量数据，Phase 1 接受该耦合。
@@ -183,6 +213,10 @@ type MessageRichMessage struct {
 	Blocks    []byte     `json:"blocks,omitempty"`
 	Photos    []Photo    `json:"photos,omitempty"`
 	Documents []Document `json:"documents,omitempty"`
+	// BotAPIProjection 是由 RPC 边界从同一组已校验 PageBlock 派生出的
+	// Bot API RichMessage JSON。它不是第二事实源：写入边界只允许从 Blocks
+	// 生成，HTTP Bot API 投影只读，避免 botapi 包反向依赖 tg 类型。
+	BotAPIProjection []byte `json:"bot_api_projection,omitempty"`
 }
 
 // IsZero 表示无富文本载荷（落库时跳过空快照、投影时不下发 rich_message）。
@@ -229,6 +263,8 @@ type MessageFilter struct {
 	Query      string
 	OffsetID   int
 	OffsetDate int
+	MinDate    int
+	MaxDate    int
 	AddOffset  int
 	Limit      int
 	MaxID      int
@@ -242,6 +278,9 @@ type MessageFilter struct {
 	// SavedPeer 非零时仅返回 self-chat 中该 saved 子会话的消息
 	// （messages.getSavedHistory）；Peer 必须同时是 self。
 	SavedPeer Peer
+	// SavedReactions 非空时仅返回至少带其中一个 tag 的 Saved Messages。
+	// 仅 messages.search(peer=self) 使用；普通私聊 reaction 不参与匹配。
+	SavedReactions []MessageReaction
 	// PeerIDs restricts a global private search to these user peers. Empty is a
 	// valid restricted set, so RestrictPeerIDs carries presence separately.
 	PeerIDs         []int64
@@ -289,7 +328,7 @@ type SendPrivateTextRequest struct {
 	BusinessAutomationKind BusinessAutomationKind
 	// ReplyMarkup 是 bot 出站消息的 reply/inline keyboard 快照；普通用户发送恒 nil。
 	ReplyMarkup *MessageReplyMarkup
-	// RichMessage 是 Layer 227 富文本消息（richMessage）快照，可选；普通消息恒 nil。
+	// RichMessage 是 Layer 228 富文本消息（richMessage）快照，可选；普通消息恒 nil。
 	RichMessage *MessageRichMessage
 }
 
@@ -397,6 +436,47 @@ type ForwardPrivateMessagesResult struct {
 	RecipientEvents    []UpdateEvent
 	Duplicates         []bool
 	ReplayDeleteEvents []*UpdateEvent
+}
+
+const PrivateNoForwardsRequestExpirePeriod = 24 * 60 * 60
+
+// PrivateNoForwardsState 是一对普通用户唯一的内容保护权威。
+// EnabledByUserID 为 0 或参与者之一；非零时双方共享的会话均受保护。
+type PrivateNoForwardsState struct {
+	UserLowID       int64
+	UserHighID      int64
+	EnabledByUserID int64
+}
+
+func (s PrivateNoForwardsState) Enabled() bool {
+	return s.EnabledByUserID != 0
+}
+
+func (s PrivateNoForwardsState) ForViewer(viewerUserID int64) (myEnabled, peerEnabled bool) {
+	if s.EnabledByUserID == 0 {
+		return false, false
+	}
+	return s.EnabledByUserID == viewerUserID, s.EnabledByUserID != viewerUserID
+}
+
+// TogglePrivateNoForwardsRequest 是私聊内容保护的原子状态+服务消息命令。
+type TogglePrivateNoForwardsRequest struct {
+	ActorUserID     int64
+	PeerUserID      int64
+	Enabled         bool
+	RequestMsgID    int
+	RandomID        int64
+	Date            int
+	OriginAuthKeyID [8]byte
+	OriginSessionID int64
+}
+
+// TogglePrivateNoForwardsResult 同时返回提交后的权威状态与本次真实服务消息。
+// Changed=false 且 Send 为空表示官方定义的 no-op。
+type TogglePrivateNoForwardsResult struct {
+	State   PrivateNoForwardsState
+	Changed bool
+	Send    SendPrivateTextResult
 }
 
 // ReadHistoryRequest 是账号视角的 messages.readHistory 命令。
@@ -544,7 +624,23 @@ type DeleteHistoryRequest struct {
 type DeletedMessagesForUser struct {
 	UserID     int64
 	MessageIDs []int
-	Event      UpdateEvent
+	// Event 保留单一 delete_messages 事件，供普通 deleteMessages 路径与
+	// replay receipt 使用；just_clear 还会在 Events 中携带 read/edit 事件。
+	Event  UpdateEvent
+	Events []UpdateEvent
+	// Pts/PtsCount 是本次 method 对该 owner 的 affected watermark 汇总。
+	// 普通删除等于 Event；just_clear 等于最后一条真实 update 的 pts 与
+	// delete/read/edit 三段 pts_count 之和。
+	Pts      int
+	PtsCount int
+}
+
+// AffectedPts 返回 messages.Affected* 应使用的最终 PTS 与本次总增量。
+func (d DeletedMessagesForUser) AffectedPts() (int, int) {
+	if d.Pts != 0 {
+		return d.Pts, d.PtsCount
+	}
+	return d.Event.Pts, d.Event.PtsCount
 }
 
 // DeleteMessagesResult 描述消息删除后的 owner 维度结果。
@@ -567,7 +663,8 @@ func (r DeleteMessagesResult) Self() DeletedMessagesForUser {
 // Changed 表示本次删除是否实际影响了任何 owner 视角。
 func (r DeleteMessagesResult) Changed() bool {
 	for _, item := range r.Deleted {
-		if len(item.MessageIDs) > 0 {
+		pts, _ := item.AffectedPts()
+		if len(item.MessageIDs) > 0 || pts > 0 {
 			return true
 		}
 	}

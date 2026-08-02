@@ -47,6 +47,35 @@ func TestEmailSentCodeUsesDeliveryLength(t *testing.T) {
 	}
 }
 
+func TestEmailSentCodeAdvertisesResetOnlyWhenAvailable(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		available bool
+	}{
+		{name: "unavailable"},
+		{name: "available", available: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			authSvc := &captureAuthService{
+				codeDelivery: domain.AuthCodeDelivery{
+					Kind: domain.AuthCodeDeliveryEmail, EmailPattern: "a***e@example.test", Length: 6,
+				},
+				resetAvailable: tc.available,
+			}
+			r := New(Config{}, Deps{Auth: authSvc}, zaptest.NewLogger(t), fixedClock{now: time.Unix(1700000000, 0)})
+			sent, err := r.tgSentCodeForHash(context.Background(), "hash-email-reset")
+			if err != nil {
+				t.Fatal(err)
+			}
+			emailType := sent.(*tg.AuthSentCode).Type.(*tg.AuthSentCodeTypeEmailCode)
+			_, present := emailType.GetResetAvailablePeriod()
+			if present != tc.available {
+				t.Fatalf("reset_available_period present=%v, want %v", present, tc.available)
+			}
+		})
+	}
+}
+
 func TestAuthSignInRoutesOfficialEmailCodeCarriers(t *testing.T) {
 	const (
 		phone = "+86 188 0000 0021"

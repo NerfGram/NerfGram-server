@@ -141,6 +141,7 @@ func (r *Router) onMessagesGetQuickReplyMessages(ctx context.Context, req *tg.Me
 	}
 	out := tgMessagesQuickReplyMessages(list)
 	out.Users = r.quickReplyUsers(ctx, userID)
+	r.applyPeerReadModelsToMessages(ctx, userID, out)
 	return out, nil
 }
 
@@ -271,7 +272,7 @@ func (r *Router) onMessagesSaveQuickReplyText(ctx context.Context, req *tg.Messa
 		Date:     int(r.clock.Now().Unix()),
 		Message:  req.Message,
 		// 快速回复模板与普通发送一致补服务端自动实体（url/@mention/#hashtag/bot command）。
-		Entities: domainMessageEntitiesForViewer(userID, augmentAutoEntities(req.Message, req.Entities)),
+		Entities: domainMessageEntitiesForViewer(userID, r.augmentAutoEntities(req.Message, req.Entities)),
 	})
 	if err != nil {
 		return nil, businessAutomationErr(err)

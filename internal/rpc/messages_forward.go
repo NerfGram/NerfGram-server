@@ -64,6 +64,39 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 			return nil, internalErr()
 		}
 	}
+	suggestedInput, hasSuggestedPost := req.GetSuggestedPost()
+	var mono domain.Channel
+	var monoforum, monoforumAdmin bool
+	if toPeer.Type == domain.PeerTypeChannel && r.deps.Channels != nil {
+		mono, monoforumAdmin, err = r.deps.Channels.ResolveMonoforumSend(ctx, userID, toPeer.ID)
+		switch {
+		case err == nil:
+			monoforum = true
+		case !errors.Is(err, domain.ErrChannelInvalid):
+			return nil, internalErr()
+		}
+	}
+	if hasSuggestedPost && !monoforum {
+		return nil, suggestedPostPeerInvalidErr()
+	}
+	if monoforum {
+		suggestedPost, err := domainSuggestedPost(suggestedInput, hasSuggestedPost)
+		if err != nil {
+			return nil, err
+		}
+		return r.forwardMessagesToMonoforum(
+			ctx,
+			userID,
+			toPeer,
+			mono,
+			monoforumAdmin,
+			req,
+			idempotencyFingerprints,
+			suggestedPost,
+			topMsgID,
+			topMsgIDSet,
+		)
+	}
 	immediate := req.ScheduleDate == 0 || scheduleDateIsImmediate(req.ScheduleDate, int(r.clock.Now().Unix()))
 	replays := make([]outgoingReplayLookup, len(req.ID))
 	absentIndexes := make([]int, 0, len(req.ID))
@@ -109,6 +142,14 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 	toPeer, err = r.checkedDomainPeerFromInputPeer(ctx, userID, req.ToPeer)
 	if err != nil {
 		return nil, err
+	}
+	if toPeer.Type == domain.PeerTypeUser {
+		if req.AllowPaidFloodskip {
+			return nil, paymentUnsupportedErr()
+		}
+		if err := r.ensurePrivateContactAllowed(ctx, userID, toPeer.ID, req.AllowPaidStars, len(absentIndexes)); err != nil {
+			return nil, err
+		}
 	}
 	absentIDs := make([]int, len(absentIndexes))
 	absentRandomIDs := make([]int64, len(absentIndexes))
@@ -297,6 +338,132 @@ func (r *Router) onMessagesForwardMessages(ctx context.Context, req *tg.Messages
 		return tgForwardMessagesUpdates(res, req.RandomID, r.usersForMessageUpdates(ctx, userID, res.SenderMessages), r.chatsForMessageUpdates(ctx, userID, res.SenderMessages)), nil
 	}
 	return nil, peerIDInvalidErr()
+}
+
+func (r *Router) forwardMessagesToMonoforum(
+	ctx context.Context,
+	userID int64,
+	toPeer domain.Peer,
+	mono domain.Channel,
+	monoforumAdmin bool,
+	req *tg.MessagesForwardMessagesRequest,
+	idempotencyFingerprints [][]byte,
+	suggestedPost *domain.SuggestedPost,
+	topMsgID int,
+	topMsgIDSet bool,
+) (tg.UpdatesClass, error) {
+	if req.ScheduleDate != 0 && !scheduleDateIsImmediate(req.ScheduleDate, int(r.clock.Now().Unix())) {
+		return nil, scheduleDateInvalidErr()
+	}
+	savedPeer, err := r.monoforumSavedPeerForSender(userID, monoforumAdmin, req.ReplyTo)
+	if err != nil {
+		return nil, err
+	}
+	replyTo, err := r.monoforumMessageReplyFromInput(ctx, userID, toPeer, req.ReplyTo)
+	if err != nil {
+		return nil, err
+	}
+	// DrKLO currently mirrors the replied suggestion into top_msg_id as well as reply_to.
+	// Monoforum has no forum root: accept only the redundant equal value and never persist it
+	// as a topic root.
+	if topMsgIDSet && topMsgID != 0 && (replyTo == nil || replyTo.MessageID != topMsgID) {
+		return nil, replyMessageIDInvalidErr()
+	}
+
+	replays := make([]outgoingReplayLookup, len(req.ID))
+	absentIndexes := make([]int, 0, len(req.ID))
+	for i := range req.ID {
+		replay, err := r.lookupChannelSendReplay(
+			ctx,
+			userID,
+			toPeer.ID,
+			savedPeer,
+			req.RandomID[i],
+			idempotencyFingerprints[i],
+		)
+		if err != nil {
+			return nil, err
+		}
+		replays[i] = replay
+		if !replay.found {
+			absentIndexes = append(absentIndexes, i)
+		}
+	}
+	if len(absentIndexes) == 0 {
+		results := make([]tg.UpdatesClass, 0, len(replays))
+		for _, replay := range replays {
+			results = append(results, r.monoforumSendUpdates(ctx, userID, mono, savedPeer, replay.channel))
+		}
+		return combineSendUpdates(results), nil
+	}
+	if err := r.checkSendRateLimit(ctx, userID, len(absentIndexes)); err != nil {
+		return nil, err
+	}
+	checkedPeer, err := r.checkedDomainPeerFromInputPeer(ctx, userID, req.ToPeer)
+	if err != nil {
+		return nil, err
+	}
+	if checkedPeer != toPeer {
+		return nil, peerIDInvalidErr()
+	}
+
+	absentIDs := make([]int, len(absentIndexes))
+	absentRandomIDs := make([]int64, len(absentIndexes))
+	for i, originalIndex := range absentIndexes {
+		absentIDs[i] = req.ID[originalIndex]
+		absentRandomIDs[i] = req.RandomID[originalIndex]
+	}
+	fromPeer, preloadedSources, err := r.forwardFromPeerAndSources(ctx, userID, req.FromPeer, absentIDs, absentRandomIDs)
+	if err != nil {
+		return nil, err
+	}
+	if fromPeer.Type == domain.PeerTypeUser && fromPeer.ID != userID && r.deps.Users != nil {
+		if _, found, err := r.deps.Users.ByID(ctx, userID, fromPeer.ID); err != nil {
+			return nil, internalErr()
+		} else if !found {
+			return nil, peerIDInvalidErr()
+		}
+	}
+	absentSources, err := r.forwardSourcesForRequest(ctx, userID, fromPeer, absentIDs, preloadedSources)
+	if err != nil {
+		return nil, messageForwardErr(err)
+	}
+	sources := make([]forwardSource, len(req.ID))
+	for i, originalIndex := range absentIndexes {
+		sources[originalIndex] = absentSources[i]
+	}
+
+	results := make([]tg.UpdatesClass, 0, len(req.ID))
+	for i, source := range sources {
+		if replays[i].found {
+			results = append(results, r.monoforumSendUpdates(ctx, userID, mono, savedPeer, replays[i].channel))
+			continue
+		}
+		forward := source.forward
+		if req.DropAuthor {
+			forward = nil
+		}
+		updates, err := r.sendMonoforumMessage(ctx, userID, checkedPeer, mono, monoforumAdmin, domain.SendMonoforumMessageRequest{
+			SavedPeer:              savedPeer,
+			RandomID:               req.RandomID[i],
+			IdempotencyFingerprint: idempotencyFingerprints[i],
+			IdempotencyPreflighted: replays[i].checked,
+			Message:                source.body,
+			Entities:               source.entities,
+			Media:                  source.media,
+			ReplyTo:                replyTo,
+			Forward:                forward,
+			Silent:                 req.Silent,
+			NoForwards:             req.Noforwards,
+			SuggestedPost:          suggestedPost,
+			AllowPaidStars:         req.AllowPaidStars,
+		})
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, updates)
+	}
+	return combineSendUpdates(results), nil
 }
 
 func normalizeForwardMessageVectors(ids []int, randomIDs []int64) ([]int, []int64, bool) {
@@ -506,6 +673,15 @@ func (r *Router) forwardSources(ctx context.Context, userID int64, fromPeer doma
 func (r *Router) forwardSourcesFromPrivateMessages(ctx context.Context, userID int64, fromPeer domain.Peer, ids []int, messages []domain.Message) ([]forwardSource, error) {
 	if fromPeer.Type != domain.PeerTypeUser || fromPeer.ID == 0 {
 		return nil, domain.ErrMessageIDInvalid
+	}
+	if svc, ok := r.deps.Messages.(PrivateNoForwardsService); ok {
+		state, err := svc.GetPrivateNoForwards(ctx, userID, fromPeer.ID)
+		if err != nil {
+			return nil, err
+		}
+		if state.Enabled() {
+			return nil, domain.ErrChatForwardsRestricted
+		}
 	}
 	byID := make(map[int]domain.Message, len(messages))
 	for _, msg := range messages {

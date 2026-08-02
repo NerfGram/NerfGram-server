@@ -46,7 +46,7 @@ func (s *ChannelStore) SetChannelMessageReactions(_ context.Context, req domain.
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	channel, member, err := s.channelAndMemberLocked(req.UserID, req.ChannelID)
+	channel, member, _, err := s.channelForViewerLocked(req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionsResult{}, err
 	}
@@ -64,7 +64,8 @@ func (s *ChannelStore) SetChannelMessageReactions(_ context.Context, req domain.
 		return domain.ChannelMessageReactionsResult{}, domain.ErrMessageIDInvalid
 	}
 	msg := s.messages[req.ChannelID][idx]
-	if msg.Deleted || msg.Action != nil || msg.ID <= member.AvailableMinID {
+	if msg.Deleted || msg.Action != nil || msg.ID <= member.AvailableMinID ||
+		!channelMessageVisibleToViewerLocked(channel, member, req.UserID, msg) {
 		return domain.ChannelMessageReactionsResult{}, domain.ErrMessageIDInvalid
 	}
 	// 仅新增/替换受策略约束；空向量是撤销，策略收紧后也必须允许撤销存量 reaction。
@@ -385,7 +386,7 @@ func (s *ChannelStore) GetChannelMessageReactions(_ context.Context, req domain.
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	channel, member, err := s.channelAndMemberLocked(req.UserID, req.ChannelID)
+	channel, member, _, err := s.channelForViewerLocked(req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionsResult{}, err
 	}
@@ -401,7 +402,8 @@ func (s *ChannelStore) GetChannelMessageReactions(_ context.Context, req domain.
 		if _, ok := wanted[msg.ID]; !ok {
 			continue
 		}
-		if msg.Deleted || msg.ID <= member.AvailableMinID {
+		if msg.Deleted || msg.ID <= member.AvailableMinID ||
+			!channelMessageVisibleToViewerLocked(channel, member, req.UserID, msg) {
 			continue
 		}
 		item := cloneChannelMessage(msg)
@@ -432,7 +434,7 @@ func (s *ChannelStore) ListChannelMessageReactions(_ context.Context, req domain
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	channel, member, err := s.channelAndMemberLocked(req.UserID, req.ChannelID)
+	channel, member, _, err := s.channelForViewerLocked(req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageReactionsList{}, err
 	}
@@ -440,7 +442,8 @@ func (s *ChannelStore) ListChannelMessageReactions(_ context.Context, req domain
 		return domain.ChannelMessageReactionsList{}, domain.ErrChannelRightForbidden
 	}
 	msg, ok := s.findMessageLocked(req.ChannelID, req.MessageID)
-	if !ok || msg.Deleted || msg.ID <= member.AvailableMinID {
+	if !ok || msg.Deleted || msg.ID <= member.AvailableMinID ||
+		!channelMessageVisibleToViewerLocked(channel, member, req.UserID, msg) {
 		return domain.ChannelMessageReactionsList{}, domain.ErrMessageIDInvalid
 	}
 	rows := s.channelMessageReactionRowsLocked(req.ChannelID, req.MessageID, req.UserID, req.Reaction)
@@ -477,6 +480,40 @@ func (s *ChannelStore) ListChannelMessageReactions(_ context.Context, req domain
 		Reactions:  cloneChannelPeerReactions(rows),
 		NextOffset: next,
 	}, nil
+}
+
+func (s *ChannelStore) FindChannelMessageReaction(_ context.Context, req domain.ChannelMessageReactionLookupRequest) (domain.ChannelMessageReactionLookup, bool, error) {
+	if req.ViewerUserID == 0 || req.ChannelID == 0 || req.MessageID <= 0 ||
+		req.MessageID > domain.MaxMessageBoxID || req.ReactorUserID == 0 {
+		return domain.ChannelMessageReactionLookup{}, false, domain.ErrChannelInvalid
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	channel, member, _, err := s.channelForViewerLocked(req.ViewerUserID, req.ChannelID)
+	if err != nil {
+		return domain.ChannelMessageReactionLookup{}, false, err
+	}
+	message, ok := s.findMessageLocked(req.ChannelID, req.MessageID)
+	if !ok || message.Deleted || message.ID <= member.AvailableMinID ||
+		!channelMessageVisibleToViewerLocked(channel, member, req.ViewerUserID, message) {
+		return domain.ChannelMessageReactionLookup{}, false, domain.ErrMessageIDInvalid
+	}
+	rows := cloneChannelPeerReactions(s.reactions[req.ChannelID][req.MessageID][req.ReactorUserID])
+	if len(rows) == 0 {
+		return domain.ChannelMessageReactionLookup{
+			Channel: cloneChannel(channel), Message: cloneChannelMessage(message),
+		}, false, nil
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].ChosenOrder != rows[j].ChosenOrder {
+			return rows[i].ChosenOrder < rows[j].ChosenOrder
+		}
+		return messageReactionKey(rows[i].Reaction) < messageReactionKey(rows[j].Reaction)
+	})
+	return domain.ChannelMessageReactionLookup{
+		Channel: cloneChannel(channel), Message: cloneChannelMessage(message),
+		Reactions: rows,
+	}, true, nil
 }
 
 func (s *ChannelStore) RecordMessageReactionUse(_ context.Context, userID int64, reactions []domain.MessageReaction, addToRecent bool, date int) error {
@@ -596,54 +633,6 @@ func (s *ChannelStore) ClearRecentMessageReactions(_ context.Context, userID int
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.recent, userID)
-	return nil
-}
-
-func (s *ChannelStore) ListSavedReactionTags(_ context.Context, userID int64, limit int) ([]domain.SavedReactionTag, error) {
-	if userID == 0 {
-		return nil, domain.ErrChannelInvalid
-	}
-	if limit <= 0 {
-		return []domain.SavedReactionTag{}, nil
-	}
-	if limit > domain.MaxSavedReactionTags {
-		limit = domain.MaxSavedReactionTags
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rows := make([]domain.SavedReactionTag, 0, len(s.savedTags[userID]))
-	for _, row := range s.savedTags[userID] {
-		rows = append(rows, row)
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Count != rows[j].Count {
-			return rows[i].Count > rows[j].Count
-		}
-		if rows[i].Reaction.Type != rows[j].Reaction.Type {
-			return rows[i].Reaction.Type < rows[j].Reaction.Type
-		}
-		return rows[i].Reaction.Value() < rows[j].Reaction.Value()
-	})
-	if len(rows) > limit {
-		rows = rows[:limit]
-	}
-	return rows, nil
-}
-
-func (s *ChannelStore) UpsertSavedReactionTag(_ context.Context, tag domain.SavedReactionTag) error {
-	if tag.UserID == 0 || tag.Reaction.Type != domain.MessageReactionEmoji || strings.TrimSpace(tag.Reaction.Emoticon) == "" {
-		return domain.ErrChannelInvalid
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.savedTags[tag.UserID] == nil {
-		s.savedTags[tag.UserID] = make(map[string]domain.SavedReactionTag)
-	}
-	tag.Reaction.Emoticon = strings.TrimSpace(tag.Reaction.Emoticon)
-	if tag.Count < 0 {
-		tag.Count = 0
-	}
-	s.savedTags[tag.UserID][messageReactionKey(tag.Reaction)] = tag
 	return nil
 }
 

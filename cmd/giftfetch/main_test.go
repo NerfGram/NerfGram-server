@@ -69,6 +69,7 @@ func TestDownloadPartSize(t *testing.T) {
 		{size: 1, want: 4 << 10},
 		{size: (4 << 10) - 1, want: 4 << 10},
 		{size: 4 << 10, want: 8 << 10},
+		{size: 48_632, want: 64 << 10},
 		{size: (512 << 10) - 1, want: 512 << 10},
 		{size: 512 << 10, want: 512 << 10},
 		{size: 1 << 20, want: 512 << 10},
@@ -76,6 +77,22 @@ func TestDownloadPartSize(t *testing.T) {
 	for _, test := range tests {
 		if got := downloadPartSize(test.size); got != test.want {
 			t.Errorf("downloadPartSize(%d) = %d, want %d", test.size, got, test.want)
+		}
+	}
+}
+
+func TestDownloadPartSizeUsesNonPreciseChunkLadder(t *testing.T) {
+	const oneMiB = 1 << 20
+	for size := int64(1); size < 512<<10; size += 997 {
+		partSize := downloadPartSize(size)
+		if partSize < 4<<10 || partSize > 512<<10 || partSize%(4<<10) != 0 {
+			t.Fatalf("downloadPartSize(%d) = %d is outside the valid 4 KiB-aligned range", size, partSize)
+		}
+		if oneMiB%partSize != 0 {
+			t.Fatalf("downloadPartSize(%d) = %d does not divide a 1 MiB request window", size, partSize)
+		}
+		if int64(partSize) <= size {
+			t.Fatalf("downloadPartSize(%d) = %d does not cover the known-size single chunk", size, partSize)
 		}
 	}
 }

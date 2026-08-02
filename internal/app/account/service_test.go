@@ -6,12 +6,14 @@ import (
 	"crypto/sha512"
 	"errors"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
 
 	"telesrv/internal/domain"
+	"telesrv/internal/otpdelivery"
 	"telesrv/internal/store/memory"
 )
 
@@ -69,7 +71,9 @@ func TestPasswordSRPRoundTrip(t *testing.T) {
 func TestRecoverPasswordClearsTwoFactorPassword(t *testing.T) {
 	ctx := context.Background()
 	const userID int64 = 1002
-	svc := NewService(memory.NewPasswordStore())
+	sender := &captureMailSender{}
+	svc := NewService(memory.NewPasswordStore(),
+		WithLoginEmailVerification(memory.NewCodeStore(), sender, time.Minute, 3, 6))
 
 	initial, err := svc.GetPassword(ctx, userID)
 	if err != nil {
@@ -93,7 +97,13 @@ func TestRecoverPasswordClearsTwoFactorPassword(t *testing.T) {
 	if pattern != "b***b@example.com" {
 		t.Fatalf("recovery pattern = %q, want masked email", pattern)
 	}
-	if err := svc.RecoverPassword(ctx, userID, recoveryCode, nil); err != nil {
+	if sender.to != "bob@example.com" || sender.code == "" || len(sender.requests) != 1 || sender.requests[0].Purpose != otpdelivery.PurposePasswordRecovery {
+		t.Fatalf("recovery delivery = %+v, want one password-recovery email", sender)
+	}
+	if err := svc.CheckRecoveryPassword(ctx, userID, sender.code); err != nil {
+		t.Fatalf("CheckRecoveryPassword: %v", err)
+	}
+	if err := svc.RecoverPassword(ctx, userID, sender.code, nil); err != nil {
 		t.Fatalf("RecoverPassword clear: %v", err)
 	}
 	cleared, err := svc.GetPassword(ctx, userID)
@@ -102,6 +112,155 @@ func TestRecoverPasswordClearsTwoFactorPassword(t *testing.T) {
 	}
 	if cleared.HasPassword || cleared.HasRecovery {
 		t.Fatalf("cleared settings = %+v, want no password/recovery", cleared)
+	}
+}
+
+func TestPasswordRecoveryFailsClosedWithoutSenderOrIssuedCode(t *testing.T) {
+	ctx := context.Background()
+	const userID int64 = 1012
+	passwords := memory.NewPasswordStore()
+	if err := passwords.Save(ctx, userID, domain.PasswordSettings{
+		HasPassword: true, HasRecovery: true, RecoveryEmail: "owner@example.test",
+		SRPID: 7, SRPVerifier: []byte{1, 2, 3},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(passwords)
+	if _, err := svc.RequestPasswordRecovery(ctx, userID); !errors.Is(err, domain.ErrPasswordRecoveryNA) {
+		t.Fatalf("RequestPasswordRecovery err=%v, want unavailable", err)
+	}
+	if err := svc.RecoverPassword(ctx, userID, "12345", nil); !errors.Is(err, domain.ErrPasswordRecoveryExpired) {
+		t.Fatalf("standing fixed code err=%v, want expired", err)
+	}
+	if err := NewService(nil).RecoverPassword(ctx, userID, "12345", nil); !errors.Is(err, domain.ErrPasswordRecoveryExpired) {
+		t.Fatalf("missing password store err=%v, want fail-closed expiry", err)
+	}
+}
+
+func TestPasswordRecoveryAttemptLimitAndStateBinding(t *testing.T) {
+	ctx := context.Background()
+	const userID int64 = 1013
+	passwords := memory.NewPasswordStore()
+	settings := domain.PasswordSettings{
+		HasPassword: true, HasRecovery: true, RecoveryEmail: "owner@example.test",
+		SRPID: 8, SRPVerifier: []byte{4, 5, 6},
+	}
+	if err := passwords.Save(ctx, userID, settings); err != nil {
+		t.Fatal(err)
+	}
+	sender := &captureMailSender{}
+	svc := NewService(passwords,
+		WithLoginEmailVerification(memory.NewCodeStore(), sender, time.Minute, 3, 6))
+	if _, err := svc.RequestPasswordRecovery(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := svc.CheckRecoveryPassword(ctx, userID, "000000"); !errors.Is(err, domain.ErrRecoveryCodeInvalid) {
+			t.Fatalf("wrong attempt %d err=%v, want invalid", attempt, err)
+		}
+	}
+	if err := svc.CheckRecoveryPassword(ctx, userID, sender.code); !errors.Is(err, domain.ErrPasswordRecoveryExpired) {
+		t.Fatalf("code after attempt limit err=%v, want expired", err)
+	}
+
+	if _, err := svc.RequestPasswordRecovery(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+	issued := sender.code
+	settings.SRPID++
+	if err := passwords.Save(ctx, userID, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.CheckRecoveryPassword(ctx, userID, issued); !errors.Is(err, domain.ErrPasswordRecoveryExpired) {
+		t.Fatalf("code after 2FA state change err=%v, want expired", err)
+	}
+}
+
+func TestConcurrentPasswordRecoveryHasSingleConsumer(t *testing.T) {
+	ctx := context.Background()
+	const userID int64 = 1014
+	passwords := memory.NewPasswordStore()
+	if err := passwords.Save(ctx, userID, domain.PasswordSettings{
+		HasPassword: true, HasRecovery: true, RecoveryEmail: "owner@example.test",
+		SRPID: 9, SRPVerifier: []byte{7, 8, 9},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sender := &captureMailSender{}
+	svc := NewService(passwords,
+		WithLoginEmailVerification(memory.NewCodeStore(), sender, time.Minute, 5, 6))
+	if _, err := svc.RequestPasswordRecovery(ctx, userID); err != nil {
+		t.Fatal(err)
+	}
+	const workers = 24
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- svc.RecoverPassword(ctx, userID, sender.code, nil)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	successes := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+		if !errors.Is(err, domain.ErrPasswordRecoveryExpired) {
+			t.Fatalf("concurrent recovery err=%v", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful recoveries=%d, want 1", successes)
+	}
+}
+
+func TestPasswordRecoveryDeliveryFailureRemovesIssuedCode(t *testing.T) {
+	ctx := context.Background()
+	const userID int64 = 1015
+	passwords := memory.NewPasswordStore()
+	if err := passwords.Save(ctx, userID, domain.PasswordSettings{
+		HasPassword: true, HasRecovery: true, RecoveryEmail: "owner@example.test",
+		SRPID: 10, SRPVerifier: []byte{10},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sender := &captureMailSender{err: errors.New("provider rejected request")}
+	svc := NewService(passwords,
+		WithLoginEmailVerification(memory.NewCodeStore(), sender, time.Minute, 5, 6))
+	if _, err := svc.RequestPasswordRecovery(ctx, userID); err == nil {
+		t.Fatal("RequestPasswordRecovery succeeded after known delivery failure")
+	}
+	if err := svc.CheckRecoveryPassword(ctx, userID, sender.code); !errors.Is(err, domain.ErrPasswordRecoveryExpired) {
+		t.Fatalf("undelivered code err=%v, want expired", err)
+	}
+}
+
+func TestPasswordRecoveryUnknownDeliveryOutcomeKeepsIssuedCode(t *testing.T) {
+	ctx := context.Background()
+	const userID int64 = 1016
+	passwords := memory.NewPasswordStore()
+	if err := passwords.Save(ctx, userID, domain.PasswordSettings{
+		HasPassword: true, HasRecovery: true, RecoveryEmail: "owner@example.test",
+		SRPID: 11, SRPVerifier: []byte{11},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sender := &captureMailSender{err: &otpdelivery.OutcomeUnknownError{Cause: errors.New("provider ACK lost")}}
+	svc := NewService(passwords,
+		WithLoginEmailVerification(memory.NewCodeStore(), sender, time.Minute, 5, 6))
+	if _, err := svc.RequestPasswordRecovery(ctx, userID); err != nil {
+		t.Fatalf("RequestPasswordRecovery outcome-unknown err=%v", err)
+	}
+	if err := svc.CheckRecoveryPassword(ctx, userID, sender.code); err != nil {
+		t.Fatalf("outcome-unknown code was discarded: %v", err)
 	}
 }
 

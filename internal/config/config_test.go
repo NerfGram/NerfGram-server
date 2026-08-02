@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"telesrv/internal/domain"
 )
 
 func TestLoadDefaultsAdvertiseIPToLoopback(t *testing.T) {
@@ -25,25 +27,142 @@ func TestLoadDefaultsAdvertiseIPToLoopback(t *testing.T) {
 	if cfg.PublicAppScheme != "telesrv" {
 		t.Fatalf("PublicAppScheme = %q, want telesrv", cfg.PublicAppScheme)
 	}
-	if cfg.PublicWebBaseURL != "https://web.telesrv.net" {
-		t.Fatalf("PublicWebBaseURL = %q, want https://web.telesrv.net", cfg.PublicWebBaseURL)
+	if cfg.PublicAppLinkBase != "" {
+		t.Fatalf("PublicAppLinkBase = %q, want disabled", cfg.PublicAppLinkBase)
+	}
+	if cfg.PublicWebBaseURL != "https://weba.telesrv.net" {
+		t.Fatalf("PublicWebBaseURL = %q, want https://weba.telesrv.net", cfg.PublicWebBaseURL)
 	}
 	if cfg.PublicAppName != "telesrv" {
 		t.Fatalf("PublicAppName = %q, want telesrv", cfg.PublicAppName)
 	}
+	if cfg.CallRegistryMaxEntries != 10_000 {
+		t.Fatalf("CallRegistryMaxEntries = %d, want 10000", cfg.CallRegistryMaxEntries)
+	}
+	if cfg.PremiumPromoSeedDir != "data/premium-promo" {
+		t.Fatalf("PremiumPromoSeedDir = %q, want data/premium-promo", cfg.PremiumPromoSeedDir)
+	}
 }
 
-func TestLoadUsesExplicitAdvertiseIP(t *testing.T) {
+func TestLoadPremiumPromoSeedDirOverride(t *testing.T) {
 	disableDefaultConfigFile(t)
-	t.Setenv("TELESRV_ADVERTISE_IP", "192.0.2.10")
+	t.Setenv("TELESRV_PREMIUM_PROMO_SEED_DIR", `D:\seed\premium-promo`)
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.AdvertiseIP != "192.0.2.10" {
+	if cfg.PremiumPromoSeedDir != `D:\seed\premium-promo` {
+		t.Fatalf("PremiumPromoSeedDir = %q", cfg.PremiumPromoSeedDir)
+	}
+}
+
+func TestLoadUsesExplicitAdvertiseIP(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_ADVERTISE_IP", "203.0.113.10")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdvertiseIP != "203.0.113.10" {
 		t.Fatalf("AdvertiseIP = %q, want explicit env", cfg.AdvertiseIP)
 	}
+}
+
+func TestLoadCanonicalizesAdvertiseIP(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_ADVERTISE_IP", " 2001:0db8::1 ")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AdvertiseIP != "2001:db8::1" {
+		t.Fatalf("AdvertiseIP = %q, want canonical IPv6", cfg.AdvertiseIP)
+	}
+}
+
+func TestLoadRejectsUnusableAdvertiseIP(t *testing.T) {
+	for _, value := range []string{"example.com", "0.0.0.0", "::", "224.0.0.1", "fe80::1%eth0"} {
+		t.Run(value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv("TELESRV_ADVERTISE_IP", value)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted TELESRV_ADVERTISE_IP=%q", value)
+			}
+		})
+	}
+}
+
+func TestLoadDefaultCountryCode(t *testing.T) {
+	t.Run("default", func(t *testing.T) {
+		disableDefaultConfigFile(t)
+		t.Setenv("TELESRV_DEFAULT_COUNTRY_CODE", "")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.DefaultCountryCode != "CN" {
+			t.Fatalf("DefaultCountryCode = %q, want CN", cfg.DefaultCountryCode)
+		}
+	})
+
+	t.Run("normalized override", func(t *testing.T) {
+		disableDefaultConfigFile(t)
+		t.Setenv("TELESRV_DEFAULT_COUNTRY_CODE", " us ")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.DefaultCountryCode != "US" {
+			t.Fatalf("DefaultCountryCode = %q, want US", cfg.DefaultCountryCode)
+		}
+	})
+}
+
+func TestLoadRejectsInvalidDefaultCountryCode(t *testing.T) {
+	for _, value := range []string{"+86", "CHN", "C1", "中", "ZZ"} {
+		t.Run(value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv("TELESRV_DEFAULT_COUNTRY_CODE", value)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted TELESRV_DEFAULT_COUNTRY_CODE=%q", value)
+			}
+		})
+	}
+}
+
+func TestLoadStrictDCCheck(t *testing.T) {
+	t.Run("defaults off", func(t *testing.T) {
+		disableDefaultConfigFile(t)
+		t.Setenv("TELESRV_STRICT_DC_CHECK", "")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.StrictDCCheck {
+			t.Fatal("StrictDCCheck = true, want default false")
+		}
+	})
+
+	t.Run("explicitly enabled", func(t *testing.T) {
+		disableDefaultConfigFile(t)
+		t.Setenv("TELESRV_STRICT_DC_CHECK", "true")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.StrictDCCheck {
+			t.Fatal("StrictDCCheck = false, want true")
+		}
+	})
 }
 
 func TestLoadMTProtoAdmissionAndRPCBudgets(t *testing.T) {
@@ -57,13 +176,10 @@ func TestLoadMTProtoAdmissionAndRPCBudgets(t *testing.T) {
 	t.Setenv("TELESRV_MTPROTO_RPC_GLOBAL_WORKERS", "33")
 	t.Setenv("TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS", "444")
 	t.Setenv("TELESRV_MTPROTO_RPC_GLOBAL_MAX_BYTES", "555555")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_ENTRIES", "555")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_BYTES", "70000000")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_CACHE_AUTH_MAX_ENTRIES", "444")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_CACHE_AUTH_MAX_BYTES", "40000000")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_ENTRIES", "333")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_BYTES", "20000000")
-	t.Setenv("TELESRV_MTPROTO_RPC_RESULT_PENDING_PER_AUTH", "222")
+	t.Setenv("TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES", "555")
+	t.Setenv("TELESRV_MTPROTO_RPC_EXECUTION_AUTH_MAX_ENTRIES", "444")
+	t.Setenv("TELESRV_MTPROTO_RPC_EXECUTION_SESSION_MAX_ENTRIES", "333")
+	t.Setenv("TELESRV_MTPROTO_RPC_EXECUTION_PENDING_PER_AUTH", "222")
 	t.Setenv("TELESRV_MTPROTO_INBOUND_FRAME_GLOBAL_MAX_BYTES", "777777")
 	t.Setenv("TELESRV_MTPROTO_OUTBOUND_QUEUE_SIZE", "88")
 	t.Setenv("TELESRV_MTPROTO_OUTBOUND_CONTROL_QUEUE_SIZE", "22")
@@ -84,15 +200,15 @@ func TestLoadMTProtoAdmissionAndRPCBudgets(t *testing.T) {
 		cfg.MTProtoRPCGlobalWorkers != 33 || cfg.MTProtoRPCGlobalMaxTasks != 444 || cfg.MTProtoRPCGlobalMaxBytes != 555555 {
 		t.Fatalf("rpc budget config = %d/%d/%v/%d/%d/%d", cfg.MTProtoRPCMaxInflight, cfg.MTProtoRPCQueueSize, cfg.MTProtoRPCTimeout, cfg.MTProtoRPCGlobalWorkers, cfg.MTProtoRPCGlobalMaxTasks, cfg.MTProtoRPCGlobalMaxBytes)
 	}
-	if cfg.MTProtoRPCResultCacheMaxEntries != 555 || cfg.MTProtoRPCResultCacheMaxBytes != 70000000 ||
-		cfg.MTProtoRPCResultCacheAuthMaxEntries != 444 || cfg.MTProtoRPCResultCacheAuthMaxBytes != 40000000 ||
-		cfg.MTProtoRPCResultCacheSessionMaxEntries != 333 || cfg.MTProtoRPCResultCacheSessionMaxBytes != 20000000 ||
-		cfg.MTProtoRPCResultPendingPerAuth != 222 {
-		t.Fatalf("rpc result cache config = global:%d/%d auth:%d/%d session:%d/%d pending/auth:%d",
-			cfg.MTProtoRPCResultCacheMaxEntries, cfg.MTProtoRPCResultCacheMaxBytes,
-			cfg.MTProtoRPCResultCacheAuthMaxEntries, cfg.MTProtoRPCResultCacheAuthMaxBytes,
-			cfg.MTProtoRPCResultCacheSessionMaxEntries, cfg.MTProtoRPCResultCacheSessionMaxBytes,
-			cfg.MTProtoRPCResultPendingPerAuth)
+	if cfg.MTProtoRPCExecutionMaxEntries != 555 ||
+		cfg.MTProtoRPCExecutionAuthMaxEntries != 444 ||
+		cfg.MTProtoRPCExecutionSessionMaxEntries != 333 ||
+		cfg.MTProtoRPCExecutionPendingPerAuth != 222 {
+		t.Fatalf("rpc execution ledger config = global:%d auth:%d session:%d pending/auth:%d",
+			cfg.MTProtoRPCExecutionMaxEntries,
+			cfg.MTProtoRPCExecutionAuthMaxEntries,
+			cfg.MTProtoRPCExecutionSessionMaxEntries,
+			cfg.MTProtoRPCExecutionPendingPerAuth)
 	}
 	if cfg.MTProtoInboundFrameGlobalMaxBytes != 777777 {
 		t.Fatalf("inbound frame budget config = %d", cfg.MTProtoInboundFrameGlobalMaxBytes)
@@ -105,34 +221,32 @@ func TestLoadMTProtoAdmissionAndRPCBudgets(t *testing.T) {
 	}
 }
 
-func TestLoadRPCResultFairBudgetDefaults(t *testing.T) {
+func TestLoadRPCExecutionFairBudgetDefaults(t *testing.T) {
 	disableDefaultConfigFile(t)
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.MTProtoRPCResultCacheMaxEntries != 1<<18 || cfg.MTProtoRPCResultCacheMaxBytes != 64<<20 ||
-		cfg.MTProtoRPCResultCacheAuthMaxEntries != 1<<15 || cfg.MTProtoRPCResultCacheAuthMaxBytes != 32<<20 ||
-		cfg.MTProtoRPCResultCacheSessionMaxEntries != 1<<14 || cfg.MTProtoRPCResultCacheSessionMaxBytes != 16<<20 ||
-		cfg.MTProtoRPCResultPendingPerAuth != 1<<11 {
-		t.Fatalf("rpc_result fair defaults = global:%d/%d auth:%d/%d session:%d/%d pending/auth:%d",
-			cfg.MTProtoRPCResultCacheMaxEntries, cfg.MTProtoRPCResultCacheMaxBytes,
-			cfg.MTProtoRPCResultCacheAuthMaxEntries, cfg.MTProtoRPCResultCacheAuthMaxBytes,
-			cfg.MTProtoRPCResultCacheSessionMaxEntries, cfg.MTProtoRPCResultCacheSessionMaxBytes,
-			cfg.MTProtoRPCResultPendingPerAuth)
+	if cfg.MTProtoRPCExecutionMaxEntries != 1<<18 ||
+		cfg.MTProtoRPCExecutionAuthMaxEntries != 1<<15 ||
+		cfg.MTProtoRPCExecutionSessionMaxEntries != 1<<14 ||
+		cfg.MTProtoRPCExecutionPendingPerAuth != 1<<11 {
+		t.Fatalf("rpc execution receipt defaults = global:%d auth:%d session:%d pending/auth:%d",
+			cfg.MTProtoRPCExecutionMaxEntries,
+			cfg.MTProtoRPCExecutionAuthMaxEntries,
+			cfg.MTProtoRPCExecutionSessionMaxEntries,
+			cfg.MTProtoRPCExecutionPendingPerAuth)
 	}
 }
 
-func TestLoadRejectsInvalidRPCResultFairBudgets(t *testing.T) {
+func TestLoadRejectsInvalidRPCExecutionFairBudgets(t *testing.T) {
 	tests := []struct {
 		name  string
 		key   string
 		value string
 	}{
-		{name: "entry hierarchy", key: "TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_ENTRIES", value: "1024"},
-		{name: "byte below outbound body", key: "TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_BYTES", value: "16700000"},
-		{name: "byte hierarchy", key: "TELESRV_MTPROTO_RPC_RESULT_CACHE_AUTH_MAX_BYTES", value: "70000000"},
-		{name: "pending hierarchy", key: "TELESRV_MTPROTO_RPC_RESULT_PENDING_PER_AUTH", value: "9000"},
+		{name: "entry hierarchy", key: "TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES", value: "1024"},
+		{name: "pending hierarchy", key: "TELESRV_MTPROTO_RPC_EXECUTION_PENDING_PER_AUTH", value: "9000"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -140,6 +254,27 @@ func TestLoadRejectsInvalidRPCResultFairBudgets(t *testing.T) {
 			t.Setenv(test.key, test.value)
 			if _, err := Load(); err == nil {
 				t.Fatalf("Load accepted invalid %s=%s", test.key, test.value)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMalformedMTProtoCapacity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "worker tasks malformed", key: "TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS", value: "lots"},
+		{name: "receipt entries overflow", key: "TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES", value: "999999999999999999999999"},
+		{name: "tracked bytes overflow", key: "TELESRV_MTPROTO_OUTBOUND_TRACKED_GLOBAL_MAX_BYTES", value: "999999999999999999999999"},
+		{name: "outbound queue malformed", key: "TELESRV_MTPROTO_OUTBOUND_QUEUE_SIZE", value: "many"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv(test.key, test.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted %s=%q", test.key, test.value)
 			}
 		})
 	}
@@ -413,6 +548,7 @@ TELESRV_WEBSOCKET_ALLOWED_ORIGINS=https://one.example, https://two.example
 TELESRV_CALL_RING_TIMEOUT=2m
 TELESRV_PUBLIC_BASE_URL=links.example.test/root
 TELESRV_PUBLIC_APP_SCHEME=example-chat
+TELESRV_PUBLIC_APP_LINK_BASE=OWPG://Tenant.Example.Test/
 TELESRV_PUBLIC_WEB_BASE_URL=web.example.test/client
 TELESRV_PUBLIC_APP_NAME=Example Chat
 TELESRV_PUBLIC_LINK_WEB_ADDR=127.0.0.1:2401
@@ -444,6 +580,9 @@ TELESRV_PUBLIC_LINK_WEB_ADDR=127.0.0.1:2401
 	if cfg.PublicAppScheme != "example-chat" {
 		t.Fatalf("PublicAppScheme = %q, want example-chat", cfg.PublicAppScheme)
 	}
+	if cfg.PublicAppLinkBase != "owpg://tenant.example.test" {
+		t.Fatalf("PublicAppLinkBase = %q, want owpg://tenant.example.test", cfg.PublicAppLinkBase)
+	}
 	if cfg.PublicWebBaseURL != "https://web.example.test/client" {
 		t.Fatalf("PublicWebBaseURL = %q, want https://web.example.test/client", cfg.PublicWebBaseURL)
 	}
@@ -465,6 +604,95 @@ func TestLoadNormalizesLocalPublicBaseURL(t *testing.T) {
 	}
 }
 
+func TestLoadTelegramLoginConfig(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_PUBLIC_LINK_WEB_ADDR", "127.0.0.1:2401")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_ENABLE", "true")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_ISSUER", "http://192.0.2.25:2401/")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_ALLOW_HTTP", "true")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_SIGNING_KEYS_FILE", "secrets/signing.json")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_CODE_KEYS_FILE", "secrets/codes.json")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_SECRET_PEPPER_FILE", "secrets/pepper")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_REQUEST_TTL", "7m")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_CODE_TTL", "90s")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_ID_TOKEN_TTL", "45m")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_TRUSTED_PROXY_CIDRS", "127.0.0.0/8,10.0.0.0/8")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_RETENTION", "48h")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_SWEEP_INTERVAL", "30s")
+	t.Setenv("TELESRV_TELEGRAM_LOGIN_SWEEP_BATCH", "73")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.TelegramLoginEnabled || cfg.TelegramLoginIssuer != "http://192.0.2.25:2401" || !cfg.TelegramLoginAllowHTTP {
+		t.Fatalf("telegram login endpoint config = enabled:%v issuer:%q allow_http:%v", cfg.TelegramLoginEnabled, cfg.TelegramLoginIssuer, cfg.TelegramLoginAllowHTTP)
+	}
+	if cfg.TelegramLoginSigningKeysFile != "secrets/signing.json" || cfg.TelegramLoginCodeKeysFile != "secrets/codes.json" || cfg.TelegramLoginSecretPepperFile != "secrets/pepper" {
+		t.Fatalf("telegram login secret files = %q / %q / %q", cfg.TelegramLoginSigningKeysFile, cfg.TelegramLoginCodeKeysFile, cfg.TelegramLoginSecretPepperFile)
+	}
+	if cfg.TelegramLoginRequestTTL != 7*time.Minute || cfg.TelegramLoginCodeTTL != 90*time.Second || cfg.TelegramLoginIDTokenTTL != 45*time.Minute ||
+		cfg.TelegramLoginRetention != 48*time.Hour || cfg.TelegramLoginSweepInterval != 30*time.Second || cfg.TelegramLoginSweepBatch != 73 {
+		t.Fatalf("telegram login durations/batch = %v / %v / %v / %v / %v / %d", cfg.TelegramLoginRequestTTL, cfg.TelegramLoginCodeTTL,
+			cfg.TelegramLoginIDTokenTTL, cfg.TelegramLoginRetention, cfg.TelegramLoginSweepInterval, cfg.TelegramLoginSweepBatch)
+	}
+	if len(cfg.TelegramLoginTrustedProxyCIDRs) != 2 || cfg.TelegramLoginTrustedProxyCIDRs[1] != "10.0.0.0/8" {
+		t.Fatalf("trusted proxy CIDRs = %#v", cfg.TelegramLoginTrustedProxyCIDRs)
+	}
+}
+
+func TestValidateTelegramLoginConfigRejectsUnsafeOrUnboundedSettings(t *testing.T) {
+	valid := Config{
+		TelegramLoginEnabled: true, PublicLinkWebAddr: "127.0.0.1:2401", TelegramLoginIssuer: "https://login.example.test",
+		TelegramLoginSigningKeysFile: "signing.json", TelegramLoginCodeKeysFile: "codes.json", TelegramLoginSecretPepperFile: "pepper",
+		TelegramLoginRequestTTL: 5 * time.Minute, TelegramLoginCodeTTL: 2 * time.Minute, TelegramLoginIDTokenTTL: time.Hour,
+		TelegramLoginRetention: 7 * 24 * time.Hour, TelegramLoginSweepInterval: 5 * time.Minute, TelegramLoginSweepBatch: 500,
+	}
+	if err := validateTelegramLoginConfig(valid); err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "missing listener", mutate: func(c *Config) { c.PublicLinkWebAddr = "" }},
+		{name: "issuer path", mutate: func(c *Config) { c.TelegramLoginIssuer = "https://login.example.test/oauth" }},
+		{name: "http disabled", mutate: func(c *Config) { c.TelegramLoginIssuer = "http://192.0.2.25:2401" }},
+		{name: "missing key file", mutate: func(c *Config) { c.TelegramLoginSigningKeysFile = "" }},
+		{name: "request ttl too long", mutate: func(c *Config) { c.TelegramLoginRequestTTL = 16 * time.Minute }},
+		{name: "code ttl too short", mutate: func(c *Config) { c.TelegramLoginCodeTTL = 29 * time.Second }},
+		{name: "id token ttl too long", mutate: func(c *Config) { c.TelegramLoginIDTokenTTL = 25 * time.Hour }},
+		{name: "retention too short", mutate: func(c *Config) { c.TelegramLoginRetention = 59 * time.Minute }},
+		{name: "sweep unbounded", mutate: func(c *Config) { c.TelegramLoginSweepBatch = 1001 }},
+		{name: "invalid proxy CIDR", mutate: func(c *Config) { c.TelegramLoginTrustedProxyCIDRs = []string{"10.0.0.0/33"} }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := valid
+			tc.mutate(&cfg)
+			if err := validateTelegramLoginConfig(cfg); err == nil {
+				t.Fatal("unsafe Telegram Login config was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateTelegramLoginConfigAcceptsHTTPHostAndIPWhenEnabled(t *testing.T) {
+	valid := Config{
+		TelegramLoginEnabled: true, TelegramLoginAllowHTTP: true, PublicLinkWebAddr: "127.0.0.1:2401",
+		TelegramLoginSigningKeysFile: "signing.json", TelegramLoginCodeKeysFile: "codes.json", TelegramLoginSecretPepperFile: "pepper",
+		TelegramLoginRequestTTL: 5 * time.Minute, TelegramLoginCodeTTL: 2 * time.Minute, TelegramLoginIDTokenTTL: time.Hour,
+		TelegramLoginRetention: 7 * 24 * time.Hour, TelegramLoginSweepInterval: 5 * time.Minute, TelegramLoginSweepBatch: 500,
+	}
+	for _, issuer := range []string{"http://login.example.test:3000", "http://192.0.2.25:2401", "http://[2001:db8::25]:2401"} {
+		cfg := valid
+		cfg.TelegramLoginIssuer = issuer
+		if err := validateTelegramLoginConfig(cfg); err != nil {
+			t.Fatalf("issuer %q was rejected: %v", issuer, err)
+		}
+	}
+}
+
 func TestLoadRejectsInvalidPublicBaseURL(t *testing.T) {
 	disableDefaultConfigFile(t)
 	t.Setenv("TELESRV_PUBLIC_BASE_URL", "https://links.example.test/root?tenant=one")
@@ -482,6 +710,10 @@ func TestLoadRejectsInvalidPublicLinkClientConfig(t *testing.T) {
 	}{
 		{name: "official scheme", key: "TELESRV_PUBLIC_APP_SCHEME", value: "tg"},
 		{name: "malformed scheme", key: "TELESRV_PUBLIC_APP_SCHEME", value: "bad scheme"},
+		{name: "app link base official scheme", key: "TELESRV_PUBLIC_APP_LINK_BASE", value: "tg://links.example.test"},
+		{name: "app link base missing host", key: "TELESRV_PUBLIC_APP_LINK_BASE", value: "owpg://"},
+		{name: "app link base path", key: "TELESRV_PUBLIC_APP_LINK_BASE", value: "owpg://links.example.test/root"},
+		{name: "app link base query", key: "TELESRV_PUBLIC_APP_LINK_BASE", value: "owpg://links.example.test?tenant=one"},
 		{name: "invalid web base", key: "TELESRV_PUBLIC_WEB_BASE_URL", value: "file:///tmp/client"},
 		{name: "empty app name after trim", key: "TELESRV_PUBLIC_APP_NAME", value: "   "},
 		{name: "control in app name", key: "TELESRV_PUBLIC_APP_NAME", value: "bad\nname"},
@@ -563,6 +795,359 @@ func TestValidateStarGiftConfigRejectsNegativeInternalTONGrant(t *testing.T) {
 	}
 	if err := validateStarGiftConfig(cfg); err == nil {
 		t.Fatal("negative internal TON starting grant was accepted")
+	}
+}
+
+func TestLoadAccountRatingDefaults(t *testing.T) {
+	disableDefaultConfigFile(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.RatingEnabled {
+		t.Fatal("RatingEnabled = false, want the feature on by default")
+	}
+	if cfg.RatingPendingDelay != 24*time.Hour || cfg.RatingRecomputeInterval != 15*time.Minute ||
+		cfg.RatingRecomputeBatch != 500 || cfg.RatingStaleAfter != 6*time.Hour {
+		t.Fatalf("rating worker defaults = %v/%v/%d/%v, want 24h/15m/500/6h",
+			cfg.RatingPendingDelay, cfg.RatingRecomputeInterval, cfg.RatingRecomputeBatch, cfg.RatingStaleAfter)
+	}
+	if got, want := cfg.AccountRatingWeights(), domain.DefaultAccountRatingWeights(); got != want {
+		t.Fatalf("rating weights = %#v, want the domain defaults %#v", got, want)
+	}
+	if cfg.CollectibleUsernameURLTemplate != "" {
+		t.Fatalf("CollectibleUsernameURLTemplate = %q, want empty (derived from the public base URL)",
+			cfg.CollectibleUsernameURLTemplate)
+	}
+}
+
+func TestLoadAccountRatingOverrides(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_RATING_ENABLED", "false")
+	t.Setenv("TELESRV_RATING_PENDING_DELAY", "1h")
+	t.Setenv("TELESRV_RATING_RECOMPUTE_INTERVAL", "90s")
+	t.Setenv("TELESRV_RATING_RECOMPUTE_BATCH", "42")
+	t.Setenv("TELESRV_RATING_STALE_AFTER", "30m")
+	t.Setenv("TELESRV_RATING_WEIGHT_STARS_RECEIVED_PERMILLE", "500")
+	t.Setenv("TELESRV_RATING_WEIGHT_MESSAGE_SENT", "0")
+	t.Setenv("TELESRV_RATING_ACTIVITY_CAP", "0")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.RatingEnabled {
+		t.Fatal("RatingEnabled = true, want the explicit override")
+	}
+	weights := cfg.AccountRatingWeights()
+	if weights.StarsReceivedPermille != 500 || weights.PerMessageSent != 0 || weights.ActivityCap != 0 {
+		t.Fatalf("weights = %#v, want the overridden values", weights)
+	}
+	if weights.StarsSpentPermille != domain.DefaultAccountRatingWeights().StarsSpentPermille {
+		t.Fatalf("unset weight = %d, want the domain default", weights.StarsSpentPermille)
+	}
+	if cfg.RatingPendingDelay != time.Hour || cfg.RatingRecomputeInterval != 90*time.Second ||
+		cfg.RatingRecomputeBatch != 42 || cfg.RatingStaleAfter != 30*time.Minute {
+		t.Fatalf("rating worker overrides = %v/%v/%d/%v",
+			cfg.RatingPendingDelay, cfg.RatingRecomputeInterval, cfg.RatingRecomputeBatch, cfg.RatingStaleAfter)
+	}
+}
+
+func TestLoadRejectsInvalidAccountRatingConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "negative stars weight", key: "TELESRV_RATING_WEIGHT_STARS_RECEIVED_PERMILLE", value: "-1"},
+		{name: "negative moderation weight", key: "TELESRV_RATING_WEIGHT_MODERATION_CASE", value: "-150"},
+		{name: "negative scam penalty", key: "TELESRV_RATING_WEIGHT_SCAM_PENALTY", value: "-1"},
+		{name: "negative activity cap", key: "TELESRV_RATING_ACTIVITY_CAP", value: "-5000"},
+		{name: "negative pending delay", key: "TELESRV_RATING_PENDING_DELAY", value: "-1h"},
+		{name: "zero recompute interval", key: "TELESRV_RATING_RECOMPUTE_INTERVAL", value: "0s"},
+		{name: "zero stale horizon", key: "TELESRV_RATING_STALE_AFTER", value: "0s"},
+		{name: "zero recompute batch", key: "TELESRV_RATING_RECOMPUTE_BATCH", value: "0"},
+		{name: "oversized recompute batch", key: "TELESRV_RATING_RECOMPUTE_BATCH", value: "20000"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv(test.key, test.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted invalid %s=%s", test.key, test.value)
+			}
+		})
+	}
+}
+
+func TestLoadCollectibleUsernameURLTemplate(t *testing.T) {
+	t.Run("absolute template accepted", func(t *testing.T) {
+		disableDefaultConfigFile(t)
+		t.Setenv("TELESRV_COLLECTIBLE_USERNAME_URL_TEMPLATE", " https://frag.example/u/{username} ")
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.CollectibleUsernameURLTemplate != "https://frag.example/u/{username}" {
+			t.Fatalf("template = %q, want the trimmed value", cfg.CollectibleUsernameURLTemplate)
+		}
+	})
+
+	for _, invalid := range []string{"/nft/{username}", "ftp://frag.example/{username}", "https://user:pass@frag.example/{username}"} {
+		t.Run("rejects "+invalid, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv("TELESRV_COLLECTIBLE_USERNAME_URL_TEMPLATE", invalid)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted template %q", invalid)
+			}
+		})
+	}
+}
+
+func TestLoadVerificationDefaults(t *testing.T) {
+	disableDefaultConfigFile(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.VerificationEnabled {
+		t.Fatal("VerificationEnabled = false, want the feature shipped on")
+	}
+	if cfg.VerificationAllowUserTargets {
+		t.Fatal("VerificationAllowUserTargets = true, want user targets opt-in")
+	}
+	if cfg.VerificationRejectCooldown != 720*time.Hour {
+		t.Fatalf("VerificationRejectCooldown = %v, want 720h", cfg.VerificationRejectCooldown)
+	}
+	if cfg.VerificationApplyRateLimit != 3 || cfg.VerificationApplyRateWindow != 24*time.Hour {
+		t.Fatalf("apply rate = %d/%v, want 3/24h", cfg.VerificationApplyRateLimit, cfg.VerificationApplyRateWindow)
+	}
+	if cfg.VerificationBotRateLimit != 30 || cfg.VerificationBotRateWindow != time.Minute {
+		t.Fatalf("bot rate = %d/%v, want 30/1m", cfg.VerificationBotRateLimit, cfg.VerificationBotRateWindow)
+	}
+	if cfg.VerificationNotifyInterval != 15*time.Second || cfg.VerificationNotifyBatch != 50 {
+		t.Fatalf("notify = %v/%d, want 15s/50", cfg.VerificationNotifyInterval, cfg.VerificationNotifyBatch)
+	}
+	if cfg.VerificationMaxActivePerUser != 3 {
+		t.Fatalf("VerificationMaxActivePerUser = %d, want 3", cfg.VerificationMaxActivePerUser)
+	}
+}
+
+func TestLoadVerificationOverrides(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_VERIFICATION_ENABLED", "false")
+	t.Setenv("TELESRV_VERIFICATION_ALLOW_USER_TARGETS", "true")
+	t.Setenv("TELESRV_VERIFICATION_REJECT_COOLDOWN", "48h")
+	t.Setenv("TELESRV_VERIFICATION_APPLY_RATE_LIMIT", "7")
+	t.Setenv("TELESRV_VERIFICATION_APPLY_RATE_WINDOW", "12h")
+	t.Setenv("TELESRV_VERIFICATION_BOT_RATE_LIMIT", "0")
+	t.Setenv("TELESRV_VERIFICATION_BOT_RATE_WINDOW", "0s")
+	t.Setenv("TELESRV_VERIFICATION_NOTIFY_INTERVAL", "5s")
+	t.Setenv("TELESRV_VERIFICATION_NOTIFY_BATCH", "200")
+	t.Setenv("TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER", "0")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.VerificationEnabled || !cfg.VerificationAllowUserTargets {
+		t.Fatalf("enabled=%v allowUserTargets=%v", cfg.VerificationEnabled, cfg.VerificationAllowUserTargets)
+	}
+	if cfg.VerificationRejectCooldown != 48*time.Hour {
+		t.Fatalf("cooldown = %v", cfg.VerificationRejectCooldown)
+	}
+	if cfg.VerificationApplyRateLimit != 7 || cfg.VerificationApplyRateWindow != 12*time.Hour {
+		t.Fatalf("apply rate = %d/%v", cfg.VerificationApplyRateLimit, cfg.VerificationApplyRateWindow)
+	}
+	// A zero limit disables the budget, so a zero window is accepted with it.
+	if cfg.VerificationBotRateLimit != 0 || cfg.VerificationBotRateWindow != 0 {
+		t.Fatalf("bot rate = %d/%v", cfg.VerificationBotRateLimit, cfg.VerificationBotRateWindow)
+	}
+	if cfg.VerificationNotifyInterval != 5*time.Second || cfg.VerificationNotifyBatch != 200 {
+		t.Fatalf("notify = %v/%d", cfg.VerificationNotifyInterval, cfg.VerificationNotifyBatch)
+	}
+	if cfg.VerificationMaxActivePerUser != 0 {
+		t.Fatalf("maxActive = %d, want the cap disabled", cfg.VerificationMaxActivePerUser)
+	}
+}
+
+func TestLoadRejectsInvalidVerificationConfig(t *testing.T) {
+	for _, test := range []struct {
+		key   string
+		value string
+	}{
+		{"TELESRV_VERIFICATION_REJECT_COOLDOWN", "-1h"},
+		{"TELESRV_VERIFICATION_REJECT_COOLDOWN", "9000h"},
+		{"TELESRV_VERIFICATION_APPLY_RATE_LIMIT", "-1"},
+		{"TELESRV_VERIFICATION_APPLY_RATE_WINDOW", "0s"},
+		{"TELESRV_VERIFICATION_APPLY_RATE_WINDOW", "-5m"},
+		{"TELESRV_VERIFICATION_BOT_RATE_LIMIT", "-2"},
+		{"TELESRV_VERIFICATION_BOT_RATE_WINDOW", "0s"},
+		{"TELESRV_VERIFICATION_NOTIFY_INTERVAL", "0s"},
+		{"TELESRV_VERIFICATION_NOTIFY_BATCH", "0"},
+		{"TELESRV_VERIFICATION_NOTIFY_BATCH", "501"},
+		{"TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER", "-1"},
+		{"TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER", "51"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv(test.key, test.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted invalid %s=%s", test.key, test.value)
+			}
+		})
+	}
+}
+
+func TestLoadBotVerificationDefaults(t *testing.T) {
+	disableDefaultConfigFile(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.BotVerificationEnabled {
+		t.Fatal("BotVerificationEnabled = false, want the feature shipped on")
+	}
+	// The default is the storage bound itself, so the shipped behaviour is the same
+	// whether or not the key is set.
+	if cfg.BotVerificationMaxPerVerifier != domain.MaxCustomVerificationsPerVerifier {
+		t.Fatalf("BotVerificationMaxPerVerifier = %d, want %d", cfg.BotVerificationMaxPerVerifier, domain.MaxCustomVerificationsPerVerifier)
+	}
+	if cfg.BotVerificationRequestRateLimit != 5 || cfg.BotVerificationRequestRateWindow != 24*time.Hour {
+		t.Fatalf("request rate = %d/%v, want 5/24h", cfg.BotVerificationRequestRateLimit, cfg.BotVerificationRequestRateWindow)
+	}
+}
+
+func TestLoadBotVerificationOverrides(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_BOT_VERIFICATION_ENABLED", "false")
+	t.Setenv("TELESRV_BOT_VERIFICATION_MAX_PER_VERIFIER", "0")
+	t.Setenv("TELESRV_BOT_VERIFICATION_REQUEST_RATE_LIMIT", "0")
+	t.Setenv("TELESRV_BOT_VERIFICATION_REQUEST_RATE_WINDOW", "0s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BotVerificationEnabled {
+		t.Fatal("BotVerificationEnabled = true, want the override honoured")
+	}
+	if cfg.BotVerificationMaxPerVerifier != 0 {
+		t.Fatalf("BotVerificationMaxPerVerifier = %d, want the service bound disabled", cfg.BotVerificationMaxPerVerifier)
+	}
+	// A zero limit disables the budget, so a zero window is accepted with it.
+	if cfg.BotVerificationRequestRateLimit != 0 || cfg.BotVerificationRequestRateWindow != 0 {
+		t.Fatalf("request rate = %d/%v, want the budget disabled", cfg.BotVerificationRequestRateLimit, cfg.BotVerificationRequestRateWindow)
+	}
+}
+
+func TestLoadRejectsInvalidBotVerificationConfig(t *testing.T) {
+	for _, test := range []struct {
+		key   string
+		value string
+	}{
+		{"TELESRV_BOT_VERIFICATION_MAX_PER_VERIFIER", "-1"},
+		{"TELESRV_BOT_VERIFICATION_MAX_PER_VERIFIER", "10001"},
+		{"TELESRV_BOT_VERIFICATION_REQUEST_RATE_LIMIT", "-1"},
+		{"TELESRV_BOT_VERIFICATION_REQUEST_RATE_WINDOW", "-5m"},
+		// A positive limit with no window is a limiter that never refills.
+		{"TELESRV_BOT_VERIFICATION_REQUEST_RATE_WINDOW", "0s"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv(test.key, test.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted invalid %s=%s", test.key, test.value)
+			}
+		})
+	}
+}
+
+// TestLoadValidatesBotVerificationWhileDisabled pins that the policy is checked
+// even with the feature off, so switching it on later is not the moment a typo is
+// discovered.
+func TestLoadValidatesBotVerificationWhileDisabled(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_BOT_VERIFICATION_ENABLED", "false")
+	t.Setenv("TELESRV_BOT_VERIFICATION_MAX_PER_VERIFIER", "-3")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load accepted a negative per-verifier bound while the feature was disabled")
+	}
+}
+
+func TestLoadAdminRBACDefaults(t *testing.T) {
+	disableDefaultConfigFile(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.AdminUIPermissions) != 1 || cfg.AdminUIPermissions[0] != "*" {
+		t.Fatalf("AdminUIPermissions = %v, want the wildcard default", cfg.AdminUIPermissions)
+	}
+	if len(cfg.AdminScopedTokens) != 0 {
+		t.Fatalf("AdminScopedTokens = %+v, want none by default", cfg.AdminScopedTokens)
+	}
+}
+
+func TestLoadAdminScopedTokens(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_ADMIN_UI_PERMISSIONS", "users.read, verification:decide")
+	t.Setenv("TELESRV_ADMIN_SCOPED_TOKENS", "ops:tok-ops-1:users.read,users.write; audit:tok-audit-2:verification.*")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.AdminUIPermissions) != 2 ||
+		cfg.AdminUIPermissions[0] != "users.read" || cfg.AdminUIPermissions[1] != "verification:decide" {
+		t.Fatalf("AdminUIPermissions = %v", cfg.AdminUIPermissions)
+	}
+	if len(cfg.AdminScopedTokens) != 2 {
+		t.Fatalf("AdminScopedTokens = %+v, want 2 entries", cfg.AdminScopedTokens)
+	}
+	first := cfg.AdminScopedTokens[0]
+	if first.Name != "ops" || first.Token != "tok-ops-1" ||
+		len(first.Permissions) != 2 || first.Permissions[0] != "users.read" || first.Permissions[1] != "users.write" {
+		t.Fatalf("first scoped token = %+v", first)
+	}
+	second := cfg.AdminScopedTokens[1]
+	if second.Name != "audit" || second.Token != "tok-audit-2" ||
+		len(second.Permissions) != 1 || second.Permissions[0] != "verification.*" {
+		t.Fatalf("second scoped token = %+v", second)
+	}
+}
+
+func TestLoadRejectsInvalidAdminRBACConfig(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"missing permissions field": {"TELESRV_ADMIN_SCOPED_TOKENS": "ops:tok-ops-1"},
+		"too many fields":           {"TELESRV_ADMIN_SCOPED_TOKENS": "ops:tok:extra:users.read"},
+		"empty name":                {"TELESRV_ADMIN_SCOPED_TOKENS": ":tok-ops-1:users.read"},
+		"empty token":               {"TELESRV_ADMIN_SCOPED_TOKENS": "ops::users.read"},
+		"no permissions listed":     {"TELESRV_ADMIN_SCOPED_TOKENS": "ops:tok-ops-1:"},
+		"invalid permission":        {"TELESRV_ADMIN_SCOPED_TOKENS": "ops:tok-ops-1:users read"},
+		"duplicate name":            {"TELESRV_ADMIN_SCOPED_TOKENS": "ops:tok-a:users.read;OPS:tok-b:users.read"},
+		"duplicate token":           {"TELESRV_ADMIN_SCOPED_TOKENS": "ops:tok-a:users.read;audit:tok-a:users.read"},
+		"reuses the admin api token": {
+			"TELESRV_ADMIN_API_TOKEN":     "tok-a",
+			"TELESRV_ADMIN_SCOPED_TOKENS": "ops:tok-a:users.read",
+		},
+		"invalid ui permission": {"TELESRV_ADMIN_UI_PERMISSIONS": "users/read"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			for key, value := range env {
+				t.Setenv(key, value)
+			}
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted %v", env)
+			}
+		})
 	}
 }
 

@@ -102,6 +102,21 @@ func (r *Router) onUpdatesGetDifference(ctx context.Context, req *tg.UpdatesGetD
 		return nil, internalErr()
 	}
 	st.ChannelNudges = r.accountChannelDifferenceNudges(ctx, userID, req.Date)
+	if !st.Partial {
+		for _, nudge := range st.ChannelNudges {
+			if nudge.AvailableMinID <= 0 {
+				continue
+			}
+			// No-PTS owner-local clear recovery is date-indexed. Advance only
+			// on the final account page and never beyond the server clock; the
+			// indexed query deliberately overlaps equality, so a same-second
+			// reconnect can receive an idempotent duplicate rather than miss.
+			if now := int(r.clock.Now().Unix()); now > st.State.Date {
+				st.State.Date = now
+			}
+			break
+		}
+	}
 	// 密聊设备级 qts 消息（独立于账号级 pts 事件）：按当前设备 req.Qts 补回。
 	encMsgs, newQts := r.encryptedDifference(ctx, req.Qts)
 	// 密聊握手/已读状态事件（无 qts）：按未投递标记补回 OtherUpdates。
@@ -154,10 +169,19 @@ func (r *Router) accountChannelDifferenceNudges(ctx context.Context, userID int6
 			}
 		}
 		for _, item := range dirty {
+			if len(out) >= maxNudges {
+				break
+			}
 			if item.ChannelID == 0 {
 				continue
 			}
-			nudge := domain.ChannelDifferenceNudge{ChannelID: item.ChannelID, Pts: item.Pts}
+			nudge := domain.ChannelDifferenceNudge{
+				ChannelID:           item.ChannelID,
+				Pts:                 item.Pts,
+				ChannelUpdatesDirty: item.ChannelUpdatesDirty,
+				AvailableMinID:      item.AvailableMinID,
+				HistoryClearDate:    item.HistoryClearDate,
+			}
 			if view, ok := viewsByID[item.ChannelID]; ok {
 				nudge.Channel = &view
 			}

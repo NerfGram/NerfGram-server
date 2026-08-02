@@ -27,8 +27,9 @@ func TestSendMonoforumMessageAndHistory(t *testing.T) {
 	}
 
 	sub := domain.Peer{Type: domain.PeerTypeUser, ID: 42}
+	forward := &domain.MessageForward{From: domain.Peer{Type: domain.PeerTypeUser, ID: 1}, Date: 1_700_000_999}
 
-	m1, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{MonoforumID: monoID, SenderUserID: 42, SavedPeer: sub, RandomID: 111, Message: "hi", Date: 1_700_001_001})
+	m1, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{MonoforumID: monoID, SenderUserID: 42, SavedPeer: sub, RandomID: 111, Message: "hi", Forward: forward, Date: 1_700_001_001})
 	if err != nil {
 		t.Fatalf("subscriber send 1: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestSendMonoforumMessageAndHistory(t *testing.T) {
 	}
 
 	// 幂等:相同 randomID 返回原消息、不重复。
-	dup, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{MonoforumID: monoID, SenderUserID: 42, SavedPeer: sub, RandomID: 111, Message: "hi", Date: 1_700_001_004})
+	dup, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{MonoforumID: monoID, SenderUserID: 42, SavedPeer: sub, RandomID: 111, Message: "hi", Forward: forward, Date: 1_700_001_004})
 	if err != nil {
 		t.Fatalf("dup send: %v", err)
 	}
@@ -99,6 +100,9 @@ func TestSendMonoforumMessageAndHistory(t *testing.T) {
 	if hist.Messages[0].ReplyTo == nil || hist.Messages[0].ReplyTo.MessageID != m1.Message.ID {
 		t.Fatalf("history[0] reply = %+v, want message %d", hist.Messages[0].ReplyTo, m1.Message.ID)
 	}
+	if oldest := hist.Messages[len(hist.Messages)-1]; oldest.Forward == nil || oldest.Forward.From.ID != 1 || oldest.Forward.Date != 1_700_000_999 {
+		t.Fatalf("persisted monoforum forward = %+v, want source user 1/date 1700000999", oldest.Forward)
+	}
 	if _, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{MonoforumID: monoID, SenderUserID: 1, SavedPeer: sub, RandomID: 114, Message: "cross reply", ReplyTo: &domain.MessageReply{MessageID: 999999, Peer: domain.Peer{Type: domain.PeerTypeChannel, ID: monoID}}, Date: 1_700_001_004}); !errors.Is(err, domain.ErrReplyMessageIDInvalid) {
 		t.Fatalf("invalid monoforum reply err = %v, want ErrReplyMessageIDInvalid", err)
 	}
@@ -110,7 +114,8 @@ func TestSendMonoforumMessageAndHistory(t *testing.T) {
 
 	// 另一个订阅者的私信不串会话。
 	other := domain.Peer{Type: domain.PeerTypeUser, ID: 99}
-	if _, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{MonoforumID: monoID, SenderUserID: 99, SavedPeer: other, RandomID: 201, Message: "other", Date: 1_700_001_005}); err != nil {
+	otherMessage, err := store.SendMonoforumMessage(ctx, domain.SendMonoforumMessageRequest{MonoforumID: monoID, SenderUserID: 99, SavedPeer: other, RandomID: 201, Message: "other", Date: 1_700_001_005})
+	if err != nil {
 		t.Fatalf("other subscriber send: %v", err)
 	}
 	subHist, _ := store.ListMonoforumHistory(ctx, domain.MonoforumHistoryFilter{MonoforumID: monoID, SavedPeer: sub, Limit: 10})
@@ -128,6 +133,104 @@ func TestSendMonoforumMessageAndHistory(t *testing.T) {
 		if message.SavedPeer != sub {
 			t.Fatalf("subscriber channel history leaked message %+v", message)
 		}
+	}
+	exactMessages, err := store.GetChannelMessages(ctx, 42, monoID, []int{m1.Message.ID, otherMessage.Message.ID})
+	if err != nil {
+		t.Fatalf("subscriber exact monoforum messages: %v", err)
+	}
+	if len(exactMessages.Messages) != 1 || exactMessages.Messages[0].ID != m1.Message.ID {
+		t.Fatalf("subscriber exact monoforum messages = %+v, want only own message %d", exactMessages.Messages, m1.Message.ID)
+	}
+	ptsBeforeViews := store.channels[monoID].Pts
+	subViews, err := store.GetChannelMessageViews(ctx, domain.ChannelMessageViewsRequest{
+		UserID: 42, ChannelID: monoID, IDs: []int{m1.Message.ID, otherMessage.Message.ID},
+		Increment: true, Date: 1_700_001_006,
+	})
+	if err != nil {
+		t.Fatalf("subscriber get monoforum message views: %v", err)
+	}
+	if len(subViews.Views) != 1 || subViews.Views[m1.Message.ID] != 1 {
+		t.Fatalf("subscriber monoforum views = %+v, want own message %d at 1", subViews.Views, m1.Message.ID)
+	}
+	if _, ok := subViews.Views[otherMessage.Message.ID]; ok {
+		t.Fatalf("subscriber monoforum views leaked other saved_peer message %d", otherMessage.Message.ID)
+	}
+	repeatedViews, err := store.GetChannelMessageViews(ctx, domain.ChannelMessageViewsRequest{
+		UserID: 42, ChannelID: monoID, IDs: []int{m1.Message.ID},
+		Increment: true, Date: 1_700_001_007,
+	})
+	if err != nil || repeatedViews.Views[m1.Message.ID] != 1 {
+		t.Fatalf("repeated subscriber monoforum views = %+v, %v; want idempotent 1", repeatedViews.Views, err)
+	}
+	if got := store.msgViews[monoID][otherMessage.Message.ID]; got != 0 {
+		t.Fatalf("hidden saved_peer views = %d, want 0 before admin view", got)
+	}
+	adminViews, err := store.GetChannelMessageViews(ctx, domain.ChannelMessageViewsRequest{
+		UserID: 1, ChannelID: monoID, IDs: []int{m1.Message.ID, otherMessage.Message.ID},
+		Increment: true, Date: 1_700_001_008,
+	})
+	if err != nil {
+		t.Fatalf("admin get monoforum message views: %v", err)
+	}
+	if len(adminViews.Views) != 2 || adminViews.Views[m1.Message.ID] != 2 || adminViews.Views[otherMessage.Message.ID] != 1 {
+		t.Fatalf("admin monoforum views = %+v, want both saved peers at 2/1", adminViews.Views)
+	}
+	if got := store.channels[monoID].Pts; got != ptsBeforeViews {
+		t.Fatalf("message views advanced monoforum pts = %d, want unchanged %d", got, ptsBeforeViews)
+	}
+	if _, err := store.SetChannelMessageReactions(ctx, domain.SetChannelMessageReactionsRequest{
+		UserID: 42, ChannelID: monoID, MessageID: m1.Message.ID,
+		Reactions: []domain.MessageReaction{{Type: domain.MessageReactionEmoji, Emoticon: "\U0001f44d"}},
+		Date:      1_700_001_006,
+	}); err != nil {
+		t.Fatalf("subscriber react to own monoforum message: %v", err)
+	}
+	if _, err := store.SetChannelMessageReactions(ctx, domain.SetChannelMessageReactionsRequest{
+		UserID: 42, ChannelID: monoID, MessageID: otherMessage.Message.ID,
+		Reactions: []domain.MessageReaction{{Type: domain.MessageReactionEmoji, Emoticon: "\U0001f525"}},
+		Date:      1_700_001_006,
+	}); !errors.Is(err, domain.ErrMessageIDInvalid) {
+		t.Fatalf("subscriber react to another saved_peer err = %v, want ErrMessageIDInvalid", err)
+	}
+	subReactions, err := store.GetChannelMessageReactions(ctx, domain.ChannelMessageReactionsRequest{
+		UserID: 42, ChannelID: monoID, IDs: []int{m1.Message.ID, otherMessage.Message.ID},
+	})
+	if err != nil {
+		t.Fatalf("subscriber get monoforum reactions: %v", err)
+	}
+	if len(subReactions.Messages) != 1 || subReactions.Messages[0].ID != m1.Message.ID {
+		t.Fatalf("subscriber monoforum reactions = %+v, want only own message %d", subReactions.Messages, m1.Message.ID)
+	}
+	adminReactions, err := store.GetChannelMessageReactions(ctx, domain.ChannelMessageReactionsRequest{
+		UserID: 1, ChannelID: monoID, IDs: []int{m1.Message.ID, otherMessage.Message.ID},
+	})
+	if err != nil {
+		t.Fatalf("admin get monoforum reactions: %v", err)
+	}
+	if len(adminReactions.Messages) != 2 {
+		t.Fatalf("admin monoforum reactions = %+v, want both subscriber messages", adminReactions.Messages)
+	}
+	reactionList, err := store.ListChannelMessageReactions(ctx, domain.ChannelMessageReactionsListRequest{
+		UserID: 42, ChannelID: monoID, MessageID: m1.Message.ID, Limit: 10,
+	})
+	if err != nil || reactionList.Count != 1 || len(reactionList.Reactions) != 1 {
+		t.Fatalf("subscriber monoforum reaction list = %+v, %v; want one", reactionList, err)
+	}
+	if _, err := store.ListChannelMessageReactions(ctx, domain.ChannelMessageReactionsListRequest{
+		UserID: 42, ChannelID: monoID, MessageID: otherMessage.Message.ID, Limit: 10,
+	}); !errors.Is(err, domain.ErrMessageIDInvalid) {
+		t.Fatalf("subscriber list another saved_peer reactions err = %v, want ErrMessageIDInvalid", err)
+	}
+	reactionLookup, found, err := store.FindChannelMessageReaction(ctx, domain.ChannelMessageReactionLookupRequest{
+		ViewerUserID: 42, ChannelID: monoID, MessageID: m1.Message.ID, ReactorUserID: 42,
+	})
+	if err != nil || !found || len(reactionLookup.Reactions) != 1 {
+		t.Fatalf("subscriber monoforum reaction lookup = %+v, %v, %v; want one", reactionLookup, found, err)
+	}
+	if _, _, err := store.FindChannelMessageReaction(ctx, domain.ChannelMessageReactionLookupRequest{
+		ViewerUserID: 42, ChannelID: monoID, MessageID: otherMessage.Message.ID, ReactorUserID: 99,
+	}); !errors.Is(err, domain.ErrMessageIDInvalid) {
+		t.Fatalf("subscriber lookup another saved_peer reaction err = %v, want ErrMessageIDInvalid", err)
 	}
 	diff, err := store.ListChannelDifference(ctx, domain.ChannelDifferenceRequest{UserID: 42, ChannelID: monoID, Pts: 0, Limit: 100})
 	if err != nil {

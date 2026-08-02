@@ -10,14 +10,35 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	accountapp "telesrv/internal/app/account"
+	appusers "telesrv/internal/app/users"
 	"telesrv/internal/domain"
 	"telesrv/internal/store/memory"
 )
 
 func TestQuickReplyRPCSaveListAndDeleteMessage(t *testing.T) {
-	const userID int64 = 1000000001
+	const userID int64 = domain.UserIDSequenceBase
 	ctx := WithSessionID(WithAuthKeyID(WithUserID(context.Background(), userID), [8]byte{1}), 77)
 	r, updates := newChatAutomationTestRouter(t)
+	verify := newFakeBotVerifications()
+	r.deps.BotVerifications = verify
+	userStore := memory.NewUserStore()
+	self, err := userStore.Create(context.Background(), domain.User{
+		AccessHash: 7000001,
+		Phone:      "15550007001",
+		FirstName:  "Quick",
+	})
+	if err != nil || self.ID != userID {
+		t.Fatalf("create quick-reply user = %+v err %v, want id %d", self, err, userID)
+	}
+	r.deps.Users = appusers.NewService(userStore)
+	const quickReplyIcon = int64(8800023)
+	quickReplyPeer := domain.Peer{Type: domain.PeerTypeUser, ID: userID}
+	verify.marks[quickReplyPeer] = domain.CustomVerification{
+		VerifierBotID:  777000123,
+		Peer:           quickReplyPeer,
+		IconDocumentID: quickReplyIcon,
+		Description:    "Verified quick-reply peer",
+	}
 
 	got, err := r.onMessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:               &tg.InputPeerSelf{},
@@ -66,6 +87,17 @@ func TestQuickReplyRPCSaveListAndDeleteMessage(t *testing.T) {
 	replies, ok := list.(*tg.MessagesQuickReplies)
 	if !ok || len(replies.QuickReplies) != 1 || len(replies.Messages) != 1 {
 		t.Fatalf("quick replies = %#v", list)
+	}
+
+	quickReplyMessages, err := r.onMessagesGetQuickReplyMessages(ctx, &tg.MessagesGetQuickReplyMessagesRequest{
+		ShortcutID: shortcutID,
+	})
+	if err != nil {
+		t.Fatalf("onMessagesGetQuickReplyMessages: %v", err)
+	}
+	assertMessagesEnvelopeBotVerificationIcon(t, quickReplyMessages, quickReplyPeer, quickReplyIcon)
+	if verify.batchCalls != 0 || verify.peerCalls != 1 {
+		t.Fatalf("quick-reply verification reads = batch %d peer %d, want 0/1 for one peer", verify.batchCalls, verify.peerCalls)
 	}
 
 	deleted, err := r.onMessagesDeleteQuickReplyMessages(ctx, &tg.MessagesDeleteQuickReplyMessagesRequest{

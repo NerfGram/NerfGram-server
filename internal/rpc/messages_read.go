@@ -130,7 +130,7 @@ func (r *Router) onMessagesGetUnreadMentions(ctx context.Context, req *tg.Messag
 		Chats:    r.chatsForInputPeer(ctx, userID, req.Peer),
 		Users:    []tg.UserClass{},
 	}
-	r.applyStoryMaxIDsToMessages(ctx, userID, out)
+	r.applyPeerReadModelsToMessages(ctx, userID, out)
 	return out, nil
 }
 

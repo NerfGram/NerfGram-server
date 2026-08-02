@@ -25,11 +25,12 @@ import (
 
 // runServerExchange is a gotd server exchange compatibility shim.
 //
-// DrKLO Android marks media temporary auth-key exchange with a negative DC in
-// p_q_inner_data_temp_dc (for example DC 2 -> -2). gotd v0.158.0 validates this
-// field by exact equality and rejects that legitimate media-temp path. Keep the
-// permanent-key check strict, but allow temp-key DC values whose absolute value
-// matches this server DC.
+// In the default single-backend mode, p_q_inner_data_dc and
+// p_q_inner_data_temp_dc carry client routing labels only: every int32 value is
+// admitted and the label is not persisted or used for key/session identity.
+// This also covers DrKLO Android's negative media-temp labels. StrictDC retains
+// exact permanent / absolute-value temporary validation as an explicit,
+// default-off diagnostic for a future real multi-DC deployment.
 func (s *Server) runServerExchange(ctx context.Context, conn transport.Conn) (exchange.ServerExchangeResult, error) {
 	ex := serverExchangeCompat{
 		conn:      conn,
@@ -348,14 +349,7 @@ func (s serverExchangeCompat) validatePQInnerDataDC(d mt.PQInnerDataClass) error
 	case *mt.PQInnerDataDC:
 		if innerDataDC.DC != s.dc {
 			if !s.strictDC {
-				// Lenient by default (Options.StrictDC doc has the full
-				// rationale): telesrv is a single physical backend, and the
-				// FromGram client forks deliberately alias dc_id 1..5 to this
-				// one server, so a client-chosen dc_id that isn't our
-				// configured DC is expected, not an error. dc_id plays no
-				// role in key derivation, so accepting it doesn't weaken the
-				// exchange.
-				s.log.Debug("Accepted permanent auth key DC mismatch (lenient mode)",
+				s.log.Debug("Accepted permanent auth key DC alias",
 					zap.Int("server_dc", s.dc),
 					zap.Int("client_dc", innerDataDC.DC))
 				return nil
@@ -366,8 +360,8 @@ func (s serverExchangeCompat) validatePQInnerDataDC(d mt.PQInnerDataClass) error
 		if !sameDCByAbs(innerDataDC.DC, s.dc) && s.strictDC {
 			return wrongDCError(s.dc, innerDataDC.DC)
 		}
-		if innerDataDC.DC < 0 {
-			s.log.Warn("Accepted Android media temp auth key negative DC",
+		if !sameDCByAbs(innerDataDC.DC, s.dc) {
+			s.log.Debug("Accepted temporary auth key DC alias",
 				zap.Int("server_dc", s.dc),
 				zap.Int("client_dc", innerDataDC.DC),
 				zap.Int("expires_in", innerDataDC.ExpiresIn))
@@ -440,12 +434,46 @@ func (s serverExchangeCompat) readUnencrypted(ctx context.Context, b *bin.Buffer
 	if err := msg.Decode(b); err != nil {
 		return err
 	}
-	if !validClientMessageIDBits(msg.MessageID) {
+	if !validUnencryptedHandshakeMessageID(msg.MessageID, msg.MessageData) {
 		return gofaster.New("bad msg type")
 	}
 	b.ResetTo(msg.MessageData)
 
 	return data.Decode(b)
+}
+
+// validUnencryptedHandshakeMessageID preserves the normal client message-id
+// rules while admitting the two sentinel ids emitted by official TDLib:
+//
+//   - PingConnectionReqPQ sends req_pq_multi with message_id=1.
+//   - HandshakeConnection sends every auth-key exchange request with message_id=0.
+//
+// The exception is deliberately constructor-scoped and is only called after an
+// auth_key_id=0 envelope has been decoded. Encrypted traffic continues through
+// validClientMessageIDBits and the full inbound preflight without this carve-out.
+func validUnencryptedHandshakeMessageID(messageID int64, messageData []byte) bool {
+	if validClientMessageIDBits(messageID) {
+		return true
+	}
+
+	payload := &bin.Buffer{Buf: messageData}
+	typeID, err := payload.PeekID()
+	if err != nil {
+		return false
+	}
+
+	switch messageID {
+	case 1:
+		return typeID == mt.ReqPqMultiRequestTypeID
+	case 0:
+		switch typeID {
+		case mt.ReqPqMultiRequestTypeID,
+			mt.ReqDHParamsRequestTypeID,
+			mt.SetClientDHParamsRequestTypeID:
+			return true
+		}
+	}
+	return false
 }
 
 type compatReqPQ struct {

@@ -207,6 +207,45 @@ func TestReadModelChangeListenerInvalidatesPrivateMediaCountCache(t *testing.T) 
 	}
 }
 
+func TestReadModelChangeListenerInvalidatesAccountSettingsCache(t *testing.T) {
+	settings := &fakeAccountSettingsReadModelCache{}
+	listener := NewReadModelChangeListener("", ReadModelCacheSet{
+		AccountSettings: settings,
+	}, nil)
+
+	listener.handlePayload(`{"model":"account_settings","owner_user_id":100,"peer_type":"user","peer_id":100,"version":2}`)
+	if len(settings.invalidated) != 1 || settings.invalidated[0] != 100 {
+		t.Fatalf("account_settings invalidations = %v, want [100]", settings.invalidated)
+	}
+	if len(settings.warmed) != 1 || settings.warmed[0] != 100 {
+		t.Fatalf("account_settings warmups = %v, want [100]", settings.warmed)
+	}
+
+	listener.flush("test")
+	if settings.flushes != 1 {
+		t.Fatalf("account_settings flushes = %d, want 1", settings.flushes)
+	}
+}
+
+type fakeAccountSettingsReadModelCache struct {
+	invalidated []int64
+	warmed      []int64
+	flushes     int
+}
+
+func (f *fakeAccountSettingsReadModelCache) InvalidateAccountSettingsReadModel(userID int64) {
+	f.invalidated = append(f.invalidated, userID)
+}
+
+func (f *fakeAccountSettingsReadModelCache) FlushAccountSettingsReadModel() {
+	f.flushes++
+}
+
+func (f *fakeAccountSettingsReadModelCache) WarmAccountSettingsReadModel(_ context.Context, userID int64) error {
+	f.warmed = append(f.warmed, userID)
+	return nil
+}
+
 // TestReadModelChangeListenerBotFullFlushesChannelFullBots 回归: bot 改资料(bot_full 事件,
 // 迁移 0013)须 flush channelFullBotInfoCache(否则群信息页 bot 简介/命令跨实例陈旧至 TTL);
 // 普通用户的 user_base 事件不得 flush(否则该缓存形同虚设)。
@@ -419,6 +458,7 @@ func (f *fakeDialogReadModelCache) flushCount() int {
 type fakePrivacyReadModelCache struct {
 	mu      sync.Mutex
 	ids     []int64
+	warmed  []int64
 	flushes int
 }
 
@@ -426,6 +466,13 @@ func (f *fakePrivacyReadModelCache) InvalidateOwners(ids ...int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ids = append(f.ids, ids...)
+}
+
+func (f *fakePrivacyReadModelCache) WarmOwners(_ context.Context, ids ...int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.warmed = append(f.warmed, ids...)
+	return nil
 }
 
 func (f *fakePrivacyReadModelCache) FlushReadModelCache() {
@@ -438,6 +485,12 @@ func (f *fakePrivacyReadModelCache) idsSnapshot() []int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]int64(nil), f.ids...)
+}
+
+func (f *fakePrivacyReadModelCache) warmedSnapshot() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.warmed...)
 }
 
 func (f *fakePrivacyReadModelCache) flushCount() int {
@@ -508,6 +561,9 @@ func TestReadModelChangeListenerInvalidatesAccountCaches(t *testing.T) {
 	listener.handlePayload(`{"model":"privacy_rules","owner_user_id":21,"peer_type":"user","peer_id":21,"version":4}`)
 	if len(privacy.ids) != 1 || privacy.ids[0] != 21 {
 		t.Fatalf("privacy invalidations = %v, want [21]", privacy.ids)
+	}
+	if warmed := privacy.warmedSnapshot(); len(warmed) != 1 || warmed[0] != 21 {
+		t.Fatalf("privacy warms = %v, want [21]", warmed)
 	}
 
 	listener.handlePayload(`{"model":"dialog_light","owner_user_id":22,"peer_type":"user","peer_id":32,"version":4}`)

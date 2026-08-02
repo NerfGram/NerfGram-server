@@ -203,7 +203,7 @@ func (h *saturatedSlotWaveRPC) Dispatch(context.Context, [8]byte, int64, *bin.Bu
 
 func (*saturatedSlotWaveRPC) NegotiatedLayer([8]byte, int64) (int, bool) { return 227, true }
 
-func TestPublishRPCResultSaturatedBudgetRetainsExactResultsAcrossSlotWaves(t *testing.T) {
+func TestPublishRPCResultSaturatedBudgetLeavesExecutionTombstonesAcrossSlotWaves(t *testing.T) {
 	slotCount := cap(outboundEncodeSlots)
 	requestCount := slotCount*2 + 1
 	gate := &saturatedSlotWaveGate{
@@ -214,7 +214,7 @@ func TestPublishRPCResultSaturatedBudgetRetainsExactResultsAcrossSlotWaves(t *te
 	handler := &saturatedSlotWaveRPC{gate: gate}
 	s := New(Options{legacyRPC: handler})
 	now := time.Unix(1_700_000_000, 0)
-	s.rpcResults = newRPCResultCacheWithFlightLimit(func() time.Time { return now }, requestCount+1)
+	s.rpcResults = newRPCExecutionLedgerForServerTest(s, func() time.Time { return now }, requestCount+1)
 
 	const primaryMax = 1 << 20
 	primary := newOutboundTrackedBudget(primaryMax)
@@ -302,7 +302,6 @@ func TestPublishRPCResultSaturatedBudgetRetainsExactResultsAcrossSlotWaves(t *te
 		t.Fatalf("primary budget changed under saturation = %d, want %d", got, primaryMax)
 	}
 
-	var completedBytes int64
 	for i, c := range conns {
 		if !errors.Is(errs[i], ErrOutboundTrackedBudget) {
 			t.Fatalf("publish request %d error = %v, want terminal budget saturation", i, errs[i])
@@ -311,49 +310,31 @@ func TestPublishRPCResultSaturatedBudgetRetainsExactResultsAcrossSlotWaves(t *te
 			t.Fatalf("request %d connection was not explicitly fenced", i)
 		}
 		if !owners[i].handedOff.Load() {
-			t.Fatalf("request %d owner was not handed to completed cache", i)
+			t.Fatalf("request %d owner was not handed to execution ledger", i)
 		}
-		cached, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgIDs[i])
-		if !ok || cached == nil {
-			t.Fatalf("request %d exact result missing from completed cache", i)
+		if cached, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, reqMsgIDs[i]); ok || cached != nil {
+			t.Fatalf("request %d retained a payload despite outbox saturation", i)
 		}
-		completedBytes += int64(len(cached.body))
-		var envelope proto.Result
-		if err := envelope.Decode(&bin.Buffer{Buf: cached.body}); err != nil {
-			t.Fatalf("decode request %d cached rpc_result: %v", i, err)
-		}
-		if envelope.RequestMessageID != reqMsgIDs[i] {
-			t.Fatalf("request %d cached req_msg_id = %d, want %d", i, envelope.RequestMessageID, reqMsgIDs[i])
-		}
-		var result tg.DataJSON
-		if err := result.Decode(&bin.Buffer{Buf: envelope.Result}); err != nil {
-			t.Fatalf("decode request %d exact business result (possibly INTERNAL): %v", i, err)
-		}
-		if result.Data != saturatedSlotWaveResultData {
-			t.Fatalf("request %d cached result = %q, want %q", i, result.Data, saturatedSlotWaveResultData)
-		}
-		retry, err := s.rpcResults.Acquire(c.authKeyID, c.sessionID, reqMsgIDs[i])
-		if err != nil || retry.state != rpcResultAcquireCompleted || retry.encoded != cached {
-			t.Fatalf("retry request %d = %+v err=%v, want exact completed result", i, retry, err)
+		if _, err := s.rpcResults.Acquire(c.authKeyID, c.sessionID, reqMsgIDs[i]); !errors.Is(err, ErrRPCResultFlightCapacity) {
+			t.Fatalf("retry request %d err=%v, want execution tombstone capacity", i, err)
 		}
 	}
 	if got := handler.calls.Load(); got != int32(requestCount) {
 		t.Fatalf("business executions after retries = %d, want unchanged %d", got, requestCount)
 	}
-	if got := s.rpcResults.completedBytes.snapshot(); got != completedBytes {
-		t.Fatalf("completed-cache charge = %d, want exact retained bytes %d", got, completedBytes)
+	if got := s.rpcResults.receiptBudgetBytes(); got != int64(requestCount*rpcExecutionReceiptBudgetBytes) {
+		t.Fatalf("receipt budget = %d, want %d fixed metadata bytes", got, requestCount*rpcExecutionReceiptBudgetBytes)
 	}
 
-	// Expiry is the completed cache's ownership release point. Force it
-	// deterministically and prove every retained byte is returned exactly once.
-	now = now.Add(rpcResultCacheTTL + time.Second)
+	// Expiry releases only execution receipts; no result body was retained.
+	now = now.Add(rpcExecutionReceiptTTL + time.Second)
 	for i, c := range conns {
-		if _, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgIDs[i]); ok {
-			t.Fatalf("request %d remained cached after forced expiry", i)
+		if _, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, reqMsgIDs[i]); ok {
+			t.Fatalf("request %d remained replayable after forced expiry", i)
 		}
 	}
-	if got := s.rpcResults.completedBytes.snapshot(); got != 0 {
-		t.Fatalf("completed-cache bytes after expiry = %d, want 0", got)
+	if got := s.rpcResults.receiptBudgetBytes(); got != 0 {
+		t.Fatalf("receipt budget after expiry = %d, want 0", got)
 	}
 	primary.release(primaryMax)
 	if got := primary.snapshot(); got != 0 {
@@ -398,7 +379,7 @@ func TestCachedReplayRestoreIsSynchronousAndIndependentOfGlobalHookExecutor(t *t
 	})
 
 	var restored atomic.Bool
-	if err := s.sendCachedRPCResultWithHook(context.Background(), c, encoded, func() error {
+	if err := s.sendReplayedRPCResultWithHook(context.Background(), c, encoded, func() error {
 		if got := len(transport.snapshot()); got != 1 {
 			return errors.New("replay restore ran before physical write")
 		}
@@ -672,7 +653,7 @@ func TestWrappedConvergenceMethodDrivesEgressAndReplayPriority(t *testing.T) {
 	var cached *encodedOutboundMessage
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if got, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgID); ok {
+		if got, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, reqMsgID); ok {
 			cached = got
 			break
 		}
@@ -725,7 +706,7 @@ func TestRPCWorkerReleasesAfterEgressAdmissionWhileWriteBlocked(t *testing.T) {
 	tr.once.Do(func() { close(tr.release) })
 	deadline := time.Now().Add(time.Second)
 	for {
-		if _, ok := s.rpcResults.Get(c.authKeyID, c.sessionID, reqMsgID); ok {
+		if _, ok := s.rpcResults.Replay(c.authKeyID, c.sessionID, reqMsgID); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -754,7 +735,7 @@ func TestDeliveryHookRunsOnceAfterReplayNotFailedWrite(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	var cached *encodedOutboundMessage
 	for time.Now().Before(deadline) {
-		if got, ok := s.rpcResults.Get(oldConn.authKeyID, oldConn.sessionID, reqMsgID); ok {
+		if got, ok := s.rpcResults.Replay(oldConn.authKeyID, oldConn.sessionID, reqMsgID); ok {
 			cached = got
 			break
 		}
@@ -772,7 +753,7 @@ func TestDeliveryHookRunsOnceAfterReplayNotFailedWrite(t *testing.T) {
 
 	replayTransport := &failAfterTransport{}
 	replayConn := newOutboundTestConn(t, replayTransport, newOutboundTrackedBudget(1<<20))
-	if err := s.sendCachedRPCResult(context.Background(), replayConn, cached); err != nil {
+	if err := s.sendReplayedRPCResult(context.Background(), replayConn, cached); err != nil {
 		t.Fatalf("replay result: %v", err)
 	}
 	deadline = time.Now().Add(time.Second)
@@ -789,7 +770,7 @@ func TestDeliveryHookRunsOnceAfterReplayNotFailedWrite(t *testing.T) {
 		cached.delivery.coordinator.hookState() != rpcResultDeliveryHookDone {
 		t.Fatal("successful replay did not complete shared delivery coordinator")
 	}
-	if err := s.sendCachedRPCResult(context.Background(), replayConn, cached); err != nil {
+	if err := s.sendReplayedRPCResult(context.Background(), replayConn, cached); err != nil {
 		t.Fatalf("second replay: %v", err)
 	}
 	time.Sleep(20 * time.Millisecond)

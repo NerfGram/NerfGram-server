@@ -301,7 +301,7 @@ func (r *Router) onMessagesGetUnreadReactions(ctx context.Context, req *tg.Messa
 				out.Messages = append(out.Messages, item)
 			}
 		}
-		r.applyStoryMaxIDsToMessages(ctx, userID, out)
+		r.applyPeerReadModelsToMessages(ctx, userID, out)
 		return out, nil
 	}
 	out := &tg.MessagesMessages{
@@ -310,7 +310,7 @@ func (r *Router) onMessagesGetUnreadReactions(ctx context.Context, req *tg.Messa
 		Chats:    r.chatsForInputPeer(ctx, userID, req.Peer),
 		Users:    []tg.UserClass{},
 	}
-	r.applyStoryMaxIDsToMessages(ctx, userID, out)
+	r.applyPeerReadModelsToMessages(ctx, userID, out)
 	return out, nil
 }
 

@@ -22,8 +22,8 @@ const maxCloseFriendsCount = 5000
 
 type phonePrivacyService interface {
 	userprojection.PrivacyEvaluator
+	userprojection.BatchPrivacyEvaluator
 	AddAllowUser(ctx context.Context, ownerUserID int64, key domain.PrivacyKey, targetUserID int64) (domain.PrivacyRules, bool, error)
-	CanSeeBatch(ctx context.Context, ownerUserIDs []int64, viewerUserID int64, keys []domain.PrivacyKey) (map[int64]map[domain.PrivacyKey]bool, error)
 }
 
 // Service 提供通讯录查询。
@@ -32,6 +32,7 @@ type Service struct {
 	users     store.UserStore
 	photos    userprojection.ProfilePhotoProvider
 	privacy   phonePrivacyService
+	freezes   userprojection.AccountFreezeProvider
 	projector *userprojection.Projector
 	versions  store.ReadModelVersionStore
 	cache     *contactListReadModelCache
@@ -48,6 +49,10 @@ func WithPhotoProvider(p userprojection.ProfilePhotoProvider) Option {
 // WithPrivacyEvaluator enables viewer-specific privacy projection.
 func WithPrivacyEvaluator(p phonePrivacyService) Option {
 	return func(s *Service) { s.privacy = p }
+}
+
+func WithAccountFreezeProvider(p userprojection.AccountFreezeProvider) Option {
+	return func(s *Service) { s.freezes = p }
 }
 
 // WithReadModelVersions enables durable hash-token fast paths for NotModified RPCs.
@@ -85,6 +90,7 @@ func (s *Service) rebuildProjector() {
 		userprojection.WithContactStore(s.contacts),
 		userprojection.WithPhotoProvider(s.photos),
 		userprojection.WithPrivacyEvaluator(s.privacy),
+		userprojection.WithAccountFreezeProvider(s.freezes),
 	)
 }
 
@@ -118,18 +124,16 @@ func (s *Service) AddContact(ctx context.Context, userID int64, input domain.Con
 		return domain.Contact{}, ErrContactNameEmpty
 	}
 	// Android 的 contacts.addContact 会提交带 "+" 前缀的号码（TDesktop 传纯数字或空），
-	// 归一成纯数字；无数字时落空串，走下方 target.Phone 回填。
+	// 归一成纯数字。空串表示客户端只按 user id 添加联系人，必须原样保留；
+	// TL 明确允许省略号码，服务端不得从 target 全局资料反向补出隐私号码。
 	input.Phone = digitsOnly(input.Phone)
 	if s.users != nil {
-		target, found, err := s.users.ByID(ctx, input.ContactUserID)
+		_, found, err := s.users.ByID(ctx, input.ContactUserID)
 		if err != nil {
 			return domain.Contact{}, err
 		}
 		if !found {
 			return domain.Contact{}, ErrContactIDInvalid
-		}
-		if input.Phone == "" {
-			input.Phone = target.Phone
 		}
 	}
 	contact, err := s.contacts.Upsert(ctx, userID, input)
@@ -145,7 +149,9 @@ func (s *Service) AddContact(ctx context.Context, userID int64, input domain.Con
 	return s.projectContact(ctx, userID, contact)
 }
 
-// AcceptContact shares the current user's phone/profile with an existing one-way contact.
+// AcceptContact creates the reciprocal contact for an existing one-way contact.
+// Phone visibility remains governed exclusively by account privacy rules; this
+// RPC has no protocol flag authorizing a hidden phone-number exception.
 func (s *Service) AcceptContact(ctx context.Context, userID, contactUserID int64) (domain.Contact, error) {
 	if s == nil || s.contacts == nil || s.users == nil || userID == 0 || contactUserID == 0 || contactUserID == userID {
 		return domain.Contact{}, ErrContactIDInvalid
@@ -184,11 +190,6 @@ func (s *Service) AcceptContact(ctx context.Context, userID, contactUserID int64
 		return domain.Contact{}, err
 	}
 	s.InvalidateViewers(userID, contactUserID)
-	if s.privacy != nil {
-		if _, _, err := s.privacy.AddAllowUser(ctx, userID, domain.PrivacyKeyPhoneNumber, contactUserID); err != nil {
-			return domain.Contact{}, err
-		}
-	}
 	contact, found, err := s.contacts.Get(ctx, userID, target.ID)
 	if err != nil {
 		return domain.Contact{}, err
@@ -230,36 +231,29 @@ func (s *Service) ImportContacts(ctx context.Context, userID int64, inputs []dom
 	if err != nil {
 		return domain.ImportContactsResult{}, err
 	}
-	// Enforce "who can find me by phone number" (PrivacyKeyAddedByPhone) so a
-	// bulk import can't be used to mass-discover which arbitrary phone
-	// numbers are registered on the server. Without this check, ImportContacts
-	// is a full phone-number oracle: any authenticated account (trivial to
-	// create) could brute-force a whole number range and harvest every
-	// registered phone number, bypassing privacy settings entirely.
 	if s.privacy != nil && len(targets) > 0 {
 		targetIDs := make([]int64, 0, len(targets))
 		for _, target := range targets {
-			targetIDs = append(targetIDs, target.ID)
+			if target.ID != 0 && target.ID != userID {
+				targetIDs = append(targetIDs, target.ID)
+			}
 		}
-		visibility, err := s.privacy.CanSeeBatch(ctx, targetIDs, userID, []domain.PrivacyKey{domain.PrivacyKeyAddedByPhone})
+		visibility, err := s.privacy.CanSeeBatch(
+			ctx,
+			targetIDs,
+			userID,
+			[]domain.PrivacyKey{domain.PrivacyKeyAddedByPhone},
+		)
 		if err != nil {
 			return domain.ImportContactsResult{}, err
 		}
-		filtered := make([]domain.User, 0, len(targets))
+		allowed := targets[:0]
 		for _, target := range targets {
-			// Existing contacts remain discoverable regardless of the
-			// AddedByPhone setting — you already know this person.
-			if s.contacts != nil {
-				if _, found, err := s.contacts.Get(ctx, userID, target.ID); err == nil && found {
-					filtered = append(filtered, target)
-					continue
-				}
-			}
-			if keys, ok := visibility[target.ID]; ok && keys[domain.PrivacyKeyAddedByPhone] {
-				filtered = append(filtered, target)
+			if visibility[target.ID][domain.PrivacyKeyAddedByPhone] {
+				allowed = append(allowed, target)
 			}
 		}
-		targets = filtered
+		targets = allowed
 	}
 	byPhone := make(map[string]domain.User, len(targets))
 	for _, target := range targets {
@@ -336,9 +330,51 @@ func (s *Service) Search(ctx context.Context, userID int64, query string, limit 
 	if limit <= 0 || limit > maxSearchLimit {
 		limit = maxSearchLimit
 	}
-	res, err := s.users.Search(ctx, userID, query, normalizePhone(query), limit)
+	phoneQuery := ""
+	if isPhoneSearchQuery(query) {
+		phoneQuery = normalizePhone(query)
+	}
+	res, err := s.users.Search(ctx, userID, query, phoneQuery, limit)
 	if err != nil {
 		return domain.UserSearchResult{}, err
+	}
+	if s.privacy != nil && phoneQuery != "" && len(res.MyResults)+len(res.Results) > 0 {
+		targetIDs := make([]int64, 0, len(res.MyResults)+len(res.Results))
+		for _, target := range res.MyResults {
+			if target.ID != 0 && target.ID != userID {
+				targetIDs = append(targetIDs, target.ID)
+			}
+		}
+		for _, target := range res.Results {
+			if target.ID != 0 && target.ID != userID {
+				targetIDs = append(targetIDs, target.ID)
+			}
+		}
+		visibility, err := s.privacy.CanSeeBatch(
+			ctx,
+			targetIDs,
+			userID,
+			[]domain.PrivacyKey{domain.PrivacyKeyAddedByPhone},
+		)
+		if err != nil {
+			return domain.UserSearchResult{}, err
+		}
+		knownContacts := map[int64]domain.Contact{}
+		if s.contacts != nil && len(targetIDs) > 0 {
+			knownContacts, err = s.contacts.GetMany(ctx, userID, targetIDs)
+			if err != nil {
+				return domain.UserSearchResult{}, err
+			}
+		}
+		allowed := func(target domain.User) bool {
+			if visibility[target.ID][domain.PrivacyKeyAddedByPhone] {
+				return true
+			}
+			contact, found := knownContacts[target.ID]
+			return found && contact.Phone != "" && strings.HasPrefix(contact.Phone, phoneQuery)
+		}
+		res.MyResults = filterSearchUsers(res.MyResults, allowed)
+		res.Results = filterSearchUsers(res.Results, allowed)
 	}
 	return s.projectSearchResult(ctx, userID, res)
 }
@@ -478,11 +514,14 @@ func (s *Service) peerCanSeeCurrentUserPhone(ctx context.Context, ownerUserID, v
 	if s.contacts == nil {
 		return false, nil
 	}
-	_, found, err := s.contacts.Get(ctx, viewerUserID, ownerUserID)
+	contact, found, err := s.contacts.Get(ctx, viewerUserID, ownerUserID)
 	if err != nil {
 		return false, err
 	}
-	return found, nil
+	// Merely adding the owner by user id does not mean the viewer knows the
+	// owner's phone. Only a non-empty owner-scoped contact phone can suppress the
+	// "share my phone" prompt when PhoneNumber privacy itself denies visibility.
+	return found && contact.Phone != "", nil
 }
 
 // BlockContact adds peer to the current user's blocklist.
@@ -532,7 +571,22 @@ func (s *Service) GetBlocked(ctx context.Context, userID int64, offset, limit in
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	return s.contacts.ListBlocked(ctx, userID, offset, limit)
+	list, err := s.contacts.ListBlocked(ctx, userID, offset, limit)
+	if err != nil || len(list.Blocked) == 0 || s.projector == nil {
+		return list, err
+	}
+	users := make([]domain.User, len(list.Blocked))
+	for i := range list.Blocked {
+		users[i] = list.Blocked[i].User
+	}
+	projected, err := s.projector.ForViewer(ctx, userID, users)
+	if err != nil {
+		return domain.BlockedContactList{}, err
+	}
+	for i := range list.Blocked {
+		list.Blocked[i].User = projected[i]
+	}
+	return list, nil
 }
 
 func (s *Service) ContactIDs(ctx context.Context, userID int64, hash int64) ([]int, bool, error) {
@@ -614,6 +668,34 @@ func normalizePhone(phone string) string {
 		return digits
 	}
 	return phone
+}
+
+func isPhoneSearchQuery(query string) bool {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return false
+	}
+	hasDigit := false
+	for _, r := range query {
+		switch {
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r == '+', r == ' ', r == '-', r == '(', r == ')':
+		default:
+			return false
+		}
+	}
+	return hasDigit
+}
+
+func filterSearchUsers(users []domain.User, keep func(domain.User) bool) []domain.User {
+	out := users[:0]
+	for _, user := range users {
+		if keep(user) {
+			out = append(out, user)
+		}
+	}
+	return out
 }
 
 func normalizeCloseFriendIDs(userID int64, ids []int64) []int64 {

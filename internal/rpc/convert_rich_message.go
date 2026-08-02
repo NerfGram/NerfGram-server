@@ -10,10 +10,9 @@ import (
 	"telesrv/internal/domain"
 )
 
-// 本文件集中 Layer 227 富文本消息（richMessage）的 tg.* ↔ domain 转换。
-// Phase 1：仅支持 inputRichMessage（blocks 形态）；HTML/Markdown 变体（需服务端解析为
-// PageBlock）尚未实现，直接拒绝。blocks 以 TL 向量序列化为不透明字节存 domain（详见
-// domain.MessageRichMessage）。
+// 本文件集中 Layer 228 富文本消息（richMessage）的 tg.* ↔ domain 转换。
+// inputRichMessage 的 blocks、HTML 与 Markdown 三种输入均在 RPC 边界归一为 PageBlock；
+// blocks 以 TL 向量序列化为不透明字节存 domain（详见 domain.MessageRichMessage）。
 
 // encodeRichBlocks 把 []tg.PageBlockClass 序列化为 TL 向量字节（含 vector 头）。
 func encodeRichBlocks(blocks []tg.PageBlockClass) ([]byte, error) {
@@ -47,6 +46,192 @@ func decodeRichBlocks(data []byte) ([]tg.PageBlockClass, error) {
 			return nil, err
 		}
 		out = append(out, blk)
+	}
+	return out, nil
+}
+
+// richMessageMediaRefs is the media closure referenced by one PageBlock graph.
+// IDs retain first-reference order so every projection is deterministic.
+type richMessageMediaRefs struct {
+	photoIDs    []int64
+	documentIDs []int64
+	photos      map[int64]struct{}
+	documents   map[int64]struct{}
+}
+
+func collectRichMessageMediaRefs(blocks []tg.PageBlockClass) (richMessageMediaRefs, error) {
+	refs := richMessageMediaRefs{
+		photos:    make(map[int64]struct{}),
+		documents: make(map[int64]struct{}),
+	}
+	if err := refs.collectBlocks(blocks); err != nil {
+		return richMessageMediaRefs{}, err
+	}
+	return refs, nil
+}
+
+func (r *richMessageMediaRefs) addPhoto(id int64, required bool) error {
+	if id == 0 {
+		if required {
+			return photoInvalidErr()
+		}
+		return nil
+	}
+	if _, ok := r.photos[id]; ok {
+		return nil
+	}
+	r.photos[id] = struct{}{}
+	r.photoIDs = append(r.photoIDs, id)
+	return nil
+}
+
+func (r *richMessageMediaRefs) addDocument(id int64) error {
+	if id == 0 {
+		return mediaInvalidErr()
+	}
+	if _, ok := r.documents[id]; ok {
+		return nil
+	}
+	r.documents[id] = struct{}{}
+	r.documentIDs = append(r.documentIDs, id)
+	return nil
+}
+
+func (r *richMessageMediaRefs) collectBlocks(blocks []tg.PageBlockClass) error {
+	for _, block := range blocks {
+		switch value := block.(type) {
+		case *tg.PageBlockPhoto:
+			if err := r.addPhoto(value.PhotoID, true); err != nil {
+				return err
+			}
+		case *tg.PageBlockVideo:
+			if err := r.addDocument(value.VideoID); err != nil {
+				return err
+			}
+		case *tg.PageBlockAudio:
+			if err := r.addDocument(value.AudioID); err != nil {
+				return err
+			}
+		case *tg.PageBlockEmbed:
+			if id, ok := value.GetPosterPhotoID(); ok {
+				if err := r.addPhoto(id, false); err != nil {
+					return err
+				}
+			}
+		case *tg.PageBlockEmbedPost:
+			if err := r.addPhoto(value.AuthorPhotoID, false); err != nil {
+				return err
+			}
+			if err := r.collectBlocks(value.Blocks); err != nil {
+				return err
+			}
+		case *tg.PageBlockRelatedArticles:
+			for i := range value.Articles {
+				if id, ok := value.Articles[i].GetPhotoID(); ok {
+					if err := r.addPhoto(id, false); err != nil {
+						return err
+					}
+				}
+			}
+		case *tg.PageBlockList:
+			for _, item := range value.Items {
+				if item, ok := item.(*tg.PageListItemBlocks); ok {
+					if err := r.collectBlocks(item.Blocks); err != nil {
+						return err
+					}
+				}
+			}
+		case *tg.PageBlockOrderedList:
+			for _, item := range value.Items {
+				if item, ok := item.(*tg.PageListOrderedItemBlocks); ok {
+					if err := r.collectBlocks(item.Blocks); err != nil {
+						return err
+					}
+				}
+			}
+		case *tg.PageBlockCover:
+			if err := r.collectBlocks([]tg.PageBlockClass{value.Cover}); err != nil {
+				return err
+			}
+		case *tg.PageBlockCollage:
+			if err := r.collectBlocks(value.Items); err != nil {
+				return err
+			}
+		case *tg.PageBlockSlideshow:
+			if err := r.collectBlocks(value.Items); err != nil {
+				return err
+			}
+		case *tg.PageBlockDetails:
+			if err := r.collectBlocks(value.Blocks); err != nil {
+				return err
+			}
+		case *tg.PageBlockBlockquoteBlocks:
+			if err := r.collectBlocks(value.Blocks); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type richMessagePhotoBatchProvider interface {
+	GetPhotos(context.Context, []int64) ([]domain.Photo, error)
+}
+
+func (r *Router) resolveRichMessagePhotos(ctx context.Context, ids []int64) ([]domain.Photo, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	resolved := make(map[int64]domain.Photo, len(ids))
+	if batch, ok := r.deps.Files.(richMessagePhotoBatchProvider); ok {
+		photos, err := batch.GetPhotos(ctx, ids)
+		if err != nil {
+			return nil, internalErr()
+		}
+		for _, photo := range photos {
+			resolved[photo.ID] = photo
+		}
+	} else {
+		for _, id := range ids {
+			photo, found, err := r.deps.Files.GetPhoto(ctx, id)
+			if err != nil {
+				return nil, internalErr()
+			}
+			if found {
+				resolved[id] = photo
+			}
+		}
+	}
+	out := make([]domain.Photo, 0, len(ids))
+	for _, id := range ids {
+		photo, ok := resolved[id]
+		if !ok || photo.ID != id || len(photo.Sizes) == 0 {
+			return nil, photoInvalidErr()
+		}
+		out = append(out, photo)
+	}
+	return out, nil
+}
+
+func (r *Router) resolveRichMessageDocuments(ctx context.Context, ids []int64) ([]domain.Document, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	documents, err := r.deps.Files.GetDocuments(ctx, ids)
+	if err != nil {
+		return nil, internalErr()
+	}
+	resolved := make(map[int64]domain.Document, len(documents))
+	for _, document := range documents {
+		resolved[document.ID] = document
+	}
+	out := make([]domain.Document, 0, len(ids))
+	for _, id := range ids {
+		document, ok := resolved[id]
+		if !ok || document.ID != id {
+			return nil, mediaInvalidErr()
+		}
+		out = append(out, document)
 	}
 	return out, nil
 }
@@ -127,24 +312,67 @@ func normalizeOrderedListForClients(list *tg.PageBlockOrderedList) {
 }
 
 // domainRichMessageFromInput 把入站 tg.InputRichMessageClass 解析为 domain 快照：
-// 序列化 blocks + 按 id 解析内嵌 photos/documents（复用 sendMedia 同款媒体解析）。
-// 返回 nil 表示无富文本载荷。Phase 1 仅认 *tg.InputRichMessage。
+// HTML/Markdown 先在服务端解析为 PageBlock，再与 blocks 形态共用限额校验、
+// 序列化和 Bot API 输出投影；内嵌 photos/documents 复用 sendMedia 同款媒体解析。
+// 返回 nil 表示无富文本载荷。
 func (r *Router) domainRichMessageFromInput(ctx context.Context, input tg.InputRichMessageClass) (*domain.MessageRichMessage, error) {
 	if input == nil {
 		return nil, nil
 	}
-	in, ok := input.(*tg.InputRichMessage)
-	if !ok {
-		// Phase 1：HTML/Markdown 变体需服务端解析为 PageBlock，尚未支持。
-		return nil, mediaInvalidErr()
+	var (
+		in           *tg.InputRichMessage
+		sourceParsed bool
+	)
+	switch value := input.(type) {
+	case *tg.InputRichMessage:
+		in = value
+	case *tg.InputRichMessageHTML:
+		if value == nil || value.HTML == "" || len(value.Files) != 0 {
+			return nil, richMessageInvalidErr()
+		}
+		blocks, err := parseBotAPIRichHTML(value.HTML)
+		if err != nil {
+			return nil, err
+		}
+		in = &tg.InputRichMessage{Rtl: value.Rtl, Noautolink: value.Noautolink, Blocks: blocks}
+		sourceParsed = true
+	case *tg.InputRichMessageMarkdown:
+		if value == nil || value.Markdown == "" || len(value.Files) != 0 {
+			return nil, richMessageInvalidErr()
+		}
+		blocks, err := parseBotAPIRichMarkdown(value.Markdown)
+		if err != nil {
+			return nil, err
+		}
+		in = &tg.InputRichMessage{Rtl: value.Rtl, Noautolink: value.Noautolink, Blocks: blocks}
+		sourceParsed = true
+	default:
+		return nil, richMessageInvalidErr()
 	}
 	if len(in.Blocks) == 0 {
 		if len(in.Photos) == 0 && len(in.Documents) == 0 {
 			return nil, nil
 		}
-		return nil, mediaInvalidErr()
+		return nil, richMessageInvalidErr()
 	}
-	if (len(in.Photos) > 0 || len(in.Documents) > 0) && r.deps.Files == nil {
+	if err := validateRichMessageBlocks(in.Blocks); err != nil {
+		return nil, err
+	}
+	for _, photo := range in.Photos {
+		if _, ok := inputPhotoID(photo); !ok {
+			return nil, photoInvalidErr()
+		}
+	}
+	for _, document := range in.Documents {
+		if _, ok := inputDocumentID(document); !ok {
+			return nil, mediaInvalidErr()
+		}
+	}
+	refs, err := collectRichMessageMediaRefs(in.Blocks)
+	if err != nil {
+		return nil, err
+	}
+	if (len(refs.photoIDs) > 0 || len(refs.documentIDs) > 0) && r.deps.Files == nil {
 		return nil, notImplementedErr()
 	}
 	normalizeRichBlocksForClients(in.Blocks)
@@ -156,33 +384,20 @@ func (r *Router) domainRichMessageFromInput(ctx context.Context, input tg.InputR
 		Rtl:    in.Rtl,
 		Blocks: blocks,
 	}
-	for _, p := range in.Photos {
-		id, ok := inputPhotoID(p)
-		if !ok {
-			return nil, photoInvalidErr()
-		}
-		photo, found, err := r.deps.Files.GetPhoto(ctx, id)
-		if err != nil {
-			return nil, internalErr()
-		}
-		if !found {
-			return nil, photoInvalidErr()
-		}
-		rich.Photos = append(rich.Photos, photo)
+	projection, projectionErr := botAPIRichMessageProjection(in.Blocks, in.Rtl)
+	if projectionErr != nil && sourceParsed {
+		return nil, richMessageInvalidErr()
 	}
-	for _, d := range in.Documents {
-		id, ok := inputDocumentID(d)
-		if !ok {
-			return nil, mediaInvalidErr()
-		}
-		doc, found, err := r.deps.Files.GetDocument(ctx, id)
-		if err != nil {
-			return nil, internalErr()
-		}
-		if !found {
-			return nil, mediaInvalidErr()
-		}
-		rich.Documents = append(rich.Documents, doc)
+	if projectionErr == nil {
+		rich.BotAPIProjection = projection
+	}
+	rich.Photos, err = r.resolveRichMessagePhotos(ctx, refs.photoIDs)
+	if err != nil {
+		return nil, err
+	}
+	rich.Documents, err = r.resolveRichMessageDocuments(ctx, refs.documentIDs)
+	if err != nil {
+		return nil, err
 	}
 	if rich.IsZero() {
 		return nil, nil

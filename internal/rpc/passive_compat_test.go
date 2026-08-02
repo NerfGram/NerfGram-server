@@ -9,6 +9,8 @@ import (
 	"github.com/iamxvbaba/td/clock"
 	"github.com/iamxvbaba/td/tg"
 	"go.uber.org/zap/zaptest"
+
+	"telesrv/internal/compat/tdesktop"
 )
 
 func TestAccountGetChatThemesReturnsStaticThemes(t *testing.T) {
@@ -106,6 +108,21 @@ func TestAccountWallpaperSeedLookupAndAckRPCs(t *testing.T) {
 		t.Fatalf("getWallPaper id = %d, want %d", oneWallpaper.ID, first.ID)
 	}
 
+	defaultTheme := tdesktop.DefaultThemeList()[0]
+	themeAliasInput := &tg.InputWallPaperSlug{Slug: defaultTheme.Slug}
+	var aliasReq bin.Buffer
+	if err := (&tg.AccountGetWallPaperRequest{Wallpaper: themeAliasInput}).Encode(&aliasReq); err != nil {
+		t.Fatalf("encode getWallPaper theme alias request: %v", err)
+	}
+	aliasGot, err := r.Dispatch(ctx, [8]byte{}, 0, &aliasReq)
+	if err != nil {
+		t.Fatalf("dispatch getWallPaper theme alias: %v", err)
+	}
+	aliasWallpaper, ok := aliasGot.(*tg.WallPaper)
+	if !ok || aliasWallpaper.Slug == defaultTheme.Slug {
+		t.Fatalf("getWallPaper theme alias = %#v, want resolved wallpaper identity", aliasGot)
+	}
+
 	nofileInput := &tg.InputWallPaperNoFile{ID: 930000000000000001}
 	var nofileReq bin.Buffer
 	if err := (&tg.AccountGetWallPaperRequest{Wallpaper: nofileInput}).Encode(&nofileReq); err != nil {
@@ -127,6 +144,7 @@ func TestAccountWallpaperSeedLookupAndAckRPCs(t *testing.T) {
 	if err := (&tg.AccountGetMultiWallPapersRequest{Wallpapers: []tg.InputWallPaperClass{
 		input,
 		&tg.InputWallPaperSlug{Slug: first.Slug},
+		themeAliasInput,
 		nofileInput,
 	}}).Encode(&multiReq); err != nil {
 		t.Fatalf("encode getMultiWallPapers request: %v", err)
@@ -135,16 +153,18 @@ func TestAccountWallpaperSeedLookupAndAckRPCs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch getMultiWallPapers: %v", err)
 	}
-	if vector, ok := dispatchCanonicalValue(multiGot).([]tg.WallPaperClass); !ok || len(vector) != 3 {
-		t.Fatalf("getMultiWallPapers = %T %#v, want 3 wallpapers", multiGot, multiGot)
+	if vector, ok := dispatchCanonicalValue(multiGot).([]tg.WallPaperClass); !ok || len(vector) != 4 {
+		t.Fatalf("getMultiWallPapers = %T %#v, want 4 wallpapers", multiGot, multiGot)
 	}
 
 	for name, request := range map[string]bin.Encoder{
-		"save":           &tg.AccountSaveWallPaperRequest{Wallpaper: input},
-		"install":        &tg.AccountInstallWallPaperRequest{Wallpaper: input},
-		"save_nofile":    &tg.AccountSaveWallPaperRequest{Wallpaper: nofileInput},
-		"install_nofile": &tg.AccountInstallWallPaperRequest{Wallpaper: nofileInput},
-		"reset":          &tg.AccountResetWallPapersRequest{},
+		"save":                &tg.AccountSaveWallPaperRequest{Wallpaper: input},
+		"install":             &tg.AccountInstallWallPaperRequest{Wallpaper: input},
+		"save_theme_alias":    &tg.AccountSaveWallPaperRequest{Wallpaper: themeAliasInput},
+		"install_theme_alias": &tg.AccountInstallWallPaperRequest{Wallpaper: themeAliasInput},
+		"save_nofile":         &tg.AccountSaveWallPaperRequest{Wallpaper: nofileInput},
+		"install_nofile":      &tg.AccountInstallWallPaperRequest{Wallpaper: nofileInput},
+		"reset":               &tg.AccountResetWallPapersRequest{},
 	} {
 		var encoded bin.Buffer
 		if err := request.Encode(&encoded); err != nil {
@@ -165,6 +185,14 @@ func TestAccountWallpaperSeedLookupAndAckRPCs(t *testing.T) {
 	}
 	if _, err := r.Dispatch(ctx, [8]byte{}, 0, &badReq); err == nil || !strings.Contains(err.Error(), "WALLPAPER_INVALID") {
 		t.Fatalf("bad getWallPaper err = %v, want WALLPAPER_INVALID", err)
+	}
+
+	var unknownAliasReq bin.Buffer
+	if err := (&tg.AccountInstallWallPaperRequest{Wallpaper: &tg.InputWallPaperSlug{Slug: "unknown-theme-alias"}}).Encode(&unknownAliasReq); err != nil {
+		t.Fatalf("encode unknown theme alias install request: %v", err)
+	}
+	if _, err := r.Dispatch(ctx, [8]byte{}, 0, &unknownAliasReq); err == nil || !strings.Contains(err.Error(), "WALLPAPER_INVALID") {
+		t.Fatalf("unknown theme alias install err = %v, want WALLPAPER_INVALID", err)
 	}
 }
 

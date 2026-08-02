@@ -442,10 +442,22 @@ func collectibleDocumentAttributes(kind domain.StarGiftCollectibleAttributeKind)
 }
 
 func (s *Service) CollectiblePreview(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error) {
+	return s.collectiblePreview(ctx, giftID, 0)
+}
+
+// CollectiblePreviewSample returns the small randomized working set consumed by official-client
+// upgrade rollers. The complete published pool remains available through CollectiblePreview for
+// payments.getStarGiftUpgradeAttributes and the admin editor.
+func (s *Service) CollectiblePreviewSample(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error) {
+	const attributesPerKind = 3
+	return s.collectiblePreview(ctx, giftID, attributesPerKind)
+}
+
+func (s *Service) collectiblePreview(ctx context.Context, giftID int64, samplePerKind int) (domain.StarGiftUpgradePreview, bool, error) {
 	if s == nil || s.store == nil || giftID <= 0 {
 		return domain.StarGiftUpgradePreview{}, false, nil
 	}
-	revision, ok, err := s.store.ActiveCollectibleRevision(ctx, giftID)
+	revision, ok, err := s.store.ActiveCollectibleProjection(ctx, giftID, samplePerKind)
 	if err != nil || !ok || !revision.Published {
 		return domain.StarGiftUpgradePreview{}, false, err
 	}
@@ -515,6 +527,18 @@ func (s *Service) UpgradeReceipt(ctx context.Context, userID int64, commandKey s
 		return domain.StarGiftUpgradeReceipt{}, false, nil
 	}
 	return s.upgrades.StarGiftUpgradeReceipt(ctx, userID, commandKey)
+}
+
+// GrantUnique atomically assigns a freshly minted collectible to a user.
+func (s *Service) GrantUnique(ctx context.Context, req domain.AdminStarGiftGrant) (domain.AdminStarGiftGrantResult, error) {
+	if s == nil || s.upgrades == nil {
+		return domain.AdminStarGiftGrantResult{}, fmt.Errorf("star gift upgrade store is not configured")
+	}
+	result, err := s.upgrades.GrantUniqueStarGift(ctx, req)
+	if err == nil {
+		s.InvalidateStarGiftCatalog()
+	}
+	return result, err
 }
 
 func (s *Service) Purchase(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error) {
@@ -728,6 +752,25 @@ func (s *Service) SetNotifications(ctx context.Context, userID, channelID int64,
 	return s.lifecycle.SetStarGiftNotifications(ctx, userID, channelID, enabled)
 }
 
+func (s *Service) NotificationsEnabled(ctx context.Context, userID, channelID int64) (bool, error) {
+	if s == nil {
+		return false, domain.ErrStarGiftUnavailable
+	}
+	if s.lifecycle == nil {
+		// Isolated memory/RPC adapters have no settings table; production's
+		// persisted default is enabled, so preserve that wire behavior.
+		return true, nil
+	}
+	return s.lifecycle.StarGiftNotificationsEnabled(ctx, userID, channelID)
+}
+
+func (s *Service) ResolveUserMessageRef(ctx context.Context, viewerUserID int64, msgID int) (domain.SavedStarGiftRef, bool, error) {
+	if s == nil || s.store == nil {
+		return domain.SavedStarGiftRef{}, false, nil
+	}
+	return s.store.ResolveUserMessageRef(ctx, viewerUserID, msgID)
+}
+
 func (s *Service) Withdraw(ctx context.Context, req domain.StarGiftWithdrawalRequest) (domain.StarGiftWithdrawal, error) {
 	if s == nil || s.lifecycle == nil || s.withdrawal == nil {
 		return domain.StarGiftWithdrawal{}, domain.ErrStarGiftWithdrawalUnavailable
@@ -782,17 +825,15 @@ func (s *Service) TonBalance(ctx context.Context, userID int64) (int64, error) {
 	return s.lifecycle.TonBalance(ctx, userID)
 }
 
-func (s *Service) TonTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.TonTransactionPage, error) {
+func (s *Service) TonTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error) {
 	if s == nil || s.lifecycle == nil {
 		return domain.TonTransactionPage{}, nil
 	}
-	if len(offset) > domain.MaxStarsTransactionsOffsetBytes {
-		offset = ""
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.TonTransactionPage{}, err
 	}
-	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
-		limit = domain.MaxStarsTransactionsLimit
-	}
-	return s.lifecycle.TonTransactions(ctx, userID, offset, limit)
+	return s.lifecycle.TonTransactions(ctx, userID, query)
 }
 
 func (s *Service) ChannelStarsBalance(ctx context.Context, channelID int64) (int64, error) {
@@ -802,17 +843,15 @@ func (s *Service) ChannelStarsBalance(ctx context.Context, channelID int64) (int
 	return s.lifecycle.ChannelStarsBalance(ctx, channelID)
 }
 
-func (s *Service) ChannelStarsTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.StarsTransactionPage, error) {
+func (s *Service) ChannelStarsTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error) {
 	if s == nil || s.lifecycle == nil {
 		return domain.StarsTransactionPage{}, nil
 	}
-	if len(offset) > domain.MaxStarsTransactionsOffsetBytes {
-		offset = ""
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.StarsTransactionPage{}, err
 	}
-	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
-		limit = domain.MaxStarsTransactionsLimit
-	}
-	return s.lifecycle.ChannelStarsTransactions(ctx, channelID, offset, limit)
+	return s.lifecycle.ChannelStarsTransactions(ctx, channelID, query)
 }
 
 func (s *Service) ChannelTonBalance(ctx context.Context, channelID int64) (int64, error) {
@@ -822,17 +861,15 @@ func (s *Service) ChannelTonBalance(ctx context.Context, channelID int64) (int64
 	return s.lifecycle.ChannelTonBalance(ctx, channelID)
 }
 
-func (s *Service) ChannelTonTransactions(ctx context.Context, channelID int64, offset string, limit int) (domain.TonTransactionPage, error) {
+func (s *Service) ChannelTonTransactions(ctx context.Context, channelID int64, query domain.StarsTransactionQuery) (domain.TonTransactionPage, error) {
 	if s == nil || s.lifecycle == nil {
 		return domain.TonTransactionPage{}, nil
 	}
-	if len(offset) > domain.MaxStarsTransactionsOffsetBytes {
-		offset = ""
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.TonTransactionPage{}, err
 	}
-	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
-		limit = domain.MaxStarsTransactionsLimit
-	}
-	return s.lifecycle.ChannelTonTransactions(ctx, channelID, offset, limit)
+	return s.lifecycle.ChannelTonTransactions(ctx, channelID, query)
 }
 
 func (s *Service) SweepLifecycle(ctx context.Context, now, limit int) error {
@@ -868,9 +905,11 @@ func (s *Service) SetPinned(ctx context.Context, owner domain.Peer, savedGiftIDs
 
 func (s *Service) RecordSavedGift(ctx context.Context, gift domain.SavedStarGift) (int64, error) {
 	if gift.UniqueGiftID == 0 && gift.PrepaidUpgradeStars == 0 && gift.PrepaidUpgradeHash == "" && s.store != nil {
-		if revision, ok, err := s.store.ActiveCollectibleRevision(ctx, gift.GiftID); err != nil {
+		availability, err := s.store.CollectibleAvailability(ctx, []int64{gift.GiftID})
+		if err != nil {
 			return 0, err
-		} else if ok && revision.Published && revision.Issued < revision.SupplyTotal {
+		}
+		if current, ok := availability[gift.GiftID]; ok && current.Issued < current.SupplyTotal {
 			var token [32]byte
 			if _, err := rand.Read(token[:]); err != nil {
 				return 0, fmt.Errorf("generate prepaid star gift upgrade hash: %w", err)

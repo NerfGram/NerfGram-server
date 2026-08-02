@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
@@ -12,6 +13,8 @@ import (
 )
 
 const readModelChangeNotifyChannel = "telesrv_read_model_changed"
+
+const privacyReadModelWarmTimeout = 5 * time.Second
 
 // ReadModelCacheSet 是 read_model_versions 通知可失效的进程内投影缓存集合。
 // 后续新增 read model 时，把缓存接到这里即可复用同一条 LISTEN 连接。
@@ -34,11 +37,21 @@ type ReadModelCacheSet struct {
 	BaseUsers          BaseUserCache
 	BotProfiles        BotProfileReadModelCache
 	StarGifts          StarGiftCatalogCache
+	AccountSettings    AccountSettingsReadModelCache
 }
 
 type StarGiftCatalogCache interface {
 	InvalidateStarGiftCatalog()
 	FlushStarGiftCatalog()
+}
+
+type AccountSettingsReadModelCache interface {
+	InvalidateAccountSettingsReadModel(userID int64)
+	FlushAccountSettingsReadModel()
+}
+
+type AccountSettingsReadModelWarmer interface {
+	WarmAccountSettingsReadModel(context.Context, int64) error
 }
 
 // BaseUserCache 是跨进程共享的 user:base 缓存(Redis)。user_base read-model 事件必须删除
@@ -88,6 +101,23 @@ func (c ContactReadModelCaches) FlushReadModelCache() {
 type PrivacyReadModelCache interface {
 	InvalidateOwners(...int64)
 	FlushReadModelCache()
+}
+
+// PrivacyReadModelWarmer lets the low-frequency change stream rebuild owner
+// snapshots after invalidation, so the next user projection does not own a
+// synchronous database miss. It is optional; caches without it remain
+// cache-aside and only receive invalidation.
+type PrivacyReadModelWarmer interface {
+	WarmOwners(context.Context, ...int64) error
+}
+
+type PrivacyViewerFactsReadModelCache interface {
+	InvalidateViewerFacts(...int64)
+}
+
+type PrivacyMembershipReadModelCache interface {
+	InvalidateMembership(channelID, userID int64)
+	InvalidateChannelMemberships(channelID int64)
 }
 
 type ProfilePhotoReadModelCache interface {
@@ -221,7 +251,8 @@ func (l *ReadModelChangeListener) empty() bool {
 		l.caches.RPCProjections == nil &&
 		l.caches.BaseUsers == nil &&
 		l.caches.BotProfiles == nil &&
-		l.caches.StarGifts == nil
+		l.caches.StarGifts == nil &&
+		l.caches.AccountSettings == nil
 }
 
 func (l *ReadModelChangeListener) flush(reasons ...string) {
@@ -298,6 +329,10 @@ func (l *ReadModelChangeListener) flush(reasons ...string) {
 		l.caches.StarGifts.FlushStarGiftCatalog()
 		flushed = append(flushed, "star_gifts")
 	}
+	if l.caches.AccountSettings != nil {
+		l.caches.AccountSettings.FlushAccountSettingsReadModel()
+		flushed = append(flushed, "account_settings")
+	}
 	// 注意：BaseUsers(Redis) 刻意不在重连时 flush——它是跨实例共享缓存，整库清空会误伤
 	// 其它实例；漏掉的通知由其 5min TTL 兜底。
 	l.log.Info("read model caches flushed",
@@ -326,6 +361,19 @@ func (l *ReadModelChangeListener) handlePayload(payload string) {
 		}
 	}
 	switch evt.Model {
+	case "account_settings":
+		if evt.OwnerUserID != 0 && l.caches.AccountSettings != nil {
+			l.caches.AccountSettings.InvalidateAccountSettingsReadModel(evt.OwnerUserID)
+			if warmer, ok := l.caches.AccountSettings.(AccountSettingsReadModelWarmer); ok {
+				ctx, cancel := context.WithTimeout(context.Background(), privacyReadModelWarmTimeout)
+				err := warmer.WarmAccountSettingsReadModel(ctx, evt.OwnerUserID)
+				cancel()
+				if err != nil {
+					l.log.Warn("warm account settings read model after change",
+						zap.Int64("owner_user_id", evt.OwnerUserID), zap.Error(err))
+				}
+			}
+		}
 	case "star_gift_catalog":
 		if l.caches.StarGifts != nil {
 			l.caches.StarGifts.InvalidateStarGiftCatalog()
@@ -346,6 +394,18 @@ func (l *ReadModelChangeListener) handlePayload(payload string) {
 			// bot 写 bump bot_info_version 也走 user_base：跨实例失效 bot 资料缓存。
 			if l.caches.BotProfiles != nil {
 				l.caches.BotProfiles.InvalidateBotProfileReadModel(evt.PeerID)
+			}
+			if cache, ok := l.caches.Privacy.(PrivacyViewerFactsReadModelCache); ok {
+				cache.InvalidateViewerFacts(evt.PeerID)
+			}
+		}
+	case "user_visibility":
+		if evt.PeerType == "user" && evt.PeerID != 0 {
+			if l.caches.RPCProjections != nil {
+				l.caches.RPCProjections.InvalidateRPCProjectionReadModelForUser(evt.PeerID)
+			}
+			if l.caches.Stories != nil {
+				l.caches.Stories.InvalidateStoryReadModelPeer(domain.Peer{Type: domain.PeerTypeUser, ID: evt.PeerID})
 			}
 		}
 	case "bot_full":
@@ -383,6 +443,15 @@ func (l *ReadModelChangeListener) handlePayload(payload string) {
 		if evt.OwnerUserID != 0 && l.caches.RPCProjections != nil {
 			l.caches.RPCProjections.InvalidateRPCProjectionReadModelForUser(evt.OwnerUserID)
 			l.caches.RPCProjections.InvalidateRPCProjectionReadModelForViewer(evt.OwnerUserID)
+		}
+		if warmer, ok := l.caches.Privacy.(PrivacyReadModelWarmer); ok && evt.OwnerUserID != 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), privacyReadModelWarmTimeout)
+			err := warmer.WarmOwners(ctx, evt.OwnerUserID)
+			cancel()
+			if err != nil {
+				l.log.Warn("warm privacy read model after change",
+					zap.Int64("owner_user_id", evt.OwnerUserID), zap.Error(err))
+			}
 		}
 	case "dialog_light":
 		if peerType, ok := readModelPeerType(evt.PeerType); ok && evt.OwnerUserID != 0 && evt.PeerID != 0 {
@@ -428,6 +497,9 @@ func (l *ReadModelChangeListener) handlePayload(payload string) {
 			if l.caches.RPCProjections != nil {
 				l.caches.RPCProjections.InvalidateRPCProjectionReadModelForChannel(evt.PeerID)
 			}
+			if cache, ok := l.caches.Privacy.(PrivacyMembershipReadModelCache); ok {
+				cache.InvalidateChannelMemberships(evt.PeerID)
+			}
 		}
 	case "channel_media_counts":
 		if evt.PeerType == "channel" && evt.PeerID != 0 && l.caches.ChannelMediaCounts != nil {
@@ -457,6 +529,9 @@ func (l *ReadModelChangeListener) handlePayload(payload string) {
 				l.caches.RPCProjections.InvalidateRPCProjectionReadModelForChannel(evt.PeerID)
 				l.caches.RPCProjections.InvalidateRPCProjectionReadModelForPeer(evt.OwnerUserID, domain.Peer{Type: domain.PeerTypeChannel, ID: evt.PeerID})
 				l.caches.RPCProjections.InvalidateRPCProjectionReadModelForUser(evt.OwnerUserID)
+			}
+			if cache, ok := l.caches.Privacy.(PrivacyMembershipReadModelCache); ok {
+				cache.InvalidateMembership(evt.PeerID, evt.OwnerUserID)
 			}
 		}
 	case "channel_self_boosts":

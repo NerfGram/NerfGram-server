@@ -1,7 +1,10 @@
 package rpc
 
 import (
+	"time"
+
 	"github.com/iamxvbaba/td/tg"
+
 	"telesrv/internal/domain"
 )
 
@@ -134,6 +137,8 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 		return nil
 	}
 	switch m.ServiceAction.Kind {
+	case domain.MessageServiceActionHistoryClear:
+		return &tg.MessageActionHistoryClear{}
 	case domain.MessageServiceActionSuggestProfilePhoto:
 		if m.ServiceAction.Photo == nil || m.ServiceAction.Photo.ID == 0 {
 			return &tg.MessageActionEmpty{}
@@ -144,6 +149,25 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 	case domain.MessageServiceActionSetChatTheme:
 		return &tg.MessageActionSetChatTheme{
 			Theme: &tg.ChatTheme{Emoticon: m.ServiceAction.ChatThemeEmoticon},
+		}
+	case domain.MessageServiceActionNoForwardsToggle:
+		action := m.ServiceAction.NoForwards
+		if action == nil {
+			return &tg.MessageActionEmpty{}
+		}
+		return &tg.MessageActionNoForwardsToggle{
+			PrevValue: action.PrevValue,
+			NewValue:  action.NewValue,
+		}
+	case domain.MessageServiceActionNoForwardsRequest:
+		action := m.ServiceAction.NoForwards
+		if action == nil {
+			return &tg.MessageActionEmpty{}
+		}
+		return &tg.MessageActionNoForwardsRequest{
+			Expired:   action.Expired || (action.ExpiresAt > 0 && int(time.Now().Unix()) >= action.ExpiresAt),
+			PrevValue: action.PrevValue,
+			NewValue:  action.NewValue,
 		}
 	case domain.MessageServiceActionPhoneCall:
 		if m.ServiceAction.Call == nil {
@@ -219,7 +243,22 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 			Peers:    tgPeerList(shared.Peers),
 		}
 	case domain.MessageServiceActionStarGift:
-		return tgMessageActionStarGift(m.ServiceAction.StarGift)
+		return tgMessageActionStarGiftForViewer(m.ServiceAction.StarGift, msg.OwnerUserID)
+	case domain.MessageServiceActionGiftStars:
+		action := m.ServiceAction.GiftStars
+		if action == nil || action.Currency == "" || action.Amount <= 0 || action.Stars <= 0 {
+			return &tg.MessageActionEmpty{}
+		}
+		out := &tg.MessageActionGiftStars{
+			Currency: action.Currency,
+			Amount:   action.Amount,
+			Stars:    action.Stars,
+		}
+		// Telegram only exposes the provider transaction id to the receiver.
+		if !msg.Out && action.TransactionID != "" {
+			out.SetTransactionID(action.TransactionID)
+		}
+		return out
 	case domain.MessageServiceActionStarGiftUnique:
 		return tgMessageActionStarGiftUnique(m.ServiceAction.StarGiftUnique)
 	case domain.MessageServiceActionStarGiftOffer:
@@ -269,7 +308,10 @@ func tgMessageActionStarGiftUnique(action *domain.MessageStarGiftUniqueAction) t
 	if action.DropOriginalDetailsStars > 0 {
 		out.SetDropOriginalDetailsStars(action.DropOriginalDetailsStars)
 	}
-	if action.CanCraftAt > 0 {
+	// Channel Craft is not executable yet. Gate on the authoritative gift owner
+	// as a final wire boundary so historical JSON/admin-log actions or a future
+	// constructor cannot accidentally expose Android's Craft entry marker.
+	if action.Gift.Owner.Type == domain.PeerTypeUser && action.CanCraftAt > 0 {
 		out.SetCanCraftAt(action.CanCraftAt)
 	}
 	if action.FromUserID != 0 {
@@ -440,6 +482,9 @@ func tgMessageReactions(viewerUserID int64, in *domain.ChannelMessageReactions) 
 	}
 	if in.CanSeeList {
 		out.SetCanSeeList(true)
+	}
+	if in.AsTags {
+		out.SetReactionsAsTags(true)
 	}
 	for _, item := range in.Results {
 		reaction := tgMessageReaction(item.Reaction)

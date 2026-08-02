@@ -130,6 +130,80 @@ func TestInboundRPCBatchAbortReturnsEveryReservationExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestInboundRPCBatchReservationGrowTransfersBudgetAtomically(t *testing.T) {
+	scheduler := newInboundRPCScheduler(1, 8, 1<<20)
+	c := newInboundTestConn(scheduler, 1, 4, time.Second)
+	defer func() {
+		c.closeInboundRPCScheduler()
+		scheduler.stop(time.Second)
+	}()
+
+	reservation, err := c.reserveInboundRPCBatch(context.Background(), []inboundRPCSpec{
+		{method: "one", size: 3},
+		{method: "two", size: 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.growEntry(0, 11); err != nil {
+		t.Fatal(err)
+	}
+	if tasks, bytes := scheduler.budgetSnapshot(); tasks != 2 || bytes != 16 {
+		t.Fatalf("grown global budget = %d/%d, want 2/16", tasks, bytes)
+	}
+	if got := c.inflightRPCBytes.Load(); got != 16 {
+		t.Fatalf("grown connection budget = %d, want 16", got)
+	}
+	if reservation.entries[0].size != 11 || reservation.totalSize != 16 {
+		t.Fatalf("grown reservation entry/total = %d/%d", reservation.entries[0].size, reservation.totalSize)
+	}
+	reservation.abort()
+	if tasks, bytes := scheduler.budgetSnapshot(); tasks != 0 || bytes != 0 {
+		t.Fatalf("grown reservation abort leaked global budget %d/%d", tasks, bytes)
+	}
+	if got := c.inflightRPCBytes.Load(); got != 0 {
+		t.Fatalf("grown reservation abort leaked connection budget %d", got)
+	}
+}
+
+func TestInboundRPCBatchReservationGrowFailureKeepsOriginalBudget(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		globalMax  int64
+		targetSize int
+	}{
+		{name: "global", globalMax: 5, targetSize: 6},
+		{name: "connection", globalMax: int64(maxInflightRPCBytes) * 2, targetSize: maxInflightRPCBytes + 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			scheduler := newInboundRPCScheduler(1, 8, test.globalMax)
+			c := newInboundTestConn(scheduler, 1, 4, time.Second)
+			defer func() {
+				c.closeInboundRPCScheduler()
+				scheduler.stop(time.Second)
+			}()
+
+			reservation, err := c.reserveInboundRPCBatch(context.Background(), []inboundRPCSpec{{method: "one", size: 3}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := reservation.growEntry(0, test.targetSize); !errors.Is(err, ErrInboundRPCQueueFull) {
+				t.Fatalf("grow error = %v, want ErrInboundRPCQueueFull", err)
+			}
+			if tasks, bytes := scheduler.budgetSnapshot(); tasks != 1 || bytes != 3 {
+				t.Fatalf("failed grow changed global budget %d/%d", tasks, bytes)
+			}
+			if got := c.inflightRPCBytes.Load(); got != 3 {
+				t.Fatalf("failed grow changed connection budget %d", got)
+			}
+			if reservation.entries[0].size != 3 || reservation.totalSize != 3 {
+				t.Fatalf("failed grow changed reservation entry/total = %d/%d", reservation.entries[0].size, reservation.totalSize)
+			}
+			reservation.abort()
+		})
+	}
+}
+
 func TestInboundRPCBatchCommitAppendsAllAndSchedulesAtomically(t *testing.T) {
 	scheduler := newInboundRPCScheduler(1, 8, 1<<20)
 	c := newInboundTestConn(scheduler, 1, 4, time.Second)

@@ -11,6 +11,18 @@ import (
 
 // registerMessages 注册 messages.* RPC handler。
 func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
+	registerRPC[*tg.MessagesRequestURLAuthRequest](d, tlprofile.SemanticMethodMessagesRequestURLAuth, func(ctx context.Context, req *tg.MessagesRequestURLAuthRequest) (any, error) {
+		return r.onMessagesRequestURLAuth(ctx, req)
+	})
+	registerRPC[*tg.MessagesAcceptURLAuthRequest](d, tlprofile.SemanticMethodMessagesAcceptURLAuth, func(ctx context.Context, req *tg.MessagesAcceptURLAuthRequest) (any, error) {
+		return r.onMessagesAcceptURLAuth(ctx, req)
+	})
+	registerRPC[*tg.MessagesDeclineURLAuthRequest](d, tlprofile.SemanticMethodMessagesDeclineURLAuth, func(ctx context.Context, req *tg.MessagesDeclineURLAuthRequest) (any, error) {
+		return r.onMessagesDeclineURLAuth(ctx, req.URL)
+	})
+	registerRPC[*tg.MessagesCheckURLAuthMatchCodeRequest](d, tlprofile.SemanticMethodMessagesCheckURLAuthMatchCode, func(ctx context.Context, req *tg.MessagesCheckURLAuthMatchCodeRequest) (any, error) {
+		return r.onMessagesCheckURLAuthMatchCode(ctx, req.URL, req.MatchCode)
+	})
 	registerRPC[*tg.MessagesReceivedMessagesRequest](d, tlprofile.SemanticMethodMessagesReceivedMessages, func(ctx context.Context, layerRequest *tg.MessagesReceivedMessagesRequest) (any, error) {
 		return r.onMessagesReceivedMessages(ctx, layerRequest.
 			MaxID)
@@ -78,6 +90,9 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 	})
 	registerRPC[*tg.MessagesSendMessageRequest](d, tlprofile.SemanticMethodMessagesSendMessage, func(ctx context.Context, layerRequest *tg.MessagesSendMessageRequest) (any, error) {
 		return r.onMessagesSendMessage(ctx, layerRequest)
+	})
+	registerRPC[*tg.MessagesToggleSuggestedPostApprovalRequest](d, tlprofile.SemanticMethodMessagesToggleSuggestedPostApproval, func(ctx context.Context, layerRequest *tg.MessagesToggleSuggestedPostApprovalRequest) (any, error) {
+		return r.onMessagesToggleSuggestedPostApproval(ctx, layerRequest)
 	})
 	registerRPC[*tg.MessagesForwardMessagesRequest](d, tlprofile.SemanticMethodMessagesForwardMessages, func(ctx context.Context, layerRequest *tg.MessagesForwardMessagesRequest) (any, error) {
 		return r.onMessagesForwardMessages(ctx, layerRequest)
@@ -585,14 +600,15 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 				return &tg.MessagesMessages{}, nil
 			}
 			history, err := r.deps.Channels.GetHistory(ctx, userID, domain.ChannelHistoryFilter{
-				ChannelID:  filter.Peer.ID,
-				OffsetID:   filter.OffsetID,
-				OffsetDate: filter.OffsetDate,
-				AddOffset:  filter.AddOffset,
-				Limit:      filter.Limit,
-				MaxID:      filter.MaxID,
-				MinID:      filter.MinID,
-				Hash:       filter.Hash,
+				ChannelID:                 filter.Peer.ID,
+				OffsetID:                  filter.OffsetID,
+				OffsetDate:                filter.OffsetDate,
+				AddOffset:                 filter.AddOffset,
+				Limit:                     filter.Limit,
+				MaxID:                     filter.MaxID,
+				MinID:                     filter.MinID,
+				Hash:                      filter.Hash,
+				IncludeHistoryClearAnchor: true,
 			})
 			if err != nil {
 				return nil, channelInvalidErr(err)
@@ -683,7 +699,10 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 		if err != nil {
 			return nil, internalErr()
 		}
-		filter := r.messageFilterFromSearchRequest(userID, req)
+		filter, err := r.messageFilterFromSearchRequest(ctx, userID, req)
+		if err != nil {
+			return nil, err
+		}
 		if filter.HasPeer && filter.Peer.Type == domain.PeerTypeChannel {
 			if r.deps.Channels == nil {
 				return messagesNotModifiedOrEmpty(req.Hash), nil
@@ -703,7 +722,7 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 					Chats:    []tg.ChatClass{tgChannelChatForView(userID, view)},
 					Users:    []tg.UserClass{},
 				}
-				r.applyStoryMaxIDsToMessages(ctx, userID, out)
+				r.applyPeerReadModelsToMessages(ctx, userID, out)
 				return out, nil
 			}
 			if searchFilterNeedsMediaStore(req.Filter) {
@@ -723,7 +742,7 @@ func (r *Router) registerMessages(d *tlprofile.Dispatcher) {
 						Chats:    []tg.ChatClass{tgChannelChatForView(userID, view)},
 						Users:    []tg.UserClass{},
 					}
-					r.applyStoryMaxIDsToMessages(ctx, userID, out)
+					r.applyPeerReadModelsToMessages(ctx, userID, out)
 					return out, nil
 				}
 				if err := r.validateInputPeerChannelAccess(ctx, userID, req.Peer, filter.Peer.ID); err != nil {

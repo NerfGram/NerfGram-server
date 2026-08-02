@@ -534,9 +534,16 @@ func (r *Router) onMessagesGetPeerSettings(ctx context.Context, input tg.InputPe
 		}
 		r.peerSettingsProjectionCache.StoreIfEpoch(userID, peer, settings, loadEpoch)
 	}
+	users := r.peerSettingsUsers(ctx, userID, input)
+	// messages.getPeerSettings is requested while a chat is opened and official
+	// clients feed the returned peer objects into the same cache as getDialogs and
+	// getFullUser. Keep these auxiliary objects on the common response-boundary
+	// projection path: a full User without bot_verification_icon is authoritative
+	// to TDesktop/Android/TWeb and would clear a badge learned from another RPC.
+	r.applyPeerReadModels(ctx, userID, users, nil)
 	return &tg.MessagesPeerSettings{
 		Settings: tgPeerSettings(settings),
-		Users:    r.peerSettingsUsers(ctx, userID, input),
+		Users:    users,
 	}, nil
 }
 

@@ -63,6 +63,9 @@ func (r *Router) registerAuth(d *tlprofile.Dispatcher) {
 	registerRPC[*tg.AuthSendCodeRequest](d, tlprofile.SemanticMethodAuthSendCode, func(ctx context.Context, layerRequest *tg.AuthSendCodeRequest) (any, error) {
 		return r.onAuthSendCode(ctx, layerRequest)
 	})
+	registerRPC[*tg.AuthReportMissingCodeRequest](d, tlprofile.SemanticMethodAuthReportMissingCode, func(ctx context.Context, req *tg.AuthReportMissingCodeRequest) (any, error) {
+		return r.onAuthReportMissingCode(ctx, req)
+	})
 	registerRPC[*tg.AuthResendCodeRequest](d, tlprofile.SemanticMethodAuthResendCode, func(ctx context.Context, layerRequest *tg.AuthResendCodeRequest) (any, error) {
 		return r.onAuthResendCode(ctx, layerRequest)
 	})
@@ -475,6 +478,36 @@ func (r *Router) onAuthSendCode(ctx context.Context, req *tg.AuthSendCodeRequest
 	return r.tgSentCodeForHash(ctx, hash)
 }
 
+func (r *Router) onAuthReportMissingCode(ctx context.Context, req *tg.AuthReportMissingCodeRequest) (bool, error) {
+	if req == nil || r.deps.AuthDeliveryReports == nil {
+		return false, inputRequestInvalidErr()
+	}
+	authKeyID, authKeyOK := AuthKeyIDFrom(ctx)
+	sessionID, sessionOK := SessionIDFrom(ctx)
+	if !authKeyOK || authKeyID == ([8]byte{}) || !sessionOK || sessionID == 0 {
+		return false, internalErr()
+	}
+	clientType := string(ClientTypeFrom(ctx))
+	if _, _, err := r.deps.AuthDeliveryReports.ReportMissingCode(ctx, domain.AuthMissingCodeReportRequest{
+		AuthKeyID: authKeyID, SessionID: sessionID, ClientType: clientType,
+		Phone: req.PhoneNumber, PhoneCodeHash: req.PhoneCodeHash,
+		MNC: req.Mnc, CreatedAt: r.clock.Now(),
+	}); err != nil {
+		switch {
+		case errors.Is(err, domain.ErrPhoneCodeExpired):
+			return false, phoneCodeExpiredErr()
+		case errors.Is(err, domain.ErrPhoneCodeInvalid),
+			errors.Is(err, domain.ErrAuthDeliveryReportInvalid):
+			return false, phoneCodeInvalidErr()
+		case errors.Is(err, domain.ErrAuthDeliveryRateLimited):
+			return false, floodWaitErr(60)
+		default:
+			return false, internalErr()
+		}
+	}
+	return true, nil
+}
+
 func tgSentCode(hash string) tg.AuthSentCodeClass {
 	return tgSentCodeWithLength(hash, devCodeLength)
 }
@@ -499,7 +532,7 @@ func tgSMSSentCode(hash string, length int) tg.AuthSentCodeClass {
 	}
 }
 
-func tgEmailSentCode(hash, emailPattern string, length int) tg.AuthSentCodeClass {
+func tgEmailSentCode(hash, emailPattern string, length int, resetAvailable bool) tg.AuthSentCodeClass {
 	if length <= 0 {
 		length = devCodeLength
 	}
@@ -507,13 +540,24 @@ func tgEmailSentCode(hash, emailPattern string, length int) tg.AuthSentCodeClass
 		EmailPattern: emailPattern,
 		Length:       length,
 	}
-	// reset_available_period=0 表示可立即调用 auth.resetLoginEmail（开发环境无等待期），
-	// 让客户端的"无法访问邮箱?"逃生入口可用。
-	codeType.SetResetAvailablePeriod(0)
+	if resetAvailable {
+		// 0 means the SMS fallback is available immediately. Absence means this
+		// deployment cannot safely service auth.resetLoginEmail.
+		codeType.SetResetAvailablePeriod(0)
+	}
 	return &tg.AuthSentCode{
 		Type:          codeType,
 		PhoneCodeHash: hash,
 	}
+}
+
+type loginEmailResetAvailabilityChecker interface {
+	LoginEmailResetAvailable() bool
+}
+
+func (r *Router) loginEmailResetAvailable() bool {
+	checker, ok := r.deps.Auth.(loginEmailResetAvailabilityChecker)
+	return ok && checker.LoginEmailResetAvailable()
 }
 
 func tgEmailSetupRequiredSentCode(hash string) tg.AuthSentCodeClass {
@@ -538,7 +582,7 @@ func (r *Router) tgSentCodeForHash(ctx context.Context, hash string) (tg.AuthSen
 	case domain.AuthCodeDeliverySMS:
 		return tgSMSSentCode(hash, delivery.Length), nil
 	case domain.AuthCodeDeliveryEmail:
-		return tgEmailSentCode(hash, delivery.EmailPattern, delivery.Length), nil
+		return tgEmailSentCode(hash, delivery.EmailPattern, delivery.Length, r.loginEmailResetAvailable()), nil
 	case domain.AuthCodeDeliveryEmailSetupRequired:
 		return tgEmailSetupRequiredSentCode(hash), nil
 	default:
@@ -660,7 +704,8 @@ func (r *Router) onAuthResetAuthorizations(ctx context.Context) (bool, error) {
 	for _, a := range deleted {
 		r.revokeAuthKeySessions(a.AuthKeyID)
 		_ = r.clearAuthKeyState(ctx, a.AuthKeyID)
-		// P1 修复：撤销其它会话同样销毁其 auth_key，级联 discard 该设备绑定的活跃密聊并通知对端。
+		// 撤销其它会话会删除其业务 authorization；协议 key 保留用于让客户端
+		// 重连后取得 AUTH_KEY_UNREGISTERED。密聊仍按设备授权边界 discard 并通知对端。
 		r.discardSecretChatsForAuthKey(ctx, businessAuthKeyInt64(a.AuthKeyID), userID)
 	}
 	return true, nil
@@ -931,8 +976,8 @@ func (r *Router) onAuthLogOut(ctx context.Context) (*tg.AuthLoggedOut, error) {
 			r.presence.clearSession(key)
 		}
 	}
-	// P1 修复：登出销毁本设备 perm auth_key 后，级联 discard 其绑定的活跃密聊并通知对端
-	//（否则对端继续往死 auth_key 投递成静默死链）。best-effort，不阻断登出。
+	// 登出撤销本设备 authorization 后，级联 discard 其绑定的活跃密聊并通知对端
+	//（否则对端继续往已退出设备投递成静默死链）。best-effort，不阻断登出。
 	if userErr == nil && userID != 0 {
 		r.discardSecretChatsForAuthKey(ctx, businessAuthKeyInt64(id), userID)
 	}

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/iamxvbaba/td/tg"
+	"go.uber.org/zap"
 
 	"github.com/iamxvbaba/td/tlprofile"
 	"telesrv/internal/branding"
@@ -16,6 +17,12 @@ import (
 
 // registerAccount 注册 account.* RPC handler。
 func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
+	registerRPC[*tg.AccountReportPeerRequest](d, tlprofile.SemanticMethodAccountReportPeer, func(ctx context.Context, req *tg.AccountReportPeerRequest) (any, error) {
+		return r.onAccountReportPeer(ctx, req)
+	})
+	registerRPC[*tg.AccountReportProfilePhotoRequest](d, tlprofile.SemanticMethodAccountReportProfilePhoto, func(ctx context.Context, req *tg.AccountReportProfilePhotoRequest) (any, error) {
+		return r.onAccountReportProfilePhoto(ctx, req)
+	})
 	registerRPC[*tg.AccountDeleteAccountRequest](d, tlprofile.SemanticMethodAccountDeleteAccount, func(ctx context.Context, req *tg.AccountDeleteAccountRequest) (any, error) {
 		return r.onAccountDeleteAccount(ctx, req)
 	})
@@ -58,6 +65,9 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 		return r.onAccountUpdateUsername(ctx, layerRequest.
 			Username)
 	})
+	registerRPC[*tg.AccountReorderUsernamesRequest](d, tlprofile.SemanticMethodAccountReorderUsernames, func(ctx context.Context, layerRequest *tg.AccountReorderUsernamesRequest) (any, error) {
+		return r.onAccountReorderUsernames(ctx, layerRequest)
+	})
 	registerRPC[*tg.AccountToggleUsernameRequest](d, tlprofile.SemanticMethodAccountToggleUsername, func(ctx context.Context, layerRequest *tg.AccountToggleUsernameRequest) (any, error) {
 		return r.onAccountToggleUsername(ctx, layerRequest)
 	})
@@ -67,9 +77,6 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 	registerRPC[*tg.AccountUpdatePersonalChannelRequest](d, tlprofile.SemanticMethodAccountUpdatePersonalChannel, func(ctx context.Context, layerRequest *tg.AccountUpdatePersonalChannelRequest) (any, error) {
 		return r.onAccountUpdatePersonalChannel(ctx, layerRequest.
 			Channel)
-	})
-	registerRPC[*tg.AccountSetMainProfileTabRequest](d, tlprofile.SemanticMethodAccountSetMainProfileTab, func(ctx context.Context, layerRequest *tg.AccountSetMainProfileTabRequest) (any, error) {
-		return r.onAccountSetMainProfileTab(ctx, layerRequest)
 	})
 	registerRPC[*tg.AccountGetPasswordRequest](d, tlprofile.SemanticMethodAccountGetPassword, func(ctx context.Context, layerRequest *tg.AccountGetPasswordRequest) (any, error) {
 		return r.onAccountGetPassword(ctx)
@@ -211,12 +218,7 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 	registerRPC[*tg.AccountGetChatThemesRequest](d, tlprofile.SemanticMethodAccountGetChatThemes, func(ctx context.Context, layerRequest *tg.AccountGetChatThemesRequest) (any, error) {
 		hash := layerRequest.
 			Hash
-		_ = hash
-
-		if _, _, err := r.currentUserID(ctx); err != nil {
-			return nil, internalErr()
-		}
-		return tdesktop.ChatThemes(hash), nil
+		return r.onAccountGetChatThemes(ctx, hash)
 	})
 	registerRPC[
 
@@ -288,6 +290,7 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 			return false, tgerr400("WALLPAPER_INVALID")
 		}
 		if _, ok := tdesktop.LookupWallPaper(req.Wallpaper); !ok {
+			r.log.Info("wallpaper reference rejected", wallpaperReferenceLogFields("account.installWallPaper", req.Wallpaper)...)
 			return false, tgerr400("WALLPAPER_INVALID")
 		}
 		return true, nil
@@ -345,7 +348,11 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 			Hash)
 	})
 	registerRPC[*tg.AccountGetChannelDefaultEmojiStatusesRequest](d, tlprofile.SemanticMethodAccountGetChannelDefaultEmojiStatuses, func(ctx context.Context, layerRequest *tg.AccountGetChannelDefaultEmojiStatusesRequest) (any, error) {
-		return r.onAccountGetChannelDefaultEmojiStatuses(ctx, layerRequest.Hash)
+		hash := layerRequest.
+			Hash
+		_ = hash
+
+		return &tg.AccountEmojiStatuses{Hash: 0, Statuses: []tg.EmojiStatusClass{}}, nil
 	})
 	registerRPC[*tg.AccountGetChannelRestrictedStatusEmojisRequest](d, tlprofile.SemanticMethodAccountGetChannelRestrictedStatusEmojis, func(ctx context.Context, layerRequest *tg.AccountGetChannelRestrictedStatusEmojisRequest) (any, error) {
 		hash := layerRequest.
@@ -382,14 +389,10 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 			ID)
 	})
 	registerRPC[*tg.AccountGetWebAuthorizationsRequest](d, tlprofile.SemanticMethodAccountGetWebAuthorizations, func(ctx context.Context, layerRequest *tg.AccountGetWebAuthorizationsRequest) (any, error) {
-		return tdesktop.WebAuthorizations(), nil
+		return r.onAccountGetWebAuthorizations(ctx)
 	})
 	registerRPC[*tg.AccountResetWebAuthorizationRequest](d, tlprofile.SemanticMethodAccountResetWebAuthorization, func(ctx context.Context, layerRequest *tg.AccountResetWebAuthorizationRequest) (any, error) {
-		hash := layerRequest.
-			Hash
-		_ = hash
-
-		return true, nil
+		return r.onAccountResetWebAuthorization(ctx, layerRequest.Hash)
 	})
 	registerRPC[*tg.AccountResetWebAuthorizationsRequest](d, tlprofile.SemanticMethodAccountResetWebAuthorizations, func(ctx context.Context, layerRequest *tg.AccountResetWebAuthorizationsRequest) (
 
@@ -397,7 +400,7 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 		// （无内置浏览器例外、不强制外部浏览器）。Android 启动时会拉取，缺它会反复 500
 		// NOT_IMPLEMENTED。空结构 Hash=0，客户端按默认（内置浏览器、无例外）渲染。
 		any, error) {
-		return true, nil
+		return r.onAccountResetWebAuthorizations(ctx)
 	})
 	registerRPC[*tg.AccountGetWebBrowserSettingsRequest](d, tlprofile.SemanticMethodAccountGetWebBrowserSettings, func(ctx context.Context, layerRequest *tg.AccountGetWebBrowserSettingsRequest) (any, error) {
 		hash := layerRequest.
@@ -460,6 +463,20 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 			Offline)
 	})
 
+}
+
+func wallpaperReferenceLogFields(method string, input tg.InputWallPaperClass) []zap.Field {
+	fields := []zap.Field{zap.String("method", method)}
+	switch wallpaper := input.(type) {
+	case *tg.InputWallPaperSlug:
+		return append(fields, zap.String("input_type", "inputWallPaperSlug"), zap.String("slug", wallpaper.Slug))
+	case *tg.InputWallPaper:
+		return append(fields, zap.String("input_type", "inputWallPaper"), zap.Int64("wallpaper_id", wallpaper.ID))
+	case *tg.InputWallPaperNoFile:
+		return append(fields, zap.String("input_type", "inputWallPaperNoFile"), zap.Int64("wallpaper_id", wallpaper.ID))
+	default:
+		return append(fields, zap.String("input_type", "unknown"))
+	}
 }
 
 func (r *Router) onAccountGetPassword(ctx context.Context) (*tg.AccountPassword, error) {
@@ -593,7 +610,8 @@ func (r *Router) onAccountResetAuthorization(ctx context.Context, hash int64) (b
 	}
 	r.revokeAuthKeySessions(deleted.AuthKeyID)
 	_ = r.clearAuthKeyState(ctx, deleted.AuthKeyID)
-	// P1 修复：撤销该会话销毁其 auth_key，级联 discard 该设备绑定的活跃密聊并通知对端。
+	// 撤销该设备的业务授权后，级联 discard 其绑定的活跃密聊并通知对端。
+	// 协议 auth key 必须保留，供客户端重连后取得 AUTH_KEY_UNREGISTERED。
 	r.discardSecretChatsForAuthKey(ctx, businessAuthKeyInt64(deleted.AuthKeyID), userID)
 	return true, nil
 }
@@ -728,7 +746,7 @@ func (r *Router) onAccountVerifyEmail(ctx context.Context, req *tg.AccountVerify
 		if ClientTypeFrom(ctx) == ClientTypeAndroid {
 			return &tg.AccountEmailVerifiedLogin{
 				Email:    email,
-				SentCode: tgEmailSentCode(p.PhoneCodeHash, domain.MaskEmail(email), len(strings.TrimSpace(code))),
+				SentCode: tgEmailSentCode(p.PhoneCodeHash, domain.MaskEmail(email), len(strings.TrimSpace(code)), r.loginEmailResetAvailable()),
 			}, nil
 		}
 		u, _, needSignUp, signInErr := r.deps.Auth.SignInWithEmail(ctx, r.authzFromCtx(ctx), p.PhoneNumber, p.PhoneCodeHash, code)
@@ -882,6 +900,10 @@ func (r *Router) onAccountSetPrivacy(ctx context.Context, req *tg.AccountSetPriv
 		return nil, err
 	}
 	r.invalidateRPCProjectionForUser(userID)
+	// updatePrivacy is an absolute, non-PTS account-state notification. The
+	// originating session applies account.setPrivacy's response; other online
+	// sessions receive this best-effort update, while offline sessions reload
+	// the authoritative rules through account.getPrivacy.
 	r.pushUserUpdates(ctx, userID, &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdatePrivacy{
 			Key:   tgPrivacyKey(saved.Key),
@@ -889,7 +911,12 @@ func (r *Router) onAccountSetPrivacy(ctx context.Context, req *tg.AccountSetPriv
 		}},
 		Users: []tg.UserClass{},
 		Chats: []tg.ChatClass{},
+		Date:  int(r.clock.Now().Unix()),
+		Seq:   0,
 	})
+	if domainKey == domain.PrivacyKeyStatusTimestamp {
+		r.pushStatusPrivacyRefresh(ctx, userID)
+	}
 	return out, nil
 }
 
@@ -914,10 +941,11 @@ func (r *Router) onAccountSetAccountTTL(ctx context.Context, ttl tg.AccountDaysT
 		return false, tgerr400("TTL_DAYS_INVALID")
 	}
 	if svc, ok := r.accountSettingsSvc(); ok {
-		if _, err := svc.SetAccountTTL(ctx, userID, ttl.Days); err != nil {
+		saved, err := svc.SetAccountTTL(ctx, userID, ttl.Days)
+		if err != nil {
 			return false, internalErr()
 		}
-		r.accountSettings.Delete(userID)
+		r.accountSettings.Store(userID, saved)
 	}
 	return true, nil
 }
@@ -944,7 +972,7 @@ func (r *Router) onAccountSetGlobalPrivacySettings(ctx context.Context, settings
 		if err != nil {
 			return nil, internalErr()
 		}
-		r.accountSettings.Delete(userID)
+		r.accountSettings.Store(userID, saved)
 		return tgGlobalPrivacySettings(saved.GlobalPrivacy), nil
 	}
 	return &settings, nil
@@ -971,10 +999,11 @@ func (r *Router) onAccountSetContentSettings(ctx context.Context, req *tg.Accoun
 		return false, inputRequestInvalidErr()
 	}
 	if svc, ok := r.accountSettingsSvc(); ok {
-		if _, err := svc.SetSensitiveContent(ctx, userID, req.SensitiveEnabled); err != nil {
+		saved, err := svc.SetSensitiveContent(ctx, userID, req.SensitiveEnabled)
+		if err != nil {
 			return false, internalErr()
 		}
-		r.accountSettings.Delete(userID)
+		r.accountSettings.Store(userID, saved)
 	}
 	return true, nil
 }
@@ -997,10 +1026,11 @@ func (r *Router) onAccountSetContactSignUpNotification(ctx context.Context, sile
 		return false, internalErr()
 	}
 	if svc, ok := r.accountSettingsSvc(); ok {
-		if _, err := svc.SetContactSignUpSilent(ctx, userID, silent); err != nil {
+		saved, err := svc.SetContactSignUpSilent(ctx, userID, silent)
+		if err != nil {
 			return false, internalErr()
 		}
-		r.accountSettings.Delete(userID)
+		r.accountSettings.Store(userID, saved)
 	}
 	return true, nil
 }
@@ -1542,44 +1572,50 @@ func (r *Router) onAccountUpdateUsername(ctx context.Context, username string) (
 	return r.tgSelfUser(u), nil
 }
 
-// onAccountToggleUsername lets a user switch which of their usernames is
-// active: their original editable one, or an admin-issued collectible
-// username. Only the caller's own collectible username can be toggled --
-// this never lets a user activate someone else's or a plain username that
-// was never issued as collectible (that's just account.updateUsername).
+// onAccountReorderUsernames rewrites the caller's active username order
+// (account.reorderUsernames). The editable slot is included when active, just as
+// it is in the vector sent by official clients.
+//
+// Without a username registry the account owns a single editable username, which
+// has no order to change: USERNAME_NOT_MODIFIED is the accurate answer and keeps
+// clients from believing a reorder took effect.
+func (r *Router) onAccountReorderUsernames(ctx context.Context, req *tg.AccountReorderUsernamesRequest) (bool, error) {
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return false, internalErr()
+	}
+	if req == nil {
+		return false, usernameInvalidErr()
+	}
+	if len(req.Order) > domain.MaxPeerCollectibleUsernames+1 {
+		return false, limitInvalidErr()
+	}
+	if r.deps.Usernames == nil {
+		return false, usernameNotModifiedErr()
+	}
+	if err := r.reorderRegistryUsernames(ctx, domain.Peer{Type: domain.PeerTypeUser, ID: userID}, req.Order); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// onAccountToggleUsername activates/deactivates one of the caller's own
+// collectible usernames (account.toggleUsername). Deactivating the editable slot
+// through this method is rejected by the domain rules with USERNAME_INVALID:
+// clearing the editable username is account.updateUsername's job.
 func (r *Router) onAccountToggleUsername(ctx context.Context, req *tg.AccountToggleUsernameRequest) (bool, error) {
 	userID, _, err := r.currentUserID(ctx)
 	if err != nil {
 		return false, internalErr()
 	}
-	if r.deps.CollectibleUsernames == nil {
+	if req == nil {
 		return false, usernameInvalidErr()
 	}
-	if req.Active && r.deps.Users != nil {
-		u, err := r.deps.Users.Self(ctx, userID)
-		if err != nil {
-			return false, internalErr()
-		}
-		if u.Username != "" && strings.EqualFold(req.Username, u.Username) {
-			if err := r.deps.CollectibleUsernames.DeactivateAllForOwner(ctx, userID); err != nil {
-				return false, err
-			}
-			r.invalidateRPCProjectionForUser(userID)
-			r.pushUsernameUpdate(ctx, u)
-			return true, nil
-		}
+	if r.deps.Usernames == nil {
+		return false, usernameNotModifiedErr()
 	}
-	if err := r.deps.CollectibleUsernames.SetActive(ctx, req.Username, userID, req.Active); err != nil {
-		if errors.Is(err, domain.ErrCollectibleUsernameNotFound) {
-			return false, usernameInvalidErr()
-		}
+	if err := r.toggleRegistryUsername(ctx, domain.Peer{Type: domain.PeerTypeUser, ID: userID}, req.Username, req.Active); err != nil {
 		return false, err
-	}
-	r.invalidateRPCProjectionForUser(userID)
-	if r.deps.Users != nil {
-		if u, err := r.deps.Users.Self(ctx, userID); err == nil {
-			r.pushUsernameUpdate(ctx, u)
-		}
 	}
 	return true, nil
 }
@@ -1859,14 +1895,6 @@ func (r *Router) onAccountGetDefaultEmojiStatuses(ctx context.Context, hash int6
 	return &tg.AccountEmojiStatuses{Hash: catalogHash, Statuses: statuses}, nil
 }
 
-// onAccountGetChannelDefaultEmojiStatuses serves the channel emoji-status picker
-// defaults (account.getChannelDefaultEmojiStatuses). Uses the same seeded system
-// set as user defaults because inputStickerSetEmojiChannelDefaultStatuses maps
-// to the same catalog key on this server.
-func (r *Router) onAccountGetChannelDefaultEmojiStatuses(ctx context.Context, hash int64) (tg.AccountEmojiStatusesClass, error) {
-	return r.onAccountGetDefaultEmojiStatuses(ctx, hash)
-}
-
 // onAccountGetCollectibleEmojiStatuses returns the actor's active locally
 // owned unique gifts as complete emojiStatusCollectible values. The bounded
 // list order and hash are stable, so Android can safely reuse its cache.
@@ -1906,14 +1934,24 @@ func (r *Router) pushUsernameUpdate(ctx context.Context, u domain.User) {
 	if u.ID == 0 {
 		return
 	}
+	// updateUserName carries the vector clients persist, so it has to be the full
+	// registry list when one exists. One peer, one registry read; the overlay
+	// degrades to tgUsernames(u.Username) whenever the registry is unavailable.
+	self := r.tgSelfUser(u)
+	users := []tg.UserClass{self}
+	r.applyUsernamesToPeerObjects(ctx, users, nil)
+	usernames := tgUsernames(u.Username)
+	if vector, ok := self.GetUsernames(); ok && len(vector) > 0 {
+		usernames = vector
+	}
 	r.pushUserUpdates(ctx, u.ID, &tg.Updates{
 		Updates: []tg.UpdateClass{&tg.UpdateUserName{
 			UserID:    u.ID,
 			FirstName: u.FirstName,
 			LastName:  u.LastName,
-			Usernames: tgUsernames(u.Username, userCollectibles(u)),
+			Usernames: usernames,
 		}},
-		Users: []tg.UserClass{r.tgSelfUser(u)},
+		Users: users,
 		Date:  int(r.clock.Now().Unix()),
 	})
 }
@@ -1991,28 +2029,7 @@ func (r *Router) onAccountGetDefaultBackgroundEmojis(ctx context.Context, hash i
 }
 
 func defaultBackgroundEmojiDocumentIDs(ctx context.Context, files FilesService) ([]int64, error) {
-	ids, err := statusPackEmojiDocumentIDs(ctx, files, 0)
-	if err != nil || len(ids) > 0 {
-		return ids, err
-	}
-	ids, err = profilePhotoEmojiDocumentIDsFromRef(ctx, files, domain.StickerSetRef{
-		Kind:      domain.StickerSetRefByShortName,
-		ShortName: "TelesrvDefaultStatuses",
-	}, 0)
-	if err != nil || len(ids) > 0 {
-		return ids, err
-	}
-	sets, err := files.ListStickerSets(ctx, domain.StickerSetKindEmoji)
-	if err != nil {
-		return nil, err
-	}
-	for _, set := range sets {
-		if set.Deleted || !set.TextColor || len(set.DocumentIDs) == 0 {
-			continue
-		}
-		return uniquePositiveDocumentIDs(set.DocumentIDs, 0), nil
-	}
-	return nil, nil
+	return statusPackEmojiDocumentIDs(ctx, files, 0)
 }
 
 func statusPackEmojiDocumentIDs(ctx context.Context, files FilesService, limit int) ([]int64, error) {

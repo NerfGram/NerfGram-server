@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/iamxvbaba/td/tg"
 
@@ -27,6 +28,8 @@ func TestSendMessageAttachesWebPagePending(t *testing.T) {
 	ctx := context.Background()
 	r, owner, friend := newMediaTestRouter(t)
 	r.deps.Files.(*fakeFiles).webPagePreviewOn = true
+	now := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	r.clock = fixedClock{now: now}
 
 	updates, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), &tg.MessagesSendMessageRequest{
 		Peer:        &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
@@ -55,8 +58,49 @@ func TestSendMessageAttachesWebPagePending(t *testing.T) {
 	if url, _ := pending.GetURL(); url != wpTestURL {
 		t.Errorf("pending url = %q, want %q", url, wpTestURL)
 	}
+	wantDeadline := int(now.Add(webPagePendingLifetime).Unix())
+	if pending.Date != wantDeadline {
+		t.Errorf("pending date = %d, want retry deadline %d", pending.Date, wantDeadline)
+	}
+	if time.Unix(int64(pending.Date), 0).Sub(now) <= webPageResolveTimeout {
+		t.Errorf("pending deadline must outlive resolver timeout: deadline=%s timeout=%s", time.Unix(int64(pending.Date), 0), webPageResolveTimeout)
+	}
 	if !msg.InvertMedia {
 		t.Errorf("invert_media not projected onto message")
+	}
+}
+
+// TestSendChannelMessageUsesSameFutureWebPageDeadline 锁定频道发送也经过同一 pending
+// 截止时间构造路径，避免只修私聊 echo 而频道仍被客户端立即判定过期。
+func TestSendChannelMessageUsesSameFutureWebPageDeadline(t *testing.T) {
+	ctx := context.Background()
+	r, owner, channel := newRichChannelTestRouter(t)
+	r.deps.Files.(*fakeFiles).webPagePreviewOn = true
+	// 本测试只验证发送投影，不启动异步解析 goroutine。
+	r.webPageResolveSem = nil
+	now := time.Date(2030, time.February, 3, 4, 5, 6, 0, time.UTC)
+	r.clock = fixedClock{now: now}
+
+	updates, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), &tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
+		Message:  wpTestMessage,
+		Entities: wpURLEntities(),
+		RandomID: 5106,
+	})
+	if err != nil {
+		t.Fatalf("send channel message: %v", err)
+	}
+	msg := newMessageFromUpdates(t, updates)
+	wrap, ok := msg.Media.(*tg.MessageMediaWebPage)
+	if !ok {
+		t.Fatalf("channel media = %T, want *tg.MessageMediaWebPage", msg.Media)
+	}
+	pending, ok := wrap.Webpage.(*tg.WebPagePending)
+	if !ok {
+		t.Fatalf("channel webpage = %T, want *tg.WebPagePending", wrap.Webpage)
+	}
+	if want := int(now.Add(webPagePendingLifetime).Unix()); pending.Date != want {
+		t.Errorf("channel pending date = %d, want retry deadline %d", pending.Date, want)
 	}
 }
 
@@ -181,6 +225,110 @@ func TestSendMessageHighlightsBareURL(t *testing.T) {
 	if !found {
 		t.Fatalf("sent message missing url highlight entity: %+v", msg.Entities)
 	}
+}
+
+// TestSendMessageHighlightsConfiguredAppLink locks the server-only compatibility
+// contract: clients may omit the custom-scheme entity, while the persisted/echoed
+// message still carries MessageEntityURL and never starts webpage resolution.
+func TestSendMessageHighlightsConfiguredAppLink(t *testing.T) {
+	ctx := context.Background()
+	r, owner, friend := newMediaTestRouter(t)
+	r.deps.Files.(*fakeFiles).webPagePreviewOn = true
+	message := "👍 telesrv://resolve?domain=Alice"
+
+	updates, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), &tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
+		Message:  message,
+		RandomID: 5302,
+	})
+	if err != nil {
+		t.Fatalf("sendMessage: %v", err)
+	}
+	msg := newMessageFromUpdates(t, updates)
+	if msg.Media != nil {
+		t.Fatalf("custom app-link media = %T, want nil", msg.Media)
+	}
+	for _, entity := range msg.Entities {
+		if url, ok := entity.(*tg.MessageEntityURL); ok && url.Offset == 3 && url.Length == utf16CodeUnitLen("telesrv://resolve?domain=Alice") {
+			return
+		}
+	}
+	t.Fatalf("sent message missing configured app-link entity: %+v", msg.Entities)
+}
+
+// TestSendMessageFillsCustomLinkBesideClientHTTPEntity covers the partial-client
+// case exposed by Android: an existing HTTP entity must not suppress app-link detection.
+func TestSendMessageFillsCustomLinkBesideClientHTTPEntity(t *testing.T) {
+	ctx := context.Background()
+	r, owner, friend := newMediaTestRouter(t)
+	message := "https://x telesrv://resolve?domain=Alice"
+
+	updates, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), &tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
+		Message:  message,
+		Entities: []tg.MessageEntityClass{&tg.MessageEntityURL{Offset: 0, Length: utf16CodeUnitLen("https://x")}},
+		RandomID: 5303,
+	})
+	if err != nil {
+		t.Fatalf("sendMessage: %v", err)
+	}
+	msg := newMessageFromUpdates(t, updates)
+	if len(msg.Entities) != 2 {
+		t.Fatalf("message entities = %+v, want client HTTP plus server app-link", msg.Entities)
+	}
+	custom, ok := msg.Entities[1].(*tg.MessageEntityURL)
+	if !ok || custom.Offset != utf16CodeUnitLen("https://x ") || custom.Length != utf16CodeUnitLen("telesrv://resolve?domain=Alice") {
+		t.Fatalf("custom entity = %#v", msg.Entities[1])
+	}
+}
+
+func TestAutoEntityDerivationDoesNotMutateSendRequests(t *testing.T) {
+	t.Run("send-message-replay", func(t *testing.T) {
+		ctx := context.Background()
+		r, owner, friend := newMediaTestRouter(t)
+		req := &tg.MessagesSendMessageRequest{
+			Peer:     &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
+			Message:  "telesrv://resolve?domain=Alice",
+			RandomID: 5304,
+		}
+		first, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), req)
+		if err != nil {
+			t.Fatalf("first sendMessage: %v", err)
+		}
+		if len(req.Entities) != 0 {
+			t.Fatalf("sendMessage request was mutated: %+v", req.Entities)
+		}
+		if _, err := r.onMessagesSendMessage(WithUserID(ctx, owner.ID), req); err != nil {
+			t.Fatalf("sendMessage replay: %v", err)
+		}
+		if got := newMessageFromUpdates(t, first); len(got.Entities) != 1 {
+			t.Fatalf("first send entities = %+v, want derived app-link", got.Entities)
+		}
+	})
+
+	t.Run("send-media-replay", func(t *testing.T) {
+		ctx := context.Background()
+		r, owner, friend := newMediaTestRouter(t)
+		req := &tg.MessagesSendMediaRequest{
+			Peer:     &tg.InputPeerUser{UserID: friend.ID, AccessHash: friend.AccessHash},
+			Media:    &tg.InputMediaContact{PhoneNumber: "+15550005305", FirstName: "Alice"},
+			Message:  "telesrv://resolve?domain=Alice",
+			RandomID: 5305,
+		}
+		first, err := r.onMessagesSendMedia(WithUserID(ctx, owner.ID), req)
+		if err != nil {
+			t.Fatalf("first sendMedia: %v", err)
+		}
+		if len(req.Entities) != 0 {
+			t.Fatalf("sendMedia request was mutated: %+v", req.Entities)
+		}
+		if _, err := r.onMessagesSendMedia(WithUserID(ctx, owner.ID), req); err != nil {
+			t.Fatalf("sendMedia replay: %v", err)
+		}
+		if got := newMessageFromUpdates(t, first); len(got.Entities) != 1 {
+			t.Fatalf("first media caption entities = %+v, want derived app-link", got.Entities)
+		}
+	})
 }
 
 // TestSendMessageNoURLNoPlaceholder 验证无 URL 实体时不挂占位。

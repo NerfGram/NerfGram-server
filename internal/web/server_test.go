@@ -45,6 +45,32 @@ func newTestHandlerWithPublicPeers(
 	return h
 }
 
+func TestDevStarsCheckoutEmitsFormBoundTelegramCredentials(t *testing.T) {
+	h := newTestHandler(t, fakeResolver{}, "https://links.example.test")
+	for _, target := range []string{
+		"/payments/dev-stars",
+		"/payments/dev-stars?form_id=0",
+		"/payments/dev-stars?form_id=01",
+		"/payments/dev-stars?form_id=not-a-number",
+	} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, target, nil))
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("GET %s status = %d, want 404", target, rr.Code)
+		}
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/payments/dev-stars?form_id=-70001", nil))
+	body := rr.Body.String()
+	if rr.Code != http.StatusOK || rr.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(body, "payment_form_submit") ||
+		!strings.Contains(body, "type:'telesrv_dev',form_id:'-70001'") ||
+		!strings.Contains(body, "No card, Google Play, App Store, or external payment provider will be charged") {
+		t.Fatalf("dev checkout status=%d headers=%v body=%q", rr.Code, rr.Header(), body)
+	}
+}
+
 type fakeGiftWithdrawals struct {
 	value         domain.StarGiftWithdrawal
 	found         bool
@@ -55,6 +81,147 @@ type fakeUniqueGifts struct {
 	bySlug map[string]domain.UniqueStarGift
 	err    error
 	calls  int
+}
+
+type fakeModerationAppeals struct {
+	link        domain.ModerationAppealLink
+	found       bool
+	resolveErr  error
+	appeal      domain.ModerationAppeal
+	submitErr   error
+	submitCalls int
+	submitText  string
+}
+
+func (f *fakeModerationAppeals) ResolveAppealLink(_ context.Context, _ string, _ time.Time) (domain.ModerationAppealLink, bool, error) {
+	return f.link, f.found, f.resolveErr
+}
+
+func (f *fakeModerationAppeals) Appeal(_ context.Context, appealID int64) (domain.ModerationAppeal, bool, error) {
+	if f.appeal.ID != appealID {
+		return domain.ModerationAppeal{}, false, nil
+	}
+	return f.appeal, true, nil
+}
+
+func (f *fakeModerationAppeals) SubmitAppealLink(_ context.Context, _ string, text string, _ time.Time) (domain.ModerationAppeal, bool, error) {
+	f.submitCalls++
+	f.submitText = text
+	return f.appeal, true, f.submitErr
+}
+
+func TestHandlerModerationAppealGetAndIdempotentPost(t *testing.T) {
+	now := time.Now().UTC()
+	resolver := &fakeModerationAppeals{
+		found: true,
+		link: domain.ModerationAppealLink{
+			ID: 1, CaseID: 2, AppellantUserID: 3,
+			TokenHash: [32]byte{1}, ExpiresAt: now.Add(time.Hour),
+			CreatedAt: now,
+		},
+		appeal: domain.ModerationAppeal{
+			ID: 4, CaseID: 2, Status: domain.ModerationAppealPending,
+		},
+	}
+	handler, err := NewHandler(Config{
+		StickerSets:       fakeResolver{},
+		ModerationAppeals: resolver,
+		PublicBaseURL:     "https://telesrv.example",
+		AppName:           "Telesrv",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := httptest.NewRecorder()
+	handler.ServeHTTP(get, httptest.NewRequest(
+		http.MethodGet, "/appeal/valid-token", nil,
+	))
+	if get.Code != http.StatusOK ||
+		!strings.Contains(get.Body.String(), "Case #2") ||
+		!strings.Contains(get.Body.String(), "Do not include passwords") {
+		t.Fatalf("GET status=%d body=%s", get.Code, get.Body.String())
+	}
+	if got := get.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control=%q", got)
+	}
+	if got := get.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("Referrer-Policy=%q", got)
+	}
+
+	post := httptest.NewRecorder()
+	postRequest := httptest.NewRequest(
+		http.MethodPost, "/appeal/valid-token",
+		strings.NewReader("appeal_text=+Please+review+this.+"),
+	)
+	postRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(post, postRequest)
+	if post.Code != http.StatusOK ||
+		!strings.Contains(post.Body.String(), "appeal #4") ||
+		resolver.submitCalls != 1 || resolver.submitText != "Please review this." {
+		t.Fatalf("POST status=%d calls=%d text=%q body=%s",
+			post.Code, resolver.submitCalls, resolver.submitText, post.Body.String())
+	}
+
+	resolver.link.AppealID = 4
+	retry := httptest.NewRecorder()
+	retryRequest := httptest.NewRequest(
+		http.MethodPost, "/appeal/valid-token",
+		strings.NewReader("appeal_text=must+not+resubmit"),
+	)
+	retryRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(retry, retryRequest)
+	if retry.Code != http.StatusOK || resolver.submitCalls != 1 ||
+		!strings.Contains(retry.Body.String(), "appeal #4") {
+		t.Fatalf("retry status=%d calls=%d body=%s",
+			retry.Code, resolver.submitCalls, retry.Body.String())
+	}
+
+	resolver.appeal.Status = domain.ModerationAppealGranted
+	granted := httptest.NewRecorder()
+	handler.ServeHTTP(granted, httptest.NewRequest(
+		http.MethodGet, "/appeal/valid-token", nil,
+	))
+	if granted.Code != http.StatusOK ||
+		!strings.Contains(granted.Body.String(), "was granted") {
+		t.Fatalf("granted status=%d body=%s", granted.Code, granted.Body.String())
+	}
+}
+
+func TestHandlerModerationAppealFailsClosed(t *testing.T) {
+	resolver := &fakeModerationAppeals{}
+	handler, err := NewHandler(Config{
+		StickerSets: fakeResolver{}, ModerationAppeals: resolver,
+		PublicBaseURL: "https://telesrv.example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, httptest.NewRequest(
+		http.MethodGet, "/appeal/invalid", nil,
+	))
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing status=%d", missing.Code)
+	}
+
+	now := time.Now().UTC()
+	resolver.found = true
+	resolver.link = domain.ModerationAppealLink{
+		ID: 1, CaseID: 2, AppellantUserID: 3,
+		TokenHash: [32]byte{1}, ExpiresAt: now.Add(time.Hour), CreatedAt: now,
+	}
+	resolver.submitErr = domain.ErrModerationCaseConflict
+	conflict := httptest.NewRecorder()
+	conflictRequest := httptest.NewRequest(
+		http.MethodPost, "/appeal/valid",
+		strings.NewReader("appeal_text=still+finalizing"),
+	)
+	conflictRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	handler.ServeHTTP(conflict, conflictRequest)
+	if conflict.Code != http.StatusConflict ||
+		!strings.Contains(conflict.Body.String(), "still being finalized") {
+		t.Fatalf("conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
 }
 
 func (f *fakeUniqueGifts) UniqueBySlug(_ context.Context, slug string) (domain.UniqueStarGift, bool, error) {
@@ -340,6 +507,7 @@ func TestHandlerUsesConfiguredClientLinksAndBrand(t *testing.T) {
 		}},
 		PublicBaseURL: "https://links.example.test",
 		AppScheme:     "example-chat",
+		AppLinkBase:   "owpg://tenant.example.test",
 		WebBaseURL:    "https://web.example.test/client/",
 		AppName:       "Example Chat",
 	})
@@ -353,7 +521,7 @@ func TestHandlerUsesConfiguredClientLinksAndBrand(t *testing.T) {
 	}
 	body := rr.Body.String()
 	for _, want := range []string{
-		"example-chat://resolve?domain=Alice&amp;start=hello",
+		"owpg://tenant.example.test/Alice?start=hello",
 		"https://web.example.test/client/#?tgaddr=",
 		"Example Chat",
 		"Open Example Chat to send a message to @Alice.",
@@ -362,17 +530,17 @@ func TestHandlerUsesConfiguredClientLinksAndBrand(t *testing.T) {
 			t.Fatalf("body missing %q:\n%s", want, body)
 		}
 	}
-	if strings.Contains(body, "telesrv://") || strings.Contains(body, "https://web.telesrv.net") {
+	if strings.Contains(body, "telesrv://") || strings.Contains(body, "https://weba.telesrv.net") {
 		t.Fatalf("body contains stale default client link:\n%s", body)
 	}
 	for _, tc := range []struct {
 		path string
 		want string
 	}{
-		{path: "/addstickers/stickers_pack", want: "example-chat://addstickers?set=stickers_pack"},
-		{path: "/addemoji/emoji_pack", want: "example-chat://addemoji?set=emoji_pack"},
-		{path: "/addlist/shared-folder", want: "example-chat://addlist?slug=shared-folder"},
-		{path: "/nft/gift-1", want: "example-chat://nft?slug=gift-1"},
+		{path: "/addstickers/stickers_pack", want: "owpg://tenant.example.test/addstickers?set=stickers_pack"},
+		{path: "/addemoji/emoji_pack", want: "owpg://tenant.example.test/addemoji?set=emoji_pack"},
+		{path: "/addlist/shared-folder", want: "owpg://tenant.example.test/addlist?slug=shared-folder"},
+		{path: "/nft/gift-1", want: "owpg://tenant.example.test/nft?slug=gift-1"},
 	} {
 		rr := httptest.NewRecorder()
 		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, nil))
@@ -389,6 +557,8 @@ func TestNewHandlerRejectsInvalidClientLinkConfig(t *testing.T) {
 	}{
 		{name: "missing sticker resolver", cfg: Config{}},
 		{name: "official scheme", cfg: Config{StickerSets: fakeResolver{}, AppScheme: "tg"}},
+		{name: "official app link base", cfg: Config{StickerSets: fakeResolver{}, AppLinkBase: "tg://links.example.test"}},
+		{name: "app link base path", cfg: Config{StickerSets: fakeResolver{}, AppLinkBase: "owpg://links.example.test/root"}},
 		{name: "invalid Web base URL", cfg: Config{StickerSets: fakeResolver{}, WebBaseURL: "file:///tmp/web"}},
 		{name: "invalid app name", cfg: Config{StickerSets: fakeResolver{}, AppName: "bad\nname"}},
 	} {

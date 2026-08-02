@@ -69,6 +69,72 @@ func (h *durableDestroyLayerRPC) deletion() ([8]byte, int64) {
 	return h.authKeyID, h.sessionID
 }
 
+func TestClientMessageContentPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		typeID uint32
+		want   clientMessageContentPolicy
+	}{
+		{name: "api_rpc", typeID: tg.HelpGetConfigRequestTypeID, want: clientMessageContentRequired},
+		{name: "container", typeID: proto.MessageContainerTypeID, want: clientMessageContentForbidden},
+		{name: "msgs_ack", typeID: mt.MsgsAckTypeID, want: clientMessageContentForbidden},
+		{name: "msg_copy", typeID: mt.MsgCopyTypeID, want: clientMessageContentForbidden},
+		{name: "bad_msg_notification", typeID: mt.BadMsgNotificationTypeID, want: clientMessageContentOptional},
+		{name: "bad_server_salt", typeID: mt.BadServerSaltTypeID, want: clientMessageContentOptional},
+		{name: "msg_detailed_info", typeID: mt.MsgDetailedInfoTypeID, want: clientMessageContentOptional},
+		{name: "msg_new_detailed_info", typeID: mt.MsgNewDetailedInfoTypeID, want: clientMessageContentOptional},
+		{name: "ping", typeID: mt.PingRequestTypeID, want: clientMessageContentOptional},
+		{name: "ping_delay_disconnect", typeID: mt.PingDelayDisconnectRequestTypeID, want: clientMessageContentOptional},
+		{name: "get_future_salts", typeID: mt.GetFutureSaltsRequestTypeID, want: clientMessageContentOptional},
+		{name: "msgs_state_req", typeID: mt.MsgsStateReqTypeID, want: clientMessageContentOptional},
+		{name: "msg_resend_req", typeID: mt.MsgResendReqTypeID, want: clientMessageContentOptional},
+		{name: "msgs_all_info", typeID: mt.MsgsAllInfoTypeID, want: clientMessageContentOptional},
+		{name: "msgs_state_info", typeID: mt.MsgsStateInfoTypeID, want: clientMessageContentOptional},
+		{name: "destroy_session", typeID: mt.DestroySessionRequestTypeID, want: clientMessageContentOptional},
+		{name: "http_wait", typeID: mt.HTTPWaitRequestTypeID, want: clientMessageContentOptional},
+		{name: "rpc_drop_answer", typeID: mt.RPCDropAnswerRequestTypeID, want: clientMessageContentOptional},
+		{name: "destroy_auth_key", typeID: destroyAuthKeyRequestTypeID, want: clientMessageContentOptional},
+	}
+
+	now := time.Now()
+	msgID := proto.NewMessageIDGen(func() time.Time { return now }).New(proto.MessageFromClient)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := clientMessageContentPolicyFor(test.typeID); got != test.want {
+				t.Fatalf("content policy = %d, want %d", got, test.want)
+			}
+
+			evenCode := validateClientContainerEnvelope(msgID, 8, test.typeID)
+			oddCode := validateClientContainerEnvelope(msgID, 9, test.typeID)
+			directEvenCode := validateClientEnvelope(now, msgID, 8, test.typeID)
+			directOddCode := validateClientEnvelope(now, msgID, 9, test.typeID)
+			if directEvenCode != evenCode || directOddCode != oddCode {
+				t.Fatalf(
+					"top-level/container parity mismatch = top(%d,%d) container(%d,%d)",
+					directEvenCode, directOddCode, evenCode, oddCode,
+				)
+			}
+			switch test.want {
+			case clientMessageContentRequired:
+				if evenCode != badMsgSeqNotOdd || oddCode != 0 {
+					t.Fatalf("required content parity codes = even:%d odd:%d", evenCode, oddCode)
+				}
+			case clientMessageContentForbidden:
+				if evenCode != 0 || oddCode != badMsgSeqNotEven {
+					t.Fatalf("forbidden content parity codes = even:%d odd:%d", evenCode, oddCode)
+				}
+			case clientMessageContentOptional:
+				if evenCode != 0 || oddCode != 0 {
+					t.Fatalf("optional content parity codes = even:%d odd:%d", evenCode, oddCode)
+				}
+				if clientMessageIsContentRelated(test.typeID, 8) || !clientMessageIsContentRelated(test.typeID, 9) {
+					t.Fatal("optional service content bit was not derived from seq_no parity")
+				}
+			}
+		})
+	}
+}
+
 // TestEncryptedPingPong 验证 M2/M4：握手后 client 加密 ping，
 // server 回 new_session_created + pong + msgs_ack。
 func TestEncryptedPingPong(t *testing.T) {
@@ -79,7 +145,7 @@ func TestEncryptedPingPong(t *testing.T) {
 	clientMsgID := proto.NewMessageIDGen(time.Now)
 	const pingID int64 = 0x1234beef
 	pingMsgID := clientMsgID.New(proto.MessageFromClient)
-	sendEncrypted(t, conn, cipher, auth, pingMsgID, &mt.PingRequest{PingID: pingID})
+	sendEncryptedWithSeq(t, conn, cipher, auth, pingMsgID, 1, &mt.PingRequest{PingID: pingID})
 
 	replies := collectReplies(t, conn, cipher, auth.AuthKey, mt.PongTypeID)
 	mustHave(t, replies, mt.NewSessionCreatedTypeID, "new_session_created")
@@ -226,6 +292,55 @@ func TestMsgsStateReq(t *testing.T) {
 	for i, b := range info.Info {
 		if b != want[i] {
 			t.Fatalf("msgs_state_info[%d] = %d, want %d", i, b, want[i])
+		}
+	}
+}
+
+// TestTDLibReconnectRecoveryContainerAcceptsEvenServiceMessages reproduces the
+// first container TDLib emits after reopening an authenticated session with
+// unknown queries. All service entries and the outer container use the current
+// even sequence number. Rejecting msgs_state_req as a content-only constructor
+// turns the valid inner message into bad_msg_notification(code=64), after which
+// TDLib closes the session and retries the same container forever.
+func TestTDLibReconnectRecoveryContainerAcceptsEvenServiceMessages(t *testing.T) {
+	const dc = 2
+	addr, pub, _ := startTestServer(t, Options{DC: dc})
+	conn, auth, cipher := dialHandshake(t, addr, dc, pub)
+
+	ids := proto.NewMessageIDGen(time.Now)
+	pendingMsgID := ids.New(proto.MessageFromClient)
+	ackMsgID := ids.New(proto.MessageFromClient)
+	stateMsgID := ids.New(proto.MessageFromClient)
+	pingMsgID := ids.New(proto.MessageFromClient)
+	outerMsgID := ids.New(proto.MessageFromClient)
+	const (
+		pendingSeqNo int32 = 9
+		serviceSeqNo int32 = 10
+	)
+
+	pendingBody := mustEncodeTL(t, &mt.PingRequest{PingID: 0xc01d})
+	ackBody := mustEncodeTL(t, &mt.MsgsAck{MsgIDs: []int64{stateMsgID - 4}})
+	stateBody := mustEncodeTL(t, &mt.MsgsStateReq{MsgIDs: []int64{pendingMsgID, stateMsgID - 4}})
+	pingBody := mustEncodeTL(t, &mt.PingDelayDisconnectRequest{PingID: 0x5eed, DisconnectDelay: 60})
+	container := &proto.MessageContainer{Messages: []proto.Message{
+		{ID: pendingMsgID, SeqNo: int(pendingSeqNo), Bytes: len(pendingBody), Body: pendingBody},
+		{ID: ackMsgID, SeqNo: int(serviceSeqNo), Bytes: len(ackBody), Body: ackBody},
+		{ID: stateMsgID, SeqNo: int(serviceSeqNo), Bytes: len(stateBody), Body: stateBody},
+		{ID: pingMsgID, SeqNo: int(serviceSeqNo), Bytes: len(pingBody), Body: pingBody},
+	}}
+
+	sendEncryptedWithSeq(t, conn, cipher, auth, outerMsgID, serviceSeqNo, container)
+	frames := collectReplyFrames(t, conn, cipher, auth.AuthKey, map[uint32]int{
+		mt.MsgsStateInfoTypeID: 1,
+		mt.PongTypeID:          2,
+	})
+	for _, frame := range frames {
+		if frame.TypeID == mt.BadMsgNotificationTypeID {
+			var bad mt.BadMsgNotification
+			if err := bad.Decode(frame.Plain); err != nil {
+				t.Fatalf("decode bad_msg_notification: %v", err)
+			}
+			t.Fatalf("TDLib reconnect recovery container was rejected: %+v", bad)
 		}
 	}
 }

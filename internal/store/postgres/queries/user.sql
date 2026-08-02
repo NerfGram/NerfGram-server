@@ -23,7 +23,18 @@ ORDER BY id;
 SELECT * FROM users WHERE lower(username) = lower($1) AND username <> '' AND deleted_at IS NULL;
 
 -- name: SearchUsers :many
-WITH matched AS (
+WITH username_matches AS (
+  SELECT
+    peer_id,
+    bool_or(username_lower = sqlc.arg(query_lower)::text) AS exact
+  FROM peer_usernames
+  WHERE peer_type = 'user'
+    AND active
+    AND collectible_id IS NOT NULL
+    AND username_lower LIKE sqlc.arg(query_like)::text || '%' ESCAPE '\'
+  GROUP BY peer_id
+),
+matched AS (
   SELECT
     u.id,
     u.access_hash,
@@ -54,7 +65,7 @@ WITH matched AS (
     COALESCE(c.mutual, false)::boolean AS mutual,
     CASE
       WHEN sqlc.arg(phone_query)::text <> '' AND u.phone = sqlc.arg(phone_query)::text THEN 0
-      WHEN lower(u.username) = sqlc.arg(query_lower)::text THEN 1
+      WHEN COALESCE(um.exact, false) OR lower(u.username) = sqlc.arg(query_lower)::text THEN 1
       WHEN lower(COALESCE(NULLIF(c.contact_first_name, ''), u.first_name)) = sqlc.arg(query_lower)::text THEN 2
       WHEN lower(u.first_name) = sqlc.arg(query_lower)::text THEN 3
       WHEN c.contact_user_id IS NOT NULL THEN 4
@@ -62,11 +73,13 @@ WITH matched AS (
     END AS rank
   FROM users u
   LEFT JOIN contacts c ON c.user_id = sqlc.arg(current_user_id)::bigint AND c.contact_user_id = u.id
+  LEFT JOIN username_matches um ON um.peer_id = u.id
   WHERE u.id <> sqlc.arg(current_user_id)::bigint
     AND u.deleted_at IS NULL
     AND sqlc.arg(query_lower)::text <> ''
     AND (
       (sqlc.arg(phone_query)::text <> '' AND u.phone LIKE sqlc.arg(phone_query)::text || '%')
+      OR um.peer_id IS NOT NULL
       OR lower(u.username) LIKE sqlc.arg(query_like)::text || '%' ESCAPE '\'
       OR lower(u.first_name) LIKE '%' || sqlc.arg(query_like)::text || '%' ESCAPE '\'
       OR lower(u.last_name) LIKE '%' || sqlc.arg(query_like)::text || '%' ESCAPE '\'
@@ -160,6 +173,21 @@ RETURNING *;
 -- name: SetUserVerified :one
 UPDATE users
 SET verified = sqlc.arg(verified)::boolean,
+    updated_at = now()
+WHERE id = sqlc.arg(id)::bigint AND deleted_at IS NULL
+RETURNING *;
+
+-- name: SetUserScamFake :one
+UPDATE users
+SET scam = sqlc.arg(scam)::boolean,
+    fake = sqlc.arg(fake)::boolean,
+    updated_at = now()
+WHERE id = sqlc.arg(id)::bigint AND deleted_at IS NULL
+RETURNING *;
+
+-- name: SetUserSupport :one
+UPDATE users
+SET support = sqlc.arg(support)::boolean,
     updated_at = now()
 WHERE id = sqlc.arg(id)::bigint AND deleted_at IS NULL
 RETURNING *;

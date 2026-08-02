@@ -38,7 +38,66 @@ func LookupWallPaper(input tg.InputWallPaperClass) (tg.WallPaperClass, bool) {
 			return DefaultWallPaper(wallpaper), true
 		}
 	}
+	// account.getThemes/account.getChatThemes also advertise wallpapers nested
+	// in ThemeSettings. The default getWallPapers export is a filtered list and
+	// does not contain every nested entry, so these identities must remain part
+	// of the same lookup boundary or Android can render a theme that it cannot
+	// subsequently install.
+	for _, theme := range catalog.ChatThemes {
+		for _, settings := range theme.Settings {
+			if inputWallPaperMatches(input, settings.Wallpaper) {
+				return DefaultWallPaper(settings.Wallpaper), true
+			}
+		}
+	}
+	// DrKLO normally installs a default theme with the nested wallpaper slug
+	// stored on ThemeAccent. During accent restoration it can instead fall back
+	// to ThemeInfo.slug, which is the slug of the exact Theme advertised by
+	// account.getThemes. Accept that server-issued alias only when every setting
+	// of the matched theme points at one unambiguous file wallpaper.
+	if in, ok := input.(*tg.InputWallPaperSlug); ok {
+		if wallpaper, ok := lookupChatThemeWallpaperAlias(catalog.ChatThemes, in.Slug); ok {
+			return DefaultWallPaper(wallpaper), true
+		}
+	}
 	return nil, false
+}
+
+func lookupChatThemeWallpaperAlias(themes []appearance.ChatTheme, slug string) (appearance.Wallpaper, bool) {
+	if slug == "" {
+		return appearance.Wallpaper{}, false
+	}
+	var resolved appearance.Wallpaper
+	found := false
+	for _, theme := range themes {
+		if theme.Slug != slug || len(theme.Settings) == 0 {
+			continue
+		}
+		var themeWallpaper appearance.Wallpaper
+		for i, settings := range theme.Settings {
+			wallpaper := settings.Wallpaper
+			if wallpaper.Slug == "" || wallpaper.ID == 0 {
+				return appearance.Wallpaper{}, false
+			}
+			if i == 0 {
+				themeWallpaper = wallpaper
+				continue
+			}
+			if !sameWallpaperIdentity(themeWallpaper, wallpaper) {
+				return appearance.Wallpaper{}, false
+			}
+		}
+		if found && !sameWallpaperIdentity(resolved, themeWallpaper) {
+			return appearance.Wallpaper{}, false
+		}
+		resolved = themeWallpaper
+		found = true
+	}
+	return resolved, found
+}
+
+func sameWallpaperIdentity(a, b appearance.Wallpaper) bool {
+	return a.ID == b.ID && a.AccessHash == b.AccessHash && a.Slug == b.Slug
 }
 
 // LookupWallPapers resolves multiple wallpapers from the Default seed catalog.

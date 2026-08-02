@@ -50,7 +50,7 @@ ALTER TABLE public.user_update_events ADD CONSTRAINT user_update_events_type_che
     'contacts_reset', 'dialog_pinned', 'pinned_dialogs', 'pinned_messages', 'dialog_unread_mark',
     'peer_settings', 'peer_story_blocked', 'user_phone', 'user_emoji_status', 'delete_messages',
     'dialog_filter', 'dialog_filter_order', 'dialog_filters', 'folder_peers',
-    'channel_available_messages', 'channel_view_forum_as_messages', 'channel_state',
+    'channel_view_forum_as_messages', 'channel_state',
     'saved_dialog_pinned', 'pinned_saved_dialogs', 'story', 'read_stories',
     'sent_story_reaction', 'new_story_reaction', 'noop',
     'read_channel_discussion_inbox', 'read_channel_discussion_outbox'

@@ -3,11 +3,12 @@ package tdesktop
 import (
 	"github.com/iamxvbaba/td/tg"
 
+	compatandroid "telesrv/internal/compat/android"
 	"telesrv/internal/seed/catalog"
 )
 
 const (
-	appConfigHash     = 17 // app config 内容变更时必须递增，否则缓存端只会收到 notModified。
+	appConfigHash     = 18 // app config 内容变更时必须递增，否则缓存端只会收到 notModified。
 	countriesListHash = 1
 	timezonesListHash = 1
 )
@@ -38,8 +39,15 @@ func readMarkAppConfig(mapboxToken string) *tg.JSONObject {
 		// premiumCanBuy()=!premium_purchase_blocked 耦合，置 true 会同时隐藏送礼入口
 		// （详见 app/help/service.go 主配置注释）。这里是无 HelpService 时的最小回退。
 		{Key: "premium_purchase_blocked", Value: &tg.JSONBool{Value: false}},
+		{Key: "stars_purchase_blocked", Value: &tg.JSONBool{Value: false}},
 		// stargifts_blocked=false：DrKLO 缺省 stargiftsBlocked=true 会隐藏 star gift 送礼网格。
 		{Key: "stargifts_blocked", Value: &tg.JSONBool{Value: false}},
+		{Key: "giveaway_gifts_purchase_available", Value: &tg.JSONBool{Value: true}},
+		{Key: "giveaway_boosts_per_premium", Value: &tg.JSONNumber{Value: 4}},
+		{Key: "giveaway_countries_max", Value: &tg.JSONNumber{Value: 10}},
+		{Key: "giveaway_add_peers_max", Value: &tg.JSONNumber{Value: 10}},
+		{Key: "giveaway_period_max", Value: &tg.JSONNumber{Value: 604800}},
+		{Key: "premium_playmarket_direct_currency_list", Value: tgStringArray(compatandroid.DirectInvoiceCurrencies())},
 		{Key: "reactions_user_max_premium", Value: &tg.JSONNumber{Value: 3}},
 		// DrKLO 频道自定义 reaction 编辑页用它作为可选 reaction 数量上限。
 		{Key: "boosts_channel_level_max", Value: &tg.JSONNumber{Value: 100}},
@@ -86,6 +94,14 @@ func readMarkAppConfig(mapboxToken string) *tg.JSONObject {
 		}}})
 	}
 	return &tg.JSONObject{Value: values}
+}
+
+func tgStringArray(values []string) *tg.JSONArray {
+	result := &tg.JSONArray{Value: make([]tg.JSONValueClass, 0, len(values))}
+	for _, value := range values {
+		result.Value = append(result.Value, &tg.JSONString{Value: value})
+	}
+	return result
 }
 
 // fallbackTimezones 是 catalog 未 seed 时的内置最小时区集。

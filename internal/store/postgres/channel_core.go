@@ -317,6 +317,7 @@ func (s *ChannelStore) GetChannels(ctx context.Context, viewerUserID int64, chan
 SELECT `+channelColumns+`,
        m.channel_id, m.user_id, m.inviter_user_id, m.role, m.status, m.joined_at, m.left_at,
        m.admin_rights::text, m.banned_rights::text, m.rank, m.available_min_id, m.available_min_pts,
+       m.history_clear_anchor_id, m.history_clear_anchor_date,
        m.read_inbox_max_id, m.read_outbox_max_id, m.unread_mark, m.slowmode_last_send_date
 FROM channels c
 JOIN channel_members m ON m.channel_id = c.id AND m.user_id = $1
@@ -395,6 +396,10 @@ WHERE c.id = ANY($2::bigint[]) AND NOT c.deleted`, viewerUserID, ids)
 	if err != nil {
 		return nil, err
 	}
+	publicUsernameIDs, err := activeCollectibleUsernamePeerIDs(ctx, s.db, peerUsernameTypeChannel, remaining)
+	if err != nil {
+		return nil, err
+	}
 	for _, channel := range channels {
 		if member, ok := linkedGuests[channel.ID]; ok {
 			views[channel.ID] = domain.ChannelView{
@@ -427,7 +432,8 @@ WHERE c.id = ANY($2::bigint[]) AND NOT c.deleted`, viewerUserID, ids)
 				continue
 			}
 		}
-		if !publicPreviewableChannel(channel) {
+		_, hasActiveUsername := publicUsernameIDs[channel.ID]
+		if !publicPreviewableChannel(channel, hasActiveUsername) {
 			continue
 		}
 		existing, found := previewMembers[channel.ID]
@@ -496,7 +502,7 @@ func scanChannel(row rowScanner) (domain.Channel, error) {
 
 func channelScanDest(ch *domain.Channel, rights, reactionPolicy *string, wallpaper **string) []any {
 	return []any{
-		&ch.ID, &ch.AccessHash, &ch.CreatorUserID, &ch.Title, &ch.About, &ch.Username, &ch.Verified,
+		&ch.ID, &ch.AccessHash, &ch.CreatorUserID, &ch.Title, &ch.About, &ch.Username, &ch.Verified, &ch.Scam, &ch.Fake, &ch.Gigagroup,
 		&ch.Broadcast, &ch.Megagroup, &ch.Forum, &ch.ForumTabs, &ch.Autotranslation, &ch.RestrictedSponsored, &ch.BroadcastMessagesAllowed, &ch.SendPaidMessagesStars, &ch.NoForwards, &ch.JoinToSend, &ch.JoinRequest, &ch.Signatures, &ch.PreHistoryHidden, &ch.ParticipantsHidden, &ch.AntiSpam, &ch.HasLink, &ch.LinkedChatID, &ch.LinkedCommunityID, &ch.Monoforum, &ch.LinkedMonoforumID, &ch.SlowmodeSeconds, &ch.BoostsUnrestrict, rights,
 		reactionPolicy, &ch.Color.HasColor, &ch.Color.Color, &ch.Color.BackgroundEmojiID, &ch.ProfileColor.HasColor, &ch.ProfileColor.Color, &ch.ProfileColor.BackgroundEmojiID, &ch.EmojiStatus.DocumentID, &ch.EmojiStatus.Until,
 		wallpaper, &ch.ParticipantsCount, &ch.AdminsCount, &ch.KickedCount, &ch.BannedCount, &ch.TopMessageID,
@@ -514,17 +520,18 @@ func finishChannelScan(ch *domain.Channel, rights, reactionPolicy string, wallpa
 	}
 }
 
-func publicPreviewableChannel(channel domain.Channel) bool {
+func publicPreviewableChannel(channel domain.Channel, hasActiveUsername bool) bool {
 	return !channel.Deleted &&
 		(channel.Broadcast || channel.Megagroup) &&
-		strings.TrimSpace(channel.Username) != ""
+		(strings.TrimSpace(channel.Username) != "" || hasActiveUsername)
 }
 
 func refreshChannelCountsTx(ctx context.Context, tx pgx.Tx, channel domain.Channel) (domain.Channel, error) {
 	var participants, admins, kicked, banned int
 	rows, err := tx.Query(ctx, `
 SELECT channel_id, user_id, inviter_user_id, role, status, joined_at, left_at, admin_rights::text, banned_rights::text,
-       rank, available_min_id, available_min_pts, read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
+       rank, available_min_id, available_min_pts, history_clear_anchor_id, history_clear_anchor_date,
+       read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
 FROM channel_members
 WHERE channel_id = $1`, channel.ID)
 	if err != nil {

@@ -73,11 +73,33 @@ func normalizeStickerEmoticon(e string) string {
 	return strings.TrimSpace(e)
 }
 
+// normalizeStickerSearchEmoticon 解析官方客户端通过 messages.getStickers
+// 传递的特殊贴纸类别标记。TDesktop、DrKLO Android 与 Telegram-iOS 都使用
+// wave+star 获取 greeting、double-star 获取 premium preview、folder+star 获取
+// premium/cloud catalog；它们不是普通复合 emoji，需先映射到 seed pack 的基础键。
+//
+// 只匹配这三个完整标记，不能把任意复合 emoji 拆分成单个 emoji，否则会改变普通
+// sticker search 的精确匹配语义。先去掉 variation selector，可同时接纳三端的
+// Unicode 表示差异。
+func normalizeStickerSearchEmoticon(e string) string {
+	e = normalizeStickerEmoticon(e)
+	switch e {
+	case "👋⭐":
+		return "👋"
+	case "⭐⭐":
+		return "⭐"
+	case "📂⭐":
+		return "📂"
+	default:
+		return e
+	}
+}
+
 func (r *Router) onMessagesGetStickers(ctx context.Context, req *tg.MessagesGetStickersRequest) (tg.MessagesStickersClass, error) {
 	if req == nil || r.deps.Files == nil || r.emojiStickers == nil {
 		return &tg.MessagesStickers{Hash: 0, Stickers: []tg.DocumentClass{}}, nil
 	}
-	docIDs := r.emojiStickers.lookup(normalizeStickerEmoticon(req.Emoticon), func() map[string][]int64 {
+	docIDs := r.emojiStickers.lookup(normalizeStickerSearchEmoticon(req.Emoticon), func() map[string][]int64 {
 		return r.buildEmojiStickerIndex(ctx)
 	})
 	if len(docIDs) > maxStickersPerEmoji {

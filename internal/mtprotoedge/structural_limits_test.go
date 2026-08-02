@@ -664,4 +664,24 @@ func TestGZIPExpansionUsesProcessBudgetBeforeDecode(t *testing.T) {
 	if got := s.frameBudget.usedBytes(); got != 0 {
 		t.Fatalf("released expansion budget = %d, want zero", got)
 	}
+
+	s.frameBudget = newInboundFrameBudget(2 * maxSingleGZIPExpandedBytes)
+	if _, release, err := s.decodeGZIPWithGlobalBudgetLimit(&wrapped, len(payload)-1); err == nil {
+		release()
+		t.Fatal("caller-bounded gzip decode accepted an oversized expansion")
+	} else if got := gzipExpansionWork(err); got != len(payload) {
+		t.Fatalf("caller-bounded rejected expansion work = %d, want %d", got, len(payload))
+	}
+	if got := s.frameBudget.usedBytes(); got != 0 {
+		t.Fatalf("caller-bounded rejection leaked %d bytes", got)
+	}
+
+	s.frameBudget = newInboundFrameBudget(int64(len(payload) - 1))
+	if _, release, err := s.decodeGZIPWithGlobalBudgetLimit(&wrapped, len(payload)); !errors.Is(err, ErrInboundFrameBudgetExceeded) {
+		release()
+		t.Fatalf("caller-bounded process budget error = %v, want ErrInboundFrameBudgetExceeded", err)
+	}
+	if got := s.frameBudget.usedBytes(); got != 0 {
+		t.Fatalf("caller-bounded reservation failure leaked %d bytes", got)
+	}
 }

@@ -76,6 +76,7 @@ type monoforumSendFingerprintPayload struct {
 	Entities       []domain.MessageEntity `json:"entities"`
 	Media          *domain.MessageMedia   `json:"media"`
 	ReplyTo        *domain.MessageReply   `json:"reply_to"`
+	Forward        *domain.MessageForward `json:"forward,omitempty"`
 	Silent         bool                   `json:"silent"`
 	NoForwards     bool                   `json:"noforwards"`
 	SuggestedPost  *domain.SuggestedPost  `json:"suggested_post,omitempty"`
@@ -168,6 +169,7 @@ func MonoforumSendFingerprint(req domain.SendMonoforumMessageRequest) ([]byte, e
 		Entities:       req.Entities,
 		Media:          req.Media,
 		ReplyTo:        req.ReplyTo,
+		Forward:        req.Forward,
 		Silent:         req.Silent,
 		NoForwards:     req.NoForwards,
 		SuggestedPost:  req.SuggestedPost,

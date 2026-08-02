@@ -69,24 +69,29 @@ func (p Peer) IsSelfUser(userID int64) bool {
 
 // Dialog 是账号的一条会话摘要。
 type Dialog struct {
-	Peer                  Peer
-	ChannelLeft           bool
-	FolderID              int
-	TopMessage            int
-	TopMessageDate        int
-	ReadInboxMaxID        int
-	ReadOutboxMaxID       int
-	UnreadCount           int
-	UnreadMentions        int
-	UnreadReactions       int
-	TTLPeriod             int
-	ThemeEmoticon         string
-	HasScheduled          bool
-	Pinned                bool
-	PinnedOrder           int
-	UnreadMark            bool
-	ViewForumAsMessages   bool
-	PeerSettingsBarHidden bool
+	Peer           Peer
+	ChannelLeft    bool
+	FolderID       int
+	TopMessage     int
+	TopMessageDate int
+	// HistoryClearAnchorID/Date are internal owner-view projection metadata.
+	// They are not TL dialog fields; dialog response assembly uses them to
+	// materialize the matching messageActionHistoryClear top payload.
+	HistoryClearAnchorID   int
+	HistoryClearAnchorDate int
+	ReadInboxMaxID         int
+	ReadOutboxMaxID        int
+	UnreadCount            int
+	UnreadMentions         int
+	UnreadReactions        int
+	TTLPeriod              int
+	ThemeEmoticon          string
+	HasScheduled           bool
+	Pinned                 bool
+	PinnedOrder            int
+	UnreadMark             bool
+	ViewForumAsMessages    bool
+	PeerSettingsBarHidden  bool
 	// Pts 是 channel peer 当前 channel pts；客户端用 dialog.pts 初始化本地
 	// channel 序列并决定 getChannelDifference 起点，channel dialog 必填。
 	Pts   int

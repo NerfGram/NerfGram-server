@@ -17,7 +17,7 @@ func (s *ChannelStore) GetChannelMessageViews(_ context.Context, req domain.Chan
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	channel, member, err := s.channelAndMemberLocked(req.UserID, req.ChannelID)
+	channel, member, _, err := s.channelForViewerLocked(req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageViewsResult{}, err
 	}
@@ -33,7 +33,8 @@ func (s *ChannelStore) GetChannelMessageViews(_ context.Context, req domain.Chan
 		if _, ok := wanted[msg.ID]; !ok {
 			continue
 		}
-		if msg.Deleted || msg.ID <= member.AvailableMinID {
+		if msg.Deleted || msg.ID <= member.AvailableMinID ||
+			!channelMessageVisibleToViewerLocked(channel, member, req.UserID, msg) {
 			continue
 		}
 		visible[msg.ID] = struct{}{}

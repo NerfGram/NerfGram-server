@@ -67,6 +67,13 @@ func (r *Router) checkSendRateLimit(ctx context.Context, userID int64, cost int)
 	}
 	allowed, retryAfter, err := r.deps.Limiter.AllowN(ctx, sendRateLimitKeyPrefix+strconv.FormatInt(userID, 10), cost, limit, window)
 	if err != nil {
+		r.log.Warn("message send rate limiter failed",
+			append(r.contextLogFields(ctx),
+				zap.Error(err),
+				zap.Int("cost", cost),
+				zap.Int("limit", limit),
+				zap.Duration("window", window),
+			)...)
 		return internalErr()
 	}
 	if allowed {

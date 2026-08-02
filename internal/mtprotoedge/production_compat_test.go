@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -25,10 +26,72 @@ func (c *Conn) ForceClose() {
 	c.waitOutboundShutdown()
 }
 
-// newRPCResultCache keeps older focused cache tests concise without exposing a
-// second production constructor.
-func newRPCResultCache(now func() time.Time) *rpcResultCache {
-	return newRPCResultCacheWithFlightLimit(now, rpcResultFlightDefaultMaxPending)
+type rpcReplayStoreForTest struct {
+	mu      sync.Mutex
+	results map[rpcExecutionKey]*encodedOutboundMessage
+}
+
+func newRPCReplayStoreForTest() *rpcReplayStoreForTest {
+	return &rpcReplayStoreForTest{results: make(map[rpcExecutionKey]*encodedOutboundMessage)}
+}
+
+func (s *rpcReplayStoreForTest) rpcResult(
+	authKeyID [8]byte,
+	sessionID, reqMsgID int64,
+) (*encodedOutboundMessage, bool) {
+	if s == nil {
+		return nil, false
+	}
+	key := rpcExecutionKey{authKeyID: authKeyID, sessionID: sessionID, reqMsgID: reqMsgID}
+	s.mu.Lock()
+	result, ok := s.results[key]
+	s.mu.Unlock()
+	return result, ok
+}
+
+func (s *rpcReplayStoreForTest) put(
+	authKeyID [8]byte,
+	sessionID, reqMsgID int64,
+	encoded *encodedOutboundMessage,
+) {
+	key := rpcExecutionKey{authKeyID: authKeyID, sessionID: sessionID, reqMsgID: reqMsgID}
+	s.mu.Lock()
+	s.results[key] = encoded
+	s.mu.Unlock()
+}
+
+func newRPCExecutionLedgerForTest(now func() time.Time, maxPending int) *rpcExecutionLedger {
+	return newRPCExecutionLedger(now, rpcExecutionLedgerCapacity{
+		maxPending: maxPending, maxPendingPerAuth: maxPending,
+		globalMaxEntries: rpcExecutionMaxEntries,
+		authMaxEntries:   rpcExecutionMaxEntries, sessionMaxEntries: rpcExecutionMaxEntries,
+		replayStore: newRPCReplayStoreForTest(),
+	})
+}
+
+func newRPCExecutionLedgerForServerTest(s *Server, now func() time.Time, maxPending int) *rpcExecutionLedger {
+	if s == nil || s.conns == nil {
+		panic("newRPCExecutionLedgerForServerTest requires a server SessionManager")
+	}
+	return newRPCExecutionLedger(now, rpcExecutionLedgerCapacity{
+		maxPending: maxPending, maxPendingPerAuth: maxPending,
+		globalMaxEntries: rpcExecutionMaxEntries,
+		authMaxEntries:   rpcExecutionMaxEntries, sessionMaxEntries: rpcExecutionMaxEntries,
+		replayStore: s.conns,
+	})
+}
+
+func (l *rpcExecutionLedger) completeReplayableForTest(
+	authKeyID [8]byte,
+	sessionID, reqMsgID int64,
+	encoded *encodedOutboundMessage,
+) {
+	store, ok := l.replayStore.(*rpcReplayStoreForTest)
+	if !ok {
+		panic("completeReplayableForTest requires rpcReplayStoreForTest")
+	}
+	store.put(authKeyID, sessionID, reqMsgID, encoded)
+	l.Complete(authKeyID, sessionID, reqMsgID, encoded, true)
 }
 
 // Conns is a white-box test accessor. Production wires the shared manager

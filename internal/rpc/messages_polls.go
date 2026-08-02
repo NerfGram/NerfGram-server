@@ -265,12 +265,14 @@ func (r *Router) onMessagesGetUnreadPollVotes(ctx context.Context, req *tg.Messa
 	if topMsgID, ok := req.GetTopMsgID(); ok && (topMsgID < 0 || topMsgID > domain.MaxMessageBoxID) {
 		return nil, messageIDInvalidErr()
 	}
-	return &tg.MessagesMessages{
+	result := &tg.MessagesMessages{
 		Messages: []tg.MessageClass{},
 		Topics:   []tg.ForumTopicClass{},
 		Chats:    r.chatsForInputPeer(ctx, userID, req.Peer),
 		Users:    []tg.UserClass{},
-	}, nil
+	}
+	r.applyPeerReadModelsToMessages(ctx, userID, result)
+	return result, nil
 }
 
 func (r *Router) onMessagesReadPollVotes(ctx context.Context, req *tg.MessagesReadPollVotesRequest) (*tg.MessagesAffectedHistory, error) {

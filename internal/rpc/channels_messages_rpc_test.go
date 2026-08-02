@@ -174,6 +174,7 @@ func TestChannelsDeleteHistoryLocalClearEmitsAvailableMessagesUpdate(t *testing.
 	r := New(Config{}, Deps{
 		Users:    appusers.NewService(userStore),
 		Channels: appchannels.NewService(channelStore),
+		Dialogs:  appdialogs.NewService(memory.NewDialogStore(), channelStore),
 		Updates:  updateSvc,
 		Sessions: sessions,
 	}, zaptest.NewLogger(t), clock.System)
@@ -193,7 +194,14 @@ func TestChannelsDeleteHistoryLocalClearEmitsAvailableMessagesUpdate(t *testing.
 	if err != nil {
 		t.Fatalf("send channel message: %v", err)
 	}
-	msg := sent.(*tg.Updates).Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message)
+	newChannelUpdate := sent.(*tg.Updates).Updates[1].(*tg.UpdateNewChannelMessage)
+	msg := newChannelUpdate.Message.(*tg.Message)
+	clearSince := int(time.Now().Unix()) - 1
+	stateBefore, err := updateSvc.CurrentState(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("account state before clear: %v", err)
+	}
+	pushesBefore := len(sessions.pushedUserIDs())
 	cleared, err := r.onChannelsDeleteHistory(WithUserID(ctx, owner.ID), &tg.ChannelsDeleteHistoryRequest{
 		Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
 		MaxID:   msg.ID,
@@ -202,42 +210,133 @@ func TestChannelsDeleteHistoryLocalClearEmitsAvailableMessagesUpdate(t *testing.
 		t.Fatalf("delete channel history local: %v", err)
 	}
 	updates, ok := cleared.(*tg.Updates)
-	if !ok || len(updates.Updates) != 2 {
-		t.Fatalf("clear response = %T %+v, want available update plus pts bookkeeping", cleared, cleared)
+	if !ok || len(updates.Updates) != 1 {
+		t.Fatalf("clear response = %T %+v, want one no-pts available update", cleared, cleared)
 	}
 	available, ok := updates.Updates[0].(*tg.UpdateChannelAvailableMessages)
 	if !ok || available.ChannelID != channel.ID || available.AvailableMinID != msg.ID {
 		t.Fatalf("clear update = %#v, want updateChannelAvailableMessages channel=%d min=%d", updates.Updates[0], channel.ID, msg.ID)
 	}
-	// updateChannelAvailableMessages 不带账号 pts，事件占用的 pts 槽位
-	// 必须用空 updateDeleteMessages 显式同步给客户端。
-	bookkeeping, ok := updates.Updates[1].(*tg.UpdateDeleteMessages)
-	if !ok || len(bookkeeping.Messages) != 0 || bookkeeping.Pts <= 0 || bookkeeping.PtsCount != 1 {
-		t.Fatalf("clear bookkeeping = %#v, want empty updateDeleteMessages carrying the account pts step", updates.Updates[1])
+	stateAfter, err := updateSvc.CurrentState(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("account state after clear: %v", err)
+	}
+	if stateAfter.Pts != stateBefore.Pts {
+		t.Fatalf("account pts advanced on local channel clear: before=%d after=%d", stateBefore.Pts, stateAfter.Pts)
 	}
 	pushed := sessions.snapshot()
 	if pushed.userID != owner.ID {
 		t.Fatalf("pushed user = %d, want owner %d", pushed.userID, owner.ID)
 	}
 	pushedUpdates, ok := pushed.message.(*tg.Updates)
-	if !ok || len(pushedUpdates.Updates) != 2 {
-		t.Fatalf("pushed clear update = %T %+v, want available update plus pts bookkeeping", pushed.message, pushed.message)
+	if !ok || len(pushedUpdates.Updates) != 1 {
+		t.Fatalf("pushed clear update = %T %+v, want one no-pts available update", pushed.message, pushed.message)
 	}
 	if _, ok := pushedUpdates.Updates[0].(*tg.UpdateChannelAvailableMessages); !ok {
 		t.Fatalf("pushed update[0] = %T, want updateChannelAvailableMessages", pushedUpdates.Updates[0])
 	}
-	diff, err := r.onUpdatesGetDifference(WithUserID(ctx, owner.ID), &tg.UpdatesGetDifferenceRequest{Pts: 0})
+	if got := len(sessions.pushedUserIDs()) - pushesBefore; got != 1 {
+		t.Fatalf("clear online pushes = %d, want exactly one owner-session fanout", got)
+	}
+	diff, err := updateSvc.GetDifference(ctx, [8]byte{}, owner.ID, stateBefore)
 	if err != nil {
 		t.Fatalf("get difference: %v", err)
 	}
-	full, ok := diff.(*tg.UpdatesDifference)
-	if !ok || len(full.OtherUpdates) != 1 {
-		t.Fatalf("difference = %T %+v, want one other update", diff, diff)
+	if len(diff.Events) != 0 || diff.State.Pts != stateBefore.Pts {
+		t.Fatalf("difference after no-pts clear = %+v, want no durable account event", diff)
 	}
-	if diffUpdate, ok := full.OtherUpdates[0].(*tg.UpdateChannelAvailableMessages); !ok || diffUpdate.ChannelID != channel.ID || diffUpdate.AvailableMinID != msg.ID {
-		t.Fatalf("difference update = %#v, want updateChannelAvailableMessages", full.OtherUpdates[0])
+	offline, err := r.onUpdatesGetDifference(WithUserID(ctx, owner.ID), &tg.UpdatesGetDifferenceRequest{
+		Pts:  stateBefore.Pts,
+		Date: clearSince,
+	})
+	if err != nil {
+		t.Fatalf("account difference after offline local clear: %v", err)
+	}
+	offlineDiff, ok := offline.(*tg.UpdatesDifference)
+	if !ok {
+		t.Fatalf("offline account difference = %T %+v, want updates.difference", offline, offline)
+	}
+	var accountAvailable *tg.UpdateChannelAvailableMessages
+	for _, update := range offlineDiff.OtherUpdates {
+		if value, ok := update.(*tg.UpdateChannelAvailableMessages); ok {
+			accountAvailable = value
+			break
+		}
+	}
+	if accountAvailable == nil ||
+		accountAvailable.ChannelID != channel.ID ||
+		accountAvailable.AvailableMinID != msg.ID {
+		t.Fatalf("offline account updates = %+v, want updateChannelAvailableMessages channel=%d min=%d",
+			offlineDiff.OtherUpdates, channel.ID, msg.ID)
+	}
+	if offlineDiff.State.Pts != stateBefore.Pts || offlineDiff.State.Date < clearSince {
+		t.Fatalf("offline account state = %+v, want unchanged pts=%d and non-regressing date", offlineDiff.State, stateBefore.Pts)
 	}
 
+	for attempt := 1; attempt <= 2; attempt++ {
+		channelOffline, err := r.onUpdatesGetChannelDifference(WithUserID(ctx, owner.ID), &tg.UpdatesGetChannelDifferenceRequest{
+			Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
+			Filter:  &tg.ChannelMessagesFilterEmpty{},
+			Pts:     newChannelUpdate.Pts,
+			Limit:   100,
+		})
+		if err != nil {
+			t.Fatalf("channel difference attempt %d after offline local clear: %v", attempt, err)
+		}
+		channelDiff, ok := channelOffline.(*tg.UpdatesChannelDifferenceEmpty)
+		if !ok || channelDiff.Pts != newChannelUpdate.Pts {
+			t.Fatalf("channel difference attempt %d = %T %+v, want empty with unchanged channel pts=%d",
+				attempt, channelOffline, channelOffline, newChannelUpdate.Pts)
+		}
+	}
+
+	req := &tg.MessagesGetDialogsRequest{OffsetPeer: &tg.InputPeerEmpty{}, Limit: 20}
+	var b bin.Buffer
+	if err := req.Encode(&b); err != nil {
+		t.Fatalf("encode get dialogs after clear: %v", err)
+	}
+	enc, err := r.Dispatch(WithUserID(ctx, owner.ID), [8]byte{}, 0, &b)
+	if err != nil {
+		t.Fatalf("dispatch get dialogs after clear: %v", err)
+	}
+	dialogs, ok := enc.(*tg.MessagesDialogs)
+	if !ok || len(dialogs.Dialogs) != 1 || len(dialogs.Messages) != 1 {
+		t.Fatalf("dialogs after cold projection = %T %+v, want one anchored dialog/message", enc, enc)
+	}
+	dialog := dialogs.Dialogs[0].(*tg.Dialog)
+	service, ok := dialogs.Messages[0].(*tg.MessageService)
+	if !ok || dialog.TopMessage != msg.ID || service.ID != msg.ID {
+		t.Fatalf("cold dialog projection = dialog=%+v message=%T %+v, want history-clear top %d", dialog, dialogs.Messages[0], dialogs.Messages[0], msg.ID)
+	}
+	if _, ok := service.Action.(*tg.MessageActionHistoryClear); !ok {
+		t.Fatalf("cold dialog service action = %T, want messageActionHistoryClear", service.Action)
+	}
+
+	historyReq := &tg.MessagesGetHistoryRequest{
+		Peer:  &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
+		Limit: 20,
+	}
+	b.Reset()
+	if err := historyReq.Encode(&b); err != nil {
+		t.Fatalf("encode get history after clear: %v", err)
+	}
+	historyEnc, err := r.Dispatch(WithUserID(ctx, owner.ID), [8]byte{}, 0, &b)
+	if err != nil {
+		t.Fatalf("dispatch get history after clear: %v", err)
+	}
+	history, ok := historyEnc.(*tg.MessagesChannelMessages)
+	if !ok || len(history.Messages) != 1 {
+		t.Fatalf("history after cold projection = %T %+v, want one history-clear marker", historyEnc, historyEnc)
+	}
+	historyService, ok := history.Messages[0].(*tg.MessageService)
+	if !ok || historyService.ID != msg.ID {
+		t.Fatalf("cold history projection = %T %+v, want service marker %d", history.Messages[0], history.Messages[0], msg.ID)
+	}
+	if _, ok := historyService.Action.(*tg.MessageActionHistoryClear); !ok {
+		t.Fatalf("cold history service action = %T, want messageActionHistoryClear", historyService.Action)
+	}
+
+	stalePushesBefore := len(sessions.pushedUserIDs())
 	stale, err := r.onChannelsDeleteHistory(WithUserID(ctx, owner.ID), &tg.ChannelsDeleteHistoryRequest{
 		Channel: &tg.InputChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash},
 		MaxID:   msg.ID - 1,
@@ -246,12 +345,15 @@ func TestChannelsDeleteHistoryLocalClearEmitsAvailableMessagesUpdate(t *testing.
 		t.Fatalf("stale delete channel history local: %v", err)
 	}
 	staleUpdates, ok := stale.(*tg.Updates)
-	if !ok || len(staleUpdates.Updates) != 2 {
-		t.Fatalf("stale clear response = %T %+v, want monotonic update plus pts bookkeeping", stale, stale)
+	if !ok || len(staleUpdates.Updates) != 1 {
+		t.Fatalf("stale clear response = %T %+v, want monotonic absolute update", stale, stale)
 	}
 	staleAvailable, ok := staleUpdates.Updates[0].(*tg.UpdateChannelAvailableMessages)
 	if !ok || staleAvailable.ChannelID != channel.ID || staleAvailable.AvailableMinID != msg.ID {
 		t.Fatalf("stale clear update = %#v, want monotonic updateChannelAvailableMessages channel=%d min=%d", staleUpdates.Updates[0], channel.ID, msg.ID)
+	}
+	if got := len(sessions.pushedUserIDs()); got != stalePushesBefore {
+		t.Fatalf("stale clear pushed another online update: before=%d after=%d", stalePushesBefore, got)
 	}
 }
 
@@ -733,9 +835,11 @@ func TestChannelsSearchPostsReturnsPublicPostsWithSeekPaging(t *testing.T) {
 	viewer, _ := userStore.Create(ctx, domain.User{AccessHash: 91002, Phone: "15550091002", FirstName: "Viewer"})
 	channelStore := memory.NewChannelStore()
 	channelService := appchannels.NewService(channelStore)
+	verify := newFakeBotVerifications()
 	r := New(Config{}, Deps{
-		Users:    appusers.NewService(userStore),
-		Channels: channelService,
+		Users:            appusers.NewService(userStore),
+		Channels:         channelService,
+		BotVerifications: verify,
 	}, zaptest.NewLogger(t), clock.System)
 	public, err := channelService.CreateChannel(ctx, owner.ID, domain.CreateChannelRequest{
 		Title:     "Public Search",
@@ -744,6 +848,14 @@ func TestChannelsSearchPostsReturnsPublicPostsWithSeekPaging(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("create public channel: %v", err)
+	}
+	const searchPostsIcon = int64(8800021)
+	searchPostsPeer := domain.Peer{Type: domain.PeerTypeChannel, ID: public.Channel.ID}
+	verify.marks[searchPostsPeer] = domain.CustomVerification{
+		VerifierBotID:  777000123,
+		Peer:           searchPostsPeer,
+		IconDocumentID: searchPostsIcon,
+		Description:    "Verified search result",
 	}
 	if _, err := channelService.UpdateUsername(ctx, owner.ID, domain.UpdateChannelUsernameRequest{
 		UserID:    owner.ID,
@@ -818,6 +930,7 @@ func TestChannelsSearchPostsReturnsPublicPostsWithSeekPaging(t *testing.T) {
 	if peer, ok := first.PeerID.(*tg.PeerChannel); !ok || peer.ChannelID != public.Channel.ID {
 		t.Fatalf("first result peer = %#v, want public channel %d", first.PeerID, public.Channel.ID)
 	}
+	assertMessagesEnvelopeBotVerificationIcon(t, got, searchPostsPeer, searchPostsIcon)
 
 	page2 := &tg.ChannelsSearchPostsRequest{
 		OffsetRate: slice.NextRate,

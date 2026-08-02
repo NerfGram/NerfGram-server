@@ -46,11 +46,15 @@ WHERE owner_user_id = $1
 }
 
 func (s *PrivacyStore) SetPrivacyRules(ctx context.Context, rules domain.PrivacyRules) error {
+	return setPrivacyRules(ctx, s.db, rules)
+}
+
+func setPrivacyRules(ctx context.Context, db sqlcgen.DBTX, rules domain.PrivacyRules) error {
 	raw, err := json.Marshal(rules.Rules)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(ctx, `
+	_, err = db.Exec(ctx, `
 INSERT INTO account_privacy_rules (owner_user_id, privacy_key, rules, updated_at)
 VALUES ($1, $2, $3::jsonb, NOW())
 ON CONFLICT (owner_user_id, privacy_key) DO UPDATE SET

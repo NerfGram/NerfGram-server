@@ -19,8 +19,20 @@ type StarsStore interface {
 	// Debit 在单事务内做 SELECT ... FOR UPDATE 充足性检查后扣款（amount>0），写流水（amount=-x）。
 	// 余额不足返回 domain.ErrStarsInsufficient。
 	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, date int, title, desc string) (domain.StarsBalance, error)
-	// ListTransactions 按 id DESC keyset 分页返回一页流水 + 当前余额。
-	ListTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.StarsTransactionPage, error)
-	// TotalSpent returns cumulative Stars debited by the user (absolute sum of negative amounts).
-	TotalSpent(ctx context.Context, userID int64) (int64, error)
+	// ListTransactions 按方向与顺序做 keyset 分页，返回一页流水 + 当前余额。
+	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
+}
+
+// StarsPurchaseStore owns fiat self-topup, friend-gift and giveaway-launch
+// aggregates. Successful settlement commits the affected ledger/message box
+// atomically; exact form retries return the original receipt.
+type StarsPurchaseStore interface {
+	IssueStarsPurchaseForm(context.Context, domain.StarsPurchaseForm) (domain.StarsPurchaseForm, error)
+	PurchaseStars(context.Context, domain.StarsPurchaseRequest) (domain.StarsPurchaseResult, error)
+}
+
+// StarsGiveawayStore exposes the viewer-specific state of launch cards without
+// forcing lightweight purchase-store fakes to implement the read model.
+type StarsGiveawayStore interface {
+	GetStarsGiveawayInfo(context.Context, int64, int64, int, int) (domain.StarsGiveawayInfo, error)
 }

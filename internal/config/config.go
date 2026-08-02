@@ -4,16 +4,23 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"golang.org/x/text/language"
+
+	"telesrv/internal/domain"
 	"telesrv/internal/links"
 )
 
-const defaultConfigFile = ".env"
+const (
+	defaultConfigFile  = ".env"
+	defaultCountryCode = "CN"
+)
 
 // Config 是 telesrv 的运行配置。
 type Config struct {
@@ -30,12 +37,13 @@ type Config struct {
 	RSAKeyPath string
 	// DC 是本 server 的 DC ID。
 	DC int
-	// StrictDCCheck turns on exact DC-ID validation for the permanent-key
-	// exchange (default off = lenient). See mtprotoedge.Options.StrictDC doc
-	// for the full rationale: telesrv is always a single physical backend,
-	// but the FromGram client forks intentionally alias dc_id 1..5 to it,
-	// so a mismatched client-chosen dc_id is expected, not an attack — strict
-	// mode exists only for a hypothetical future real multi-DC deployment.
+	// DefaultCountryCode 是 help.getNearestDc 返回的 ISO 3166-1 alpha-2 国家码。
+	// 客户端登录页据此预选国家和国际电话区号；例如 CN 对应 +86。
+	DefaultCountryCode string
+	// StrictDCCheck enables the default-off key-exchange DC-label diagnostic.
+	// The normal single-backend mode accepts every wire int32 label without
+	// partitioning auth keys, sessions, or business state. See
+	// mtprotoedge.Options.StrictDC for the optional strict behavior.
 	StrictDCCheck bool
 	// MTProtoMaxConnections / PerIP 覆盖 raw Accept、codec sniff、握手到认证 session
 	// 的完整物理连接生命周期；负数关闭对应 admission 上限。
@@ -52,15 +60,13 @@ type Config struct {
 	MTProtoRPCGlobalWorkers  int
 	MTProtoRPCGlobalMaxTasks int
 	MTProtoRPCGlobalMaxBytes int64
-	// Pending ownership and completed rpc_result replay state share a three-level
-	// global/raw-auth/session budget over the full MTProto duplicate horizon.
-	MTProtoRPCResultCacheMaxEntries        int
-	MTProtoRPCResultCacheMaxBytes          int64
-	MTProtoRPCResultCacheAuthMaxEntries    int
-	MTProtoRPCResultCacheAuthMaxBytes      int64
-	MTProtoRPCResultCacheSessionMaxEntries int
-	MTProtoRPCResultCacheSessionMaxBytes   int64
-	MTProtoRPCResultPendingPerAuth         int
+	// Pending ownership and compact completed receipts share three-level
+	// global/raw-auth/session entry accounting. Result bodies are never cached
+	// here; the logical-session outbox owns unacknowledged wire bytes.
+	MTProtoRPCExecutionMaxEntries        int
+	MTProtoRPCExecutionAuthMaxEntries    int
+	MTProtoRPCExecutionSessionMaxEntries int
+	MTProtoRPCExecutionPendingPerAuth    int
 	// MTProtoInboundFrameGlobalMaxBytes 是 transport wire + 最大解密 plaintext 的
 	// 进程级在途预算；frame 长度读出后、payload 分配前预留。
 	MTProtoInboundFrameGlobalMaxBytes int64
@@ -88,20 +94,54 @@ type Config struct {
 	// PublicAppScheme 是公开落地页自动唤起自建客户端时使用的 URL scheme。
 	// 必须与 TDesktop/Android 客户端构建时注册的 scheme 一致，且不能占用 tg/http/https。
 	PublicAppScheme string
+	// PublicAppLinkBase 是可选的 host-based 自建客户端链接根，例如
+	// owpg://example.com。为空时继续生成 PublicAppScheme://<route>；非空时
+	// 生成 <base>/<route>，同时保留旧 scheme 作为服务端输入兼容。
+	PublicAppLinkBase string
 	// PublicWebBaseURL 是公开 username 页面“Open in Web”按钮指向的 Web 客户端根 URL。
 	PublicWebBaseURL string
 	// PublicAppName 是公开落地页展示的产品名，不参与协议路由。
 	PublicAppName string
-	// PublicDownloadURL 是公开落地页头部“Download”按钮指向的产品官网/下载页 URL。
-	PublicDownloadURL string
 	// PublicLinkWebAddr 是公开链接落地页监听地址；为空关闭。
-	// 生产应只监听 loopback，并由 nginx 将 /<username>、/addstickers/、/addemoji/ 与 /addlist/ 反代到该地址。
+	// 生产应只监听 loopback，并由 nginx 将 /<username>、/addstickers/、/addemoji/、
+	// /addlist/ 与 hash-only /appeal/ 路由反代到该地址。
 	PublicLinkWebAddr string
+	// TelegramLoginEnabled mounts the self-hosted Telegram Login/OIDC provider
+	// on PublicLinkWebAddr. Secrets are file-backed so they are not exposed in
+	// process listings or accidentally copied into tracked .env templates.
+	TelegramLoginEnabled bool
+	TelegramLoginIssuer  string
+	// TelegramLoginAllowHTTP permits HTTP issuers and registered Login URLs on
+	// any valid host/IP and port. HTTPS remains mandatory when false.
+	TelegramLoginAllowHTTP         bool
+	TelegramLoginSigningKeysFile   string
+	TelegramLoginCodeKeysFile      string
+	TelegramLoginSecretPepperFile  string
+	TelegramLoginRequestTTL        time.Duration
+	TelegramLoginCodeTTL           time.Duration
+	TelegramLoginIDTokenTTL        time.Duration
+	TelegramLoginTrustedProxyCIDRs []string
+	TelegramLoginRetention         time.Duration
+	TelegramLoginSweepInterval     time.Duration
+	TelegramLoginSweepBatch        int
 	// Admin UI 独立进程配置项保留在统一配置中，cmd/telesrv-admin 也按同名 env 读取。
 	AdminUIAddr     string
 	AdminUIPassword string
 	AdminUIToken    string
 	AdminSessionKey string
+	// AdminUIPermissions is the permission set granted to a panel session that
+	// authenticated with TELESRV_ADMIN_UI_PASSWORD / _TOKEN. The single entry "*"
+	// means "every permission" and is the shipped default, so enabling RBAC never
+	// silently locks an operator out of a panel that worked before.
+	AdminUIPermissions []string
+	// AdminScopedTokens are additional adminapi bearer tokens with a bounded
+	// permission set each. They exist so an integration can be given exactly the
+	// rights it needs instead of the unrestricted TELESRV_ADMIN_API_TOKEN. Parsed
+	// from
+	// "name:token:perm1,perm2" entries separated by ';'; a malformed entry, a
+	// duplicate name or a duplicate token fails startup rather than silently
+	// granting or dropping rights.
+	AdminScopedTokens []AdminScopedToken
 
 	// PostgresDSN 是业务数据（auth_key / user / authorization 等）持久化的 PostgreSQL 连接串。
 	// 依赖由 deploy/docker-compose.yml 启动；职责划分见 docs/persistence-layer.md。
@@ -140,32 +180,16 @@ type Config struct {
 	LoginEmailRequireSetup bool
 	// LoginEmailCodeLength 是邮箱验证码长度。
 	LoginEmailCodeLength int
-	// EmailSignupEnable 启用「邮箱作为账号身份」模式：客户端用邮箱注册/登录，服务端把邮箱
-	// 编码进一个 888 前缀的合成号码复用现有 phone 全流程（sendCode/signUp/signIn/changePhone
-	// 不变），验证码通过登录邮箱同一投递通道（PhoneCodeDeliveryProvider/smtp 或 webhook）
-	// 发到解码出的邮箱而非发短信。要求该通道配置可用（与 LoginEmailEnable 共用同一组
-	// TELESRV_SMTP_* / TELESRV_OTP_WEBHOOK_* 变量）。
-	EmailSignupEnable bool
-	// EmailSignupPhonePrefixes 是账号实际可见的 users.phone 短号码
-	// （domain.NewEmailSignupDisplayPhone）随机选用的号段前缀列表，逗号分隔，
-	// 默认仅 "888"。注意这与合成 wire 号码（domain.EncodeEmailPhone，sendCode
-	// 阶段用于携带邮箱本身）无关——那个前缀恒为 "888" 且从不下发给客户端；
-	// 这里只影响注册后账号真正落库/展示的号码好不好看，可通过
-	// help.getAppConfig 的 email_signup_phone_prefixes 下发给客户端，管理员
-	// 改动此列表不需要客户端升级。
-	EmailSignupPhonePrefixes []string
 	// PhoneCodeDeliveryProvider 选择普通登录/注册与改号验证码的投递方式：
 	// development 保留固定码与 777000 app-code；webhook 使用随机 SMS code。
 	PhoneCodeDeliveryProvider string
-	// EmailCodeDeliveryProvider 选择登录邮箱与邮箱 setup/change 的投递方式
-	// （login email 与 email-signup 共用同一个开关，见 EmailSignupEnable）。
+	// EmailCodeDeliveryProvider 选择登录邮箱与邮箱 setup/change 的投递方式。
 	EmailCodeDeliveryProvider string
 	// OTPWebhook* 定义固定 v1 webhook 协议的端点、HMAC secret 与请求超时。
 	OTPWebhookURL     string
 	OTPWebhookSecret  string
 	OTPWebhookTimeout time.Duration
-	// SMTP* 是登录邮箱验证码的出站邮件配置。LoginEmailEnable=true 或
-	// EmailSignupEnable=true 且 provider=smtp 时使用。
+	// SMTP* 是 email provider=smtp 时使用的出站邮件配置。
 	SMTPHost     string
 	SMTPPort     int
 	SMTPUsername string
@@ -207,6 +231,9 @@ type Config struct {
 	StickerSeedDir string
 	// StickerSeedMaxSets 限制导入的常规贴纸集数量（避免启动时导入过多包），<=0 表示不限。
 	StickerSeedMaxSets int
+	// PremiumPromoSeedDir 是 help.getPremiumPromo 视频与缩略图导出目录。
+	// 目录缺失时保留无视频兼容响应；目录存在但内容非法时启动失败。
+	PremiumPromoSeedDir string
 	// BusinessAIProvider 控制服务端 Business automation 回复生成器。
 	// 空值/"echo" 回显触发私聊文本，用于跑通后续 AI provider 链路；
 	// "template" 使用 quick reply 模板。
@@ -315,6 +342,8 @@ type Config struct {
 	CallTombstoneTTL time.Duration
 	// CallMaxActivePerUser 是单用户并发非终态通话上限。
 	CallMaxActivePerUser int
+	// CallRegistryMaxEntries 是进程内通话 registry 的全局硬上限。
+	CallRegistryMaxEntries int
 	// CallSignalingMaxBytes 是 phone.sendSignalingData 单条载荷上限。
 	CallSignalingMaxBytes int
 	// CallSignalingRate 是单通话每秒信令转发上限（超限静默丢弃）。
@@ -356,6 +385,106 @@ type Config struct {
 	StarGiftResellDelay              time.Duration
 	StarGiftCraftDelay               time.Duration
 	StarGiftCraftChancePermille      int
+
+	// RatingEnabled controls the local admin-only composite account rating.
+	// Disabled keeps every local projection empty and refuses rating writes; no
+	// client-facing Telegram field changes in either mode.
+	RatingEnabled bool
+	// RatingPendingDelay is how long a rating increase stays parked as a pending
+	// local score before it becomes the visible admin level. A decrease is
+	// always applied immediately: a penalty must not sit behind a delay.
+	// 0 applies every change immediately.
+	RatingPendingDelay time.Duration
+	// RatingRecomputeInterval / RatingRecomputeBatch drive the background
+	// recompute worker. The rating derives from signals owned by other
+	// subsystems, so freshness is a worker property, not a write-path one.
+	RatingRecomputeInterval time.Duration
+	RatingRecomputeBatch    int
+	// RatingStaleAfter is the projection age after which the worker recomputes a
+	// user.
+	RatingStaleAfter time.Duration
+	// Rating weights are the integer composite formula. Defaults mirror
+	// domain.DefaultAccountRatingWeights() exactly, so the shipped behaviour is
+	// identical whether or not these keys are set. Every weight is a magnitude:
+	// the penalties are subtracted by the domain formula, so all values are
+	// non-negative and a negative value fails startup.
+	RatingWeightStarsReceivedPermille int64
+	RatingWeightStarsSpentPermille    int64
+	RatingWeightMessageSent           int64
+	RatingWeightAccountAgeDay         int64
+	RatingWeightGiftReceived          int64
+	RatingWeightModerationCase        int64
+	RatingWeightScamPenalty           int64
+	RatingWeightFakePenalty           int64
+	// RatingActivityCap bounds the activity component so activity alone cannot
+	// outweigh Stars and moderation; 0 leaves it uncapped.
+	RatingActivityCap int64
+	// VerificationEnabled controls official platform verification: the @verifybot
+	// application flow and the panel's review queue. Disabled refuses every
+	// verification use case explicitly; already-verified peers keep their badge,
+	// because the flag lives on the peer record and is not derived from this
+	// feature being on.
+	VerificationEnabled bool
+	// VerificationAllowUserTargets opts plain user accounts in as verification
+	// subjects. Off by default: the official process verifies a public presence
+	// (bot, public channel, public supergroup), and a private account has nothing
+	// to check.
+	VerificationAllowUserTargets bool
+	// VerificationRejectCooldown is how long an applicant must wait before filing
+	// the same target again after a rejection. Measured from the decision, so a
+	// slow review never shortens it; 0 disables the cooldown.
+	VerificationRejectCooldown time.Duration
+	// VerificationApplyRateLimit / VerificationApplyRateWindow bound how many
+	// applications one applicant may create per window. 0 for either disables the
+	// budget.
+	VerificationApplyRateLimit  int
+	VerificationApplyRateWindow time.Duration
+	// VerificationBotRateLimit / VerificationBotRateWindow bound the @verifybot
+	// dialog itself (per-applicant command rate), independently of how many
+	// applications are actually created.
+	VerificationBotRateLimit  int
+	VerificationBotRateWindow time.Duration
+	// VerificationNotifyInterval / VerificationNotifyBatch drive the applicant
+	// notification worker. A decision commits with its outbox row, never with a
+	// message send, so delivery cadence is a worker property.
+	VerificationNotifyInterval time.Duration
+	VerificationNotifyBatch    int
+	// VerificationMaxActivePerUser bounds how many applications one applicant may
+	// keep open at once; 0 disables the cap.
+	VerificationMaxActivePerUser int
+
+	// BotVerificationEnabled controls THIRD-PARTY bot verification
+	// (core.telegram.org/api/bots/verification): a verifier bot marking peers with
+	// its own icon and description, projected onto
+	// user/channel.bot_verification_icon and botInfo.verifier_settings. It is a
+	// different mechanism from VerificationEnabled above -- that one is the
+	// operator-granted platform checkmark, and the two never read each other's
+	// state.
+	//
+	// Disabled refuses every third-party mutation (grants, revocations,
+	// applications, catalogue edits) while the marks already granted keep
+	// projecting: blanking one verifier's badges is what its per-verifier kill
+	// switch is for.
+	BotVerificationEnabled bool
+	// BotVerificationMaxPerVerifier bounds how many peers one verifier bot may
+	// mark. Verifier status is granted per deployment rather than earned per peer,
+	// so an unbounded verifier would be an unbounded badge printer. 0 disables the
+	// service-level bound and leaves only the storage bound
+	// (domain.MaxCustomVerificationsPerVerifier), which is also the maximum this
+	// key accepts.
+	BotVerificationMaxPerVerifier int
+	// BotVerificationRequestRateLimit / BotVerificationRequestRateWindow bound how
+	// many verification applications one applicant may file per window, across all
+	// verifier bots. 0 for either disables the budget.
+	BotVerificationRequestRateLimit  int
+	BotVerificationRequestRateWindow time.Duration
+
+	// CollectibleUsernameURLTemplate is the landing URL recorded on a minted
+	// collectible username when the mint request carries no explicit URL.
+	// Empty derives <TELESRV_PUBLIC_BASE_URL>/nft/username/<username>; a template
+	// may carry the {username} placeholder, and without it the name is appended
+	// as the last path segment. No external marketplace is contacted.
+	CollectibleUsernameURLTemplate string
 
 	// GroupCallCheckTTL 是群通话参与者保活水位的过期阈值（客户端 Connecting 态
 	// 4s 一跳；M1 起 SFU liveness reporter 同样刷新该水位）。
@@ -406,6 +535,15 @@ type Config struct {
 	SFUAdvertiseIP string
 }
 
+// AdminScopedToken is one adminapi bearer token restricted to a permission set.
+// Name is the audit identity written next to actions performed with the token;
+// Permissions is the closed list of rights it carries ("*" means all).
+type AdminScopedToken struct {
+	Name        string
+	Token       string
+	Permissions []string
+}
+
 type AIProviderConfig struct {
 	Name            string
 	Kind            string
@@ -431,6 +569,9 @@ func Load() (Config, error) {
 	envInt64Or := fileEnv.envInt64Or
 	envDurationOr := fileEnv.envDurationOr
 	envAllowEmptyOr := fileEnv.envAllowEmptyOr
+	if err := validateStrictMTProtoCapacityEnv(fileEnv); err != nil {
+		return Config{}, err
+	}
 
 	publicBaseURL, err := links.ValidateBaseURL(envOr("TELESRV_PUBLIC_BASE_URL", links.DefaultPublicBaseURL))
 	if err != nil {
@@ -440,22 +581,32 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("TELESRV_PUBLIC_APP_SCHEME: %w", err)
 	}
-	// TELESRV_PUBLIC_WEB_BASE_URL is nullable: an explicitly empty value disables
-	// the "Open in Web" button on public landing pages instead of falling back
-	// to the default telesrv Web client URL.
-	publicWebBaseURL := envAllowEmptyOr("TELESRV_PUBLIC_WEB_BASE_URL", links.DefaultWebBaseURL)
-	if publicWebBaseURL != "" {
-		if publicWebBaseURL, err = links.ValidateBaseURL(publicWebBaseURL); err != nil {
-			return Config{}, fmt.Errorf("TELESRV_PUBLIC_WEB_BASE_URL: %w", err)
-		}
+	publicAppLinkBase, err := links.ValidateAppLinkBase(envAllowEmptyOr("TELESRV_PUBLIC_APP_LINK_BASE", ""))
+	if err != nil {
+		return Config{}, fmt.Errorf("TELESRV_PUBLIC_APP_LINK_BASE: %w", err)
+	}
+	publicWebBaseURL, err := links.ValidateBaseURL(envOr("TELESRV_PUBLIC_WEB_BASE_URL", links.DefaultWebBaseURL))
+	if err != nil {
+		return Config{}, fmt.Errorf("TELESRV_PUBLIC_WEB_BASE_URL: %w", err)
 	}
 	publicAppName, err := links.ValidateAppName(envOr("TELESRV_PUBLIC_APP_NAME", links.DefaultAppName))
 	if err != nil {
 		return Config{}, fmt.Errorf("TELESRV_PUBLIC_APP_NAME: %w", err)
 	}
-	publicDownloadURL, err := links.ValidateBaseURL(envOr("TELESRV_PUBLIC_DOWNLOAD_URL", links.DefaultDownloadURL))
+	countryCode, err := normalizeDefaultCountryCode(envOr("TELESRV_DEFAULT_COUNTRY_CODE", defaultCountryCode))
 	if err != nil {
-		return Config{}, fmt.Errorf("TELESRV_PUBLIC_DOWNLOAD_URL: %w", err)
+		return Config{}, fmt.Errorf("TELESRV_DEFAULT_COUNTRY_CODE: %w", err)
+	}
+	advertiseIP, err := normalizeAdvertiseIP(envOr("TELESRV_ADVERTISE_IP", "127.0.0.1"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TELESRV_ADVERTISE_IP: %w", err)
+	}
+	// The composite rating weight defaults are the domain formula's own defaults;
+	// see RatingWeight* below.
+	defaultRatingWeights := domain.DefaultAccountRatingWeights()
+	adminScopedTokens, err := parseAdminScopedTokens(envAllowEmptyOr("TELESRV_ADMIN_SCOPED_TOKENS", ""))
+	if err != nil {
+		return Config{}, err
 	}
 
 	cfg := Config{
@@ -465,33 +616,28 @@ func Load() (Config, error) {
 			"http://localhost:1234",
 			"http://127.0.0.1:1234",
 		}),
-		// AdvertiseIP 当前不影响 help.getConfig——getConfig 返回空 DCOptions，
-		// 客户端使用其写死的 static DC 地址（见 compat/tdesktop/config.go）。
-		// 字段与默认值保留，供未来需要显式下发 DC 地址时使用。
-		AdvertiseIP:                         envOr("TELESRV_ADVERTISE_IP", "127.0.0.1"),
-		RSAKeyPath:                          envOr("TELESRV_RSA_KEY", "data/server_rsa.pem"),
-		DC:                                  envIntOr("TELESRV_DC", 2),
-		StrictDCCheck:                       envBoolOr("TELESRV_STRICT_DC_CHECK", false),
-		MTProtoMaxConnections:               envIntOr("TELESRV_MTPROTO_MAX_CONNECTIONS", 200000),
-		MTProtoMaxConnectionsPerIP:          envIntOr("TELESRV_MTPROTO_MAX_CONNECTIONS_PER_IP", 4096),
-		MTProtoMaxConcurrentHandshakes:      envIntOr("TELESRV_MTPROTO_MAX_CONCURRENT_HANDSHAKES", 256),
-		MTProtoRPCMaxInflight:               envIntOr("TELESRV_MTPROTO_RPC_MAX_INFLIGHT", 32),
-		MTProtoRPCQueueSize:                 envIntOr("TELESRV_MTPROTO_RPC_QUEUE_SIZE", 64),
-		MTProtoRPCTimeout:                   envDurationOr("TELESRV_MTPROTO_RPC_TIMEOUT", 30*time.Second),
-		MTProtoRPCGlobalWorkers:             envIntOr("TELESRV_MTPROTO_RPC_GLOBAL_WORKERS", 256),
-		MTProtoRPCGlobalMaxTasks:            envIntOr("TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS", 8192),
-		MTProtoRPCGlobalMaxBytes:            envInt64Or("TELESRV_MTPROTO_RPC_GLOBAL_MAX_BYTES", 512<<20),
-		MTProtoRPCResultCacheMaxEntries:     envIntOr("TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_ENTRIES", 1<<18),
-		MTProtoRPCResultCacheMaxBytes:       envInt64Or("TELESRV_MTPROTO_RPC_RESULT_CACHE_MAX_BYTES", 64<<20),
-		MTProtoRPCResultCacheAuthMaxEntries: envIntOr("TELESRV_MTPROTO_RPC_RESULT_CACHE_AUTH_MAX_ENTRIES", 1<<15),
-		MTProtoRPCResultCacheAuthMaxBytes:   envInt64Or("TELESRV_MTPROTO_RPC_RESULT_CACHE_AUTH_MAX_BYTES", 32<<20),
-		MTProtoRPCResultCacheSessionMaxEntries: envIntOr(
-			"TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_ENTRIES", 1<<14,
+		// help.getConfig 必须下发至少一个可重连的主 DC 地址；远端部署不能
+		// 沿用 loopback 默认值，需显式设置客户端实际可达的 IP。
+		AdvertiseIP:                       advertiseIP,
+		RSAKeyPath:                        envOr("TELESRV_RSA_KEY", "data/server_rsa.pem"),
+		DC:                                envIntOr("TELESRV_DC", 2),
+		DefaultCountryCode:                countryCode,
+		StrictDCCheck:                     envBoolOr("TELESRV_STRICT_DC_CHECK", false),
+		MTProtoMaxConnections:             envIntOr("TELESRV_MTPROTO_MAX_CONNECTIONS", 200000),
+		MTProtoMaxConnectionsPerIP:        envIntOr("TELESRV_MTPROTO_MAX_CONNECTIONS_PER_IP", 4096),
+		MTProtoMaxConcurrentHandshakes:    envIntOr("TELESRV_MTPROTO_MAX_CONCURRENT_HANDSHAKES", 256),
+		MTProtoRPCMaxInflight:             envIntOr("TELESRV_MTPROTO_RPC_MAX_INFLIGHT", 32),
+		MTProtoRPCQueueSize:               envIntOr("TELESRV_MTPROTO_RPC_QUEUE_SIZE", 64),
+		MTProtoRPCTimeout:                 envDurationOr("TELESRV_MTPROTO_RPC_TIMEOUT", 30*time.Second),
+		MTProtoRPCGlobalWorkers:           envIntOr("TELESRV_MTPROTO_RPC_GLOBAL_WORKERS", 256),
+		MTProtoRPCGlobalMaxTasks:          envIntOr("TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS", 8192),
+		MTProtoRPCGlobalMaxBytes:          envInt64Or("TELESRV_MTPROTO_RPC_GLOBAL_MAX_BYTES", 512<<20),
+		MTProtoRPCExecutionMaxEntries:     envIntOr("TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES", 1<<18),
+		MTProtoRPCExecutionAuthMaxEntries: envIntOr("TELESRV_MTPROTO_RPC_EXECUTION_AUTH_MAX_ENTRIES", 1<<15),
+		MTProtoRPCExecutionSessionMaxEntries: envIntOr(
+			"TELESRV_MTPROTO_RPC_EXECUTION_SESSION_MAX_ENTRIES", 1<<14,
 		),
-		MTProtoRPCResultCacheSessionMaxBytes: envInt64Or(
-			"TELESRV_MTPROTO_RPC_RESULT_CACHE_SESSION_MAX_BYTES", 16<<20,
-		),
-		MTProtoRPCResultPendingPerAuth:       envIntOr("TELESRV_MTPROTO_RPC_RESULT_PENDING_PER_AUTH", 1<<11),
+		MTProtoRPCExecutionPendingPerAuth:    envIntOr("TELESRV_MTPROTO_RPC_EXECUTION_PENDING_PER_AUTH", 1<<11),
 		MTProtoInboundFrameGlobalMaxBytes:    envInt64Or("TELESRV_MTPROTO_INBOUND_FRAME_GLOBAL_MAX_BYTES", 512<<20),
 		MTProtoOutboundQueueSize:             envIntOr("TELESRV_MTPROTO_OUTBOUND_QUEUE_SIZE", 128),
 		MTProtoOutboundControlQueueSize:      envIntOr("TELESRV_MTPROTO_OUTBOUND_CONTROL_QUEUE_SIZE", 32),
@@ -503,10 +649,25 @@ func Load() (Config, error) {
 		AdminAPIToken:                        envOr("TELESRV_ADMIN_API_TOKEN", ""),
 		PublicBaseURL:                        publicBaseURL,
 		PublicAppScheme:                      publicAppScheme,
+		PublicAppLinkBase:                    publicAppLinkBase,
 		PublicWebBaseURL:                     publicWebBaseURL,
 		PublicAppName:                        publicAppName,
-		PublicDownloadURL:                    publicDownloadURL,
 		PublicLinkWebAddr:                    envAllowEmptyOr("TELESRV_PUBLIC_LINK_WEB_ADDR", ""),
+		TelegramLoginEnabled:                 envBoolOr("TELESRV_TELEGRAM_LOGIN_ENABLE", false),
+		TelegramLoginIssuer:                  strings.TrimSuffix(envOr("TELESRV_TELEGRAM_LOGIN_ISSUER", publicBaseURL), "/"),
+		TelegramLoginAllowHTTP:               envBoolOr("TELESRV_TELEGRAM_LOGIN_ALLOW_HTTP", false),
+		TelegramLoginSigningKeysFile:         envOr("TELESRV_TELEGRAM_LOGIN_SIGNING_KEYS_FILE", "data/telegram-login/signing-keys.json"),
+		TelegramLoginCodeKeysFile:            envOr("TELESRV_TELEGRAM_LOGIN_CODE_KEYS_FILE", "data/telegram-login/code-keys.json"),
+		TelegramLoginSecretPepperFile:        envOr("TELESRV_TELEGRAM_LOGIN_SECRET_PEPPER_FILE", "data/telegram-login/client-secret-pepper"),
+		TelegramLoginRequestTTL:              envDurationOr("TELESRV_TELEGRAM_LOGIN_REQUEST_TTL", 5*time.Minute),
+		TelegramLoginCodeTTL:                 envDurationOr("TELESRV_TELEGRAM_LOGIN_CODE_TTL", 2*time.Minute),
+		TelegramLoginIDTokenTTL:              envDurationOr("TELESRV_TELEGRAM_LOGIN_ID_TOKEN_TTL", time.Hour),
+		TelegramLoginTrustedProxyCIDRs:       envListOr("TELESRV_TELEGRAM_LOGIN_TRUSTED_PROXY_CIDRS", nil),
+		TelegramLoginRetention:               envDurationOr("TELESRV_TELEGRAM_LOGIN_RETENTION", 7*24*time.Hour),
+		TelegramLoginSweepInterval:           envDurationOr("TELESRV_TELEGRAM_LOGIN_SWEEP_INTERVAL", 5*time.Minute),
+		TelegramLoginSweepBatch:              envIntOr("TELESRV_TELEGRAM_LOGIN_SWEEP_BATCH", 500),
+		AdminUIPermissions:                   envListOr("TELESRV_ADMIN_UI_PERMISSIONS", []string{adminPermissionAll}),
+		AdminScopedTokens:                    adminScopedTokens,
 		AdminUIAddr:                          envOr("TELESRV_ADMIN_UI_ADDR", "127.0.0.1:2600"),
 		AdminUIPassword:                      envOr("TELESRV_ADMIN_UI_PASSWORD", ""),
 		AdminUIToken:                         envOr("TELESRV_ADMIN_UI_TOKEN", ""),
@@ -532,8 +693,6 @@ func Load() (Config, error) {
 		AuthCodeRateWindow:            envDurationOr("TELESRV_AUTH_CODE_RATE_WINDOW", 10*time.Minute),
 		LoginEmailEnable:              envBoolOr("TELESRV_LOGIN_EMAIL_ENABLE", false),
 		LoginEmailRequireSetup:        envBoolOr("TELESRV_LOGIN_EMAIL_REQUIRE_SETUP", false),
-		EmailSignupEnable:             envBoolOr("TELESRV_EMAIL_SIGNUP_ENABLE", false),
-		EmailSignupPhonePrefixes:      envListOr("TELESRV_EMAIL_SIGNUP_PHONE_PREFIXES", []string{"888"}),
 		LoginEmailCodeLength:          envIntOr("TELESRV_LOGIN_EMAIL_CODE_LENGTH", 6),
 		PhoneCodeDeliveryProvider:     strings.ToLower(strings.TrimSpace(envOr("TELESRV_PHONE_CODE_DELIVERY_PROVIDER", "development"))),
 		EmailCodeDeliveryProvider:     strings.ToLower(strings.TrimSpace(envOr("TELESRV_EMAIL_CODE_DELIVERY_PROVIDER", "smtp"))),
@@ -545,7 +704,7 @@ func Load() (Config, error) {
 		SMTPUsername:                  envOr("TELESRV_SMTP_USERNAME", ""),
 		SMTPPassword:                  envOr("TELESRV_SMTP_PASSWORD", ""),
 		SMTPFrom:                      envOr("TELESRV_SMTP_FROM", ""),
-		SMTPFromName:                  envOr("TELESRV_SMTP_FROM_NAME", "FromGram"),
+		SMTPFromName:                  envOr("TELESRV_SMTP_FROM_NAME", "telesrv"),
 		SMTPTLSMode:                   strings.ToLower(strings.TrimSpace(envOr("TELESRV_SMTP_TLS", "starttls"))),
 		SMTPTimeout:                   envDurationOr("TELESRV_SMTP_TIMEOUT", 10*time.Second),
 		LangPackSeedDir:               envOr("TELESRV_LANGPACK_SEED_DIR", "data/langpack"),
@@ -554,6 +713,7 @@ func Load() (Config, error) {
 		BlobDir:                       envOr("TELESRV_BLOB_DIR", "data/blobs"),
 		StickerSeedDir:                envOr("TELESRV_STICKER_SEED_DIR", "data/sticker-seed"),
 		StickerSeedMaxSets:            envIntOr("TELESRV_STICKER_SEED_MAX_SETS", 300),
+		PremiumPromoSeedDir:           envOr("TELESRV_PREMIUM_PROMO_SEED_DIR", "data/premium-promo"),
 		MapboxToken:                   envOr("TELESRV_MAPBOX_TOKEN", ""),
 		MapTileCacheDir:               envOr("TELESRV_MAPTILE_CACHE_DIR", "data/maptiles"),
 		ExternalMediaEnable:           envBoolOr("TELESRV_EXTERNAL_MEDIA_ENABLE", true),
@@ -608,12 +768,13 @@ func Load() (Config, error) {
 		UploadInFlightMaxParts: envIntOr("TELESRV_UPLOAD_INFLIGHT_MAX_PARTS", 8000),
 		UploadInFlightMaxFiles: envIntOr("TELESRV_UPLOAD_INFLIGHT_MAX_FILES", 64),
 
-		CallRingTimeout:       envDurationOr("TELESRV_CALL_RING_TIMEOUT", 90*time.Second),
-		CallTombstoneTTL:      envDurationOr("TELESRV_CALL_TOMBSTONE_TTL", 60*time.Second),
-		CallMaxActivePerUser:  envIntOr("TELESRV_CALL_MAX_ACTIVE_PER_USER", 4),
-		CallSignalingMaxBytes: envIntOr("TELESRV_CALL_SIGNALING_MAX_BYTES", 65536),
-		CallSignalingRate:     envIntOr("TELESRV_CALL_SIGNALING_RATE", 50),
-		CallExpiryInterval:    envDurationOr("TELESRV_CALL_EXPIRY_INTERVAL", time.Second),
+		CallRingTimeout:        envDurationOr("TELESRV_CALL_RING_TIMEOUT", 90*time.Second),
+		CallTombstoneTTL:       envDurationOr("TELESRV_CALL_TOMBSTONE_TTL", 60*time.Second),
+		CallMaxActivePerUser:   envIntOr("TELESRV_CALL_MAX_ACTIVE_PER_USER", 4),
+		CallRegistryMaxEntries: envIntOr("TELESRV_CALL_REGISTRY_MAX_ENTRIES", 10_000),
+		CallSignalingMaxBytes:  envIntOr("TELESRV_CALL_SIGNALING_MAX_BYTES", 65536),
+		CallSignalingRate:      envIntOr("TELESRV_CALL_SIGNALING_RATE", 50),
+		CallExpiryInterval:     envDurationOr("TELESRV_CALL_EXPIRY_INTERVAL", time.Second),
 
 		PremiumGrantMonths:               envIntOr("TELESRV_PREMIUM_GRANT_MONTHS", 3),
 		PasskeyRPID:                      envOr("TELESRV_PASSKEY_RP_ID", "telesrv.net"),
@@ -633,6 +794,47 @@ func Load() (Config, error) {
 		StarGiftResellDelay:              envDurationOr("TELESRV_STARGIFT_RESELL_DELAY", 0),
 		StarGiftCraftDelay:               envDurationOr("TELESRV_STARGIFT_CRAFT_DELAY", 0),
 		StarGiftCraftChancePermille:      envIntOr("TELESRV_STARGIFT_CRAFT_CHANCE_PERMILLE", 250),
+
+		RatingEnabled:           envBoolOr("TELESRV_RATING_ENABLED", true),
+		RatingPendingDelay:      envDurationOr("TELESRV_RATING_PENDING_DELAY", 24*time.Hour),
+		RatingRecomputeInterval: envDurationOr("TELESRV_RATING_RECOMPUTE_INTERVAL", 15*time.Minute),
+		RatingRecomputeBatch:    envIntOr("TELESRV_RATING_RECOMPUTE_BATCH", 500),
+		RatingStaleAfter:        envDurationOr("TELESRV_RATING_STALE_AFTER", 6*time.Hour),
+		// Weight defaults are read from the domain formula itself so the shipped
+		// behaviour cannot drift from domain.DefaultAccountRatingWeights().
+		RatingWeightStarsReceivedPermille: envInt64Or("TELESRV_RATING_WEIGHT_STARS_RECEIVED_PERMILLE", defaultRatingWeights.StarsReceivedPermille),
+		RatingWeightStarsSpentPermille:    envInt64Or("TELESRV_RATING_WEIGHT_STARS_SPENT_PERMILLE", defaultRatingWeights.StarsSpentPermille),
+		RatingWeightMessageSent:           envInt64Or("TELESRV_RATING_WEIGHT_MESSAGE_SENT", defaultRatingWeights.PerMessageSent),
+		RatingWeightAccountAgeDay:         envInt64Or("TELESRV_RATING_WEIGHT_ACCOUNT_AGE_DAY", defaultRatingWeights.PerAccountAgeDay),
+		RatingWeightGiftReceived:          envInt64Or("TELESRV_RATING_WEIGHT_GIFT_RECEIVED", defaultRatingWeights.PerGiftReceived),
+		RatingWeightModerationCase:        envInt64Or("TELESRV_RATING_WEIGHT_MODERATION_CASE", defaultRatingWeights.PerModerationCase),
+		RatingWeightScamPenalty:           envInt64Or("TELESRV_RATING_WEIGHT_SCAM_PENALTY", defaultRatingWeights.ScamPenalty),
+		RatingWeightFakePenalty:           envInt64Or("TELESRV_RATING_WEIGHT_FAKE_PENALTY", defaultRatingWeights.FakePenalty),
+		RatingActivityCap:                 envInt64Or("TELESRV_RATING_ACTIVITY_CAP", defaultRatingWeights.ActivityCap),
+		CollectibleUsernameURLTemplate:    strings.TrimSpace(envAllowEmptyOr("TELESRV_COLLECTIBLE_USERNAME_URL_TEMPLATE", "")),
+
+		// Official verification defaults ship the feature on with the official bar
+		// in place: user accounts are not accepted, a rejection costs a month, and
+		// an applicant can neither flood the queue nor keep an unbounded number of
+		// applications open.
+		VerificationEnabled:          envBoolOr("TELESRV_VERIFICATION_ENABLED", true),
+		VerificationAllowUserTargets: envBoolOr("TELESRV_VERIFICATION_ALLOW_USER_TARGETS", false),
+		VerificationRejectCooldown:   envDurationOr("TELESRV_VERIFICATION_REJECT_COOLDOWN", 720*time.Hour),
+		VerificationApplyRateLimit:   envIntOr("TELESRV_VERIFICATION_APPLY_RATE_LIMIT", 3),
+		VerificationApplyRateWindow:  envDurationOr("TELESRV_VERIFICATION_APPLY_RATE_WINDOW", 24*time.Hour),
+		VerificationBotRateLimit:     envIntOr("TELESRV_VERIFICATION_BOT_RATE_LIMIT", 30),
+		VerificationBotRateWindow:    envDurationOr("TELESRV_VERIFICATION_BOT_RATE_WINDOW", time.Minute),
+		VerificationNotifyInterval:   envDurationOr("TELESRV_VERIFICATION_NOTIFY_INTERVAL", 15*time.Second),
+		VerificationNotifyBatch:      envIntOr("TELESRV_VERIFICATION_NOTIFY_BATCH", 50),
+		VerificationMaxActivePerUser: envIntOr("TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER", 3),
+
+		BotVerificationEnabled:        envBoolOr("TELESRV_BOT_VERIFICATION_ENABLED", true),
+		BotVerificationMaxPerVerifier: envIntOr("TELESRV_BOT_VERIFICATION_MAX_PER_VERIFIER", domain.MaxCustomVerificationsPerVerifier),
+		// The applicant budget is deliberately looser than the official one
+		// (TELESRV_VERIFICATION_APPLY_RATE_LIMIT=3): a deployment can run many
+		// verifier bots, and filing with a second company is not a retry of the first.
+		BotVerificationRequestRateLimit:  envIntOr("TELESRV_BOT_VERIFICATION_REQUEST_RATE_LIMIT", 5),
+		BotVerificationRequestRateWindow: envDurationOr("TELESRV_BOT_VERIFICATION_REQUEST_RATE_WINDOW", 24*time.Hour),
 
 		GroupCallCheckTTL:        envDurationOr("TELESRV_GROUPCALL_CHECK_TTL", 45*time.Second),
 		GroupCallSweepInterval:   envDurationOr("TELESRV_GROUPCALL_SWEEP_INTERVAL", 10*time.Second),
@@ -661,13 +863,94 @@ func Load() (Config, error) {
 	if err := validateLoginEmailConfig(cfg); err != nil {
 		return Config{}, err
 	}
-	if err := validateRPCResultCacheConfig(cfg); err != nil {
+	if err := validateRPCExecutionConfig(cfg); err != nil {
 		return Config{}, err
 	}
 	if err := validateStarGiftConfig(cfg); err != nil {
 		return Config{}, err
 	}
+	if err := validateAccountRatingConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateCollectibleUsernameConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateVerificationConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateAdminRBACConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	if err := validateTelegramLoginConfig(cfg); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func normalizeDefaultCountryCode(raw string) (string, error) {
+	code := strings.ToUpper(strings.TrimSpace(raw))
+	if len(code) != 2 || code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z' {
+		return "", fmt.Errorf("must be a two-letter ISO 3166-1 alpha-2 code")
+	}
+	region, err := language.ParseRegion(code)
+	if err != nil || !region.IsCountry() {
+		return "", fmt.Errorf("must identify a country or autonomous area")
+	}
+	return region.String(), nil
+}
+
+func normalizeAdvertiseIP(raw string) (string, error) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("must be an IPv4 or IPv6 address: %w", err)
+	}
+	addr = addr.Unmap()
+	if addr.IsUnspecified() || addr.IsMulticast() || addr.Zone() != "" {
+		return "", fmt.Errorf("must be a unicast address usable by clients")
+	}
+	return addr.String(), nil
+}
+
+func validateTelegramLoginConfig(cfg Config) error {
+	if !cfg.TelegramLoginEnabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.PublicLinkWebAddr) == "" {
+		return fmt.Errorf("TELESRV_TELEGRAM_LOGIN_ENABLE requires TELESRV_PUBLIC_LINK_WEB_ADDR")
+	}
+	issuer, err := url.Parse(strings.TrimSpace(cfg.TelegramLoginIssuer))
+	if err != nil || issuer.User != nil || issuer.Host == "" || issuer.RawQuery != "" || issuer.Fragment != "" ||
+		(issuer.Path != "" && issuer.Path != "/") {
+		return fmt.Errorf("TELESRV_TELEGRAM_LOGIN_ISSUER must be an absolute origin URL")
+	}
+	switch issuer.Scheme {
+	case "https":
+	case "http":
+		if !cfg.TelegramLoginAllowHTTP {
+			return fmt.Errorf("TELESRV_TELEGRAM_LOGIN_ISSUER http requires TELESRV_TELEGRAM_LOGIN_ALLOW_HTTP=true")
+		}
+	default:
+		return fmt.Errorf("TELESRV_TELEGRAM_LOGIN_ISSUER must use https")
+	}
+	if strings.TrimSpace(cfg.TelegramLoginSigningKeysFile) == "" || strings.TrimSpace(cfg.TelegramLoginCodeKeysFile) == "" || strings.TrimSpace(cfg.TelegramLoginSecretPepperFile) == "" {
+		return fmt.Errorf("TELESRV_TELEGRAM_LOGIN_* key and pepper files are required")
+	}
+	if cfg.TelegramLoginRequestTTL < time.Minute || cfg.TelegramLoginRequestTTL > 15*time.Minute ||
+		cfg.TelegramLoginCodeTTL < 30*time.Second || cfg.TelegramLoginCodeTTL > 10*time.Minute ||
+		cfg.TelegramLoginIDTokenTTL < time.Minute || cfg.TelegramLoginIDTokenTTL > 24*time.Hour {
+		return fmt.Errorf("TELESRV_TELEGRAM_LOGIN TTL values are outside their bounded ranges")
+	}
+	if cfg.TelegramLoginRetention < time.Hour || cfg.TelegramLoginRetention > 90*24*time.Hour ||
+		cfg.TelegramLoginSweepInterval < 10*time.Second || cfg.TelegramLoginSweepInterval > time.Hour ||
+		cfg.TelegramLoginSweepBatch <= 0 || cfg.TelegramLoginSweepBatch > 1000 {
+		return fmt.Errorf("TELESRV_TELEGRAM_LOGIN retention must be 1h..90d, sweep interval 10s..1h, and sweep batch 1..1000")
+	}
+	for _, raw := range cfg.TelegramLoginTrustedProxyCIDRs {
+		if _, err := netip.ParsePrefix(strings.TrimSpace(raw)); err != nil {
+			return fmt.Errorf("TELESRV_TELEGRAM_LOGIN_TRUSTED_PROXY_CIDRS contains invalid CIDR %q: %w", raw, err)
+		}
+	}
+	return nil
 }
 
 func validateStarGiftConfig(cfg Config) error {
@@ -698,35 +981,262 @@ func validateStarGiftConfig(cfg Config) error {
 	return nil
 }
 
-const mtProtoRPCResultMinBytes = int64((1 << 24) - (2 << 10))
+// AccountRatingWeights renders the configured composite rating formula. It is
+// the single conversion point between env keys and the domain formula, so the
+// app service and the admin explanation always use the same numbers.
+func (c Config) AccountRatingWeights() domain.AccountRatingWeights {
+	return domain.AccountRatingWeights{
+		StarsReceivedPermille: c.RatingWeightStarsReceivedPermille,
+		StarsSpentPermille:    c.RatingWeightStarsSpentPermille,
+		PerMessageSent:        c.RatingWeightMessageSent,
+		PerAccountAgeDay:      c.RatingWeightAccountAgeDay,
+		PerGiftReceived:       c.RatingWeightGiftReceived,
+		PerModerationCase:     c.RatingWeightModerationCase,
+		ScamPenalty:           c.RatingWeightScamPenalty,
+		FakePenalty:           c.RatingWeightFakePenalty,
+		ActivityCap:           c.RatingActivityCap,
+	}
+}
 
-func validateRPCResultCacheConfig(cfg Config) error {
-	if cfg.MTProtoRPCResultCacheMaxEntries <= 0 || cfg.MTProtoRPCResultCacheAuthMaxEntries <= 0 ||
-		cfg.MTProtoRPCResultCacheSessionMaxEntries <= 0 {
-		return fmt.Errorf("MTProto rpc_result entry limits must be positive")
+// validateAccountRatingConfig rejects a formula or worker cadence that cannot
+// produce a reproducible rating. Weights are validated even when the feature is
+// disabled: enabling it later must not be the moment a typo is discovered.
+func validateAccountRatingConfig(cfg Config) error {
+	if err := cfg.AccountRatingWeights().Validate(); err != nil {
+		return fmt.Errorf("TELESRV_RATING_WEIGHT_* and TELESRV_RATING_ACTIVITY_CAP must be non-negative: %w", err)
 	}
-	if cfg.MTProtoRPCResultCacheMaxEntries < cfg.MTProtoRPCResultCacheAuthMaxEntries ||
-		cfg.MTProtoRPCResultCacheAuthMaxEntries < cfg.MTProtoRPCResultCacheSessionMaxEntries {
-		return fmt.Errorf("MTProto rpc_result entry hierarchy must satisfy global >= auth >= session: %d/%d/%d",
-			cfg.MTProtoRPCResultCacheMaxEntries, cfg.MTProtoRPCResultCacheAuthMaxEntries, cfg.MTProtoRPCResultCacheSessionMaxEntries)
+	if cfg.RatingPendingDelay < 0 {
+		return fmt.Errorf("TELESRV_RATING_PENDING_DELAY must be non-negative")
 	}
-	if cfg.MTProtoRPCResultCacheMaxBytes < mtProtoRPCResultMinBytes ||
-		cfg.MTProtoRPCResultCacheAuthMaxBytes < mtProtoRPCResultMinBytes ||
-		cfg.MTProtoRPCResultCacheSessionMaxBytes < mtProtoRPCResultMinBytes {
-		return fmt.Errorf("MTProto rpc_result byte limits must each be at least %d: %d/%d/%d",
-			mtProtoRPCResultMinBytes, cfg.MTProtoRPCResultCacheMaxBytes,
-			cfg.MTProtoRPCResultCacheAuthMaxBytes, cfg.MTProtoRPCResultCacheSessionMaxBytes)
+	const maxRatingPendingDelay = 30 * 24 * time.Hour
+	if cfg.RatingPendingDelay > maxRatingPendingDelay {
+		return fmt.Errorf("TELESRV_RATING_PENDING_DELAY must not exceed 720h")
 	}
-	if cfg.MTProtoRPCResultCacheMaxBytes < cfg.MTProtoRPCResultCacheAuthMaxBytes ||
-		cfg.MTProtoRPCResultCacheAuthMaxBytes < cfg.MTProtoRPCResultCacheSessionMaxBytes {
-		return fmt.Errorf("MTProto rpc_result byte hierarchy must satisfy global >= auth >= session: %d/%d/%d",
-			cfg.MTProtoRPCResultCacheMaxBytes, cfg.MTProtoRPCResultCacheAuthMaxBytes, cfg.MTProtoRPCResultCacheSessionMaxBytes)
+	if cfg.RatingRecomputeInterval <= 0 {
+		return fmt.Errorf("TELESRV_RATING_RECOMPUTE_INTERVAL must be positive")
 	}
-	if cfg.MTProtoRPCGlobalMaxTasks <= 0 || cfg.MTProtoRPCResultPendingPerAuth <= 0 ||
-		cfg.MTProtoRPCResultPendingPerAuth > cfg.MTProtoRPCGlobalMaxTasks ||
-		cfg.MTProtoRPCResultPendingPerAuth > cfg.MTProtoRPCResultCacheAuthMaxEntries {
-		return fmt.Errorf("MTProto rpc_result pending-per-auth %d must be positive and <= global pending %d and auth entries %d",
-			cfg.MTProtoRPCResultPendingPerAuth, cfg.MTProtoRPCGlobalMaxTasks, cfg.MTProtoRPCResultCacheAuthMaxEntries)
+	if cfg.RatingStaleAfter <= 0 {
+		return fmt.Errorf("TELESRV_RATING_STALE_AFTER must be positive")
+	}
+	if cfg.RatingRecomputeBatch <= 0 || cfg.RatingRecomputeBatch > 10000 {
+		return fmt.Errorf("TELESRV_RATING_RECOMPUTE_BATCH must be 1..10000")
+	}
+	return nil
+}
+
+// adminPermissionAll is the wildcard permission: a session or token carrying it
+// may perform every admin action.
+const adminPermissionAll = "*"
+
+// validateVerificationConfig rejects a verification policy that cannot be
+// enforced, for both mechanisms: the operator-granted platform badge and the
+// third-party bot verification marks. It runs even when either feature is
+// disabled, so enabling it later is not the moment a typo is discovered.
+func validateVerificationConfig(cfg Config) error {
+	if cfg.VerificationRejectCooldown < 0 {
+		return fmt.Errorf("TELESRV_VERIFICATION_REJECT_COOLDOWN must be non-negative")
+	}
+	const maxVerificationRejectCooldown = 365 * 24 * time.Hour
+	if cfg.VerificationRejectCooldown > maxVerificationRejectCooldown {
+		return fmt.Errorf("TELESRV_VERIFICATION_REJECT_COOLDOWN must not exceed 8760h")
+	}
+	if cfg.VerificationApplyRateLimit < 0 || cfg.VerificationBotRateLimit < 0 {
+		return fmt.Errorf("TELESRV_VERIFICATION_APPLY_RATE_LIMIT and TELESRV_VERIFICATION_BOT_RATE_LIMIT must be non-negative")
+	}
+	if cfg.VerificationApplyRateWindow < 0 || cfg.VerificationBotRateWindow < 0 {
+		return fmt.Errorf("TELESRV_VERIFICATION_APPLY_RATE_WINDOW and TELESRV_VERIFICATION_BOT_RATE_WINDOW must be non-negative")
+	}
+	// A positive limit with a zero window is not "unlimited", it is a limiter that
+	// can never refill: reject it instead of shipping a permanent lockout.
+	if cfg.VerificationApplyRateLimit > 0 && cfg.VerificationApplyRateWindow <= 0 {
+		return fmt.Errorf("TELESRV_VERIFICATION_APPLY_RATE_WINDOW must be positive when TELESRV_VERIFICATION_APPLY_RATE_LIMIT is set")
+	}
+	if cfg.VerificationBotRateLimit > 0 && cfg.VerificationBotRateWindow <= 0 {
+		return fmt.Errorf("TELESRV_VERIFICATION_BOT_RATE_WINDOW must be positive when TELESRV_VERIFICATION_BOT_RATE_LIMIT is set")
+	}
+	if cfg.VerificationNotifyInterval <= 0 {
+		return fmt.Errorf("TELESRV_VERIFICATION_NOTIFY_INTERVAL must be positive")
+	}
+	if cfg.VerificationNotifyBatch <= 0 || cfg.VerificationNotifyBatch > 500 {
+		return fmt.Errorf("TELESRV_VERIFICATION_NOTIFY_BATCH must be 1..500")
+	}
+	if cfg.VerificationMaxActivePerUser < 0 || cfg.VerificationMaxActivePerUser > 50 {
+		return fmt.Errorf("TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER must be 0..50")
+	}
+	// Third-party bot verification. The ceiling is the storage bound: a value above
+	// it would be silently unreachable, and a configuration key that cannot do what
+	// it says is worse than no key.
+	if cfg.BotVerificationMaxPerVerifier < 0 {
+		return fmt.Errorf("TELESRV_BOT_VERIFICATION_MAX_PER_VERIFIER must be non-negative")
+	}
+	if cfg.BotVerificationMaxPerVerifier > domain.MaxCustomVerificationsPerVerifier {
+		return fmt.Errorf("TELESRV_BOT_VERIFICATION_MAX_PER_VERIFIER must not exceed %d", domain.MaxCustomVerificationsPerVerifier)
+	}
+	if cfg.BotVerificationRequestRateLimit < 0 {
+		return fmt.Errorf("TELESRV_BOT_VERIFICATION_REQUEST_RATE_LIMIT must be non-negative")
+	}
+	if cfg.BotVerificationRequestRateWindow < 0 {
+		return fmt.Errorf("TELESRV_BOT_VERIFICATION_REQUEST_RATE_WINDOW must be non-negative")
+	}
+	// Same trap as the official budget above: a positive limit with a zero window is
+	// not "unlimited", it is a limiter that can never refill.
+	if cfg.BotVerificationRequestRateLimit > 0 && cfg.BotVerificationRequestRateWindow <= 0 {
+		return fmt.Errorf("TELESRV_BOT_VERIFICATION_REQUEST_RATE_WINDOW must be positive when TELESRV_BOT_VERIFICATION_REQUEST_RATE_LIMIT is set")
+	}
+	return nil
+}
+
+// validateAdminRBACConfig checks the panel/adminapi permission configuration.
+// An unparsable permission name is refused rather than ignored: a silently
+// dropped permission is either a lockout or an unintended grant.
+func validateAdminRBACConfig(cfg Config) error {
+	if len(cfg.AdminUIPermissions) == 0 {
+		return fmt.Errorf("TELESRV_ADMIN_UI_PERMISSIONS must not be empty; use * to grant every permission")
+	}
+	for _, permission := range cfg.AdminUIPermissions {
+		if !validAdminPermission(permission) {
+			return fmt.Errorf("TELESRV_ADMIN_UI_PERMISSIONS contains invalid permission %q", permission)
+		}
+	}
+	names := make(map[string]struct{}, len(cfg.AdminScopedTokens))
+	tokens := make(map[string]struct{}, len(cfg.AdminScopedTokens))
+	for _, scoped := range cfg.AdminScopedTokens {
+		if _, dup := names[strings.ToLower(scoped.Name)]; dup {
+			return fmt.Errorf("TELESRV_ADMIN_SCOPED_TOKENS has duplicate name %q", scoped.Name)
+		}
+		names[strings.ToLower(scoped.Name)] = struct{}{}
+		if _, dup := tokens[scoped.Token]; dup {
+			return fmt.Errorf("TELESRV_ADMIN_SCOPED_TOKENS reuses one token for several names")
+		}
+		tokens[scoped.Token] = struct{}{}
+		if scoped.Token == cfg.AdminAPIToken && strings.TrimSpace(cfg.AdminAPIToken) != "" {
+			return fmt.Errorf("TELESRV_ADMIN_SCOPED_TOKENS entry %q reuses TELESRV_ADMIN_API_TOKEN, which would silently widen it to every permission", scoped.Name)
+		}
+		if len(scoped.Permissions) == 0 {
+			return fmt.Errorf("TELESRV_ADMIN_SCOPED_TOKENS entry %q has no permissions", scoped.Name)
+		}
+		for _, permission := range scoped.Permissions {
+			if !validAdminPermission(permission) {
+				return fmt.Errorf("TELESRV_ADMIN_SCOPED_TOKENS entry %q has invalid permission %q", scoped.Name, permission)
+			}
+		}
+	}
+	return nil
+}
+
+// parseAdminScopedTokens reads "name:token:perm1,perm2" entries separated by ';'.
+//
+// The shape is strict on purpose: the value carries credentials, and a
+// half-understood entry must fail startup rather than produce a token whose
+// rights nobody can predict. The permission list is the last field, so a token
+// itself may not contain ':' -- which is also why it is validated here rather
+// than being re-split later by a consumer.
+func parseAdminScopedTokens(raw string) ([]AdminScopedToken, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	out := make([]AdminScopedToken, 0, 4)
+	for _, entry := range strings.Split(raw, ";") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.Split(entry, ":")
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("TELESRV_ADMIN_SCOPED_TOKENS entry %q must be name:token:perm1,perm2", entry)
+		}
+		name := strings.TrimSpace(parts[0])
+		token := strings.TrimSpace(parts[1])
+		if name == "" || token == "" {
+			return nil, fmt.Errorf("TELESRV_ADMIN_SCOPED_TOKENS entry %q must carry a non-empty name and token", entry)
+		}
+		if strings.ContainsAny(token, " \t\r\n") {
+			return nil, fmt.Errorf("TELESRV_ADMIN_SCOPED_TOKENS entry %q has whitespace inside its token", name)
+		}
+		permissions := make([]string, 0, 4)
+		for _, permission := range strings.Split(parts[2], ",") {
+			permission = strings.TrimSpace(permission)
+			if permission == "" {
+				continue
+			}
+			permissions = append(permissions, permission)
+		}
+		if len(permissions) == 0 {
+			return nil, fmt.Errorf("TELESRV_ADMIN_SCOPED_TOKENS entry %q must list at least one permission", name)
+		}
+		out = append(out, AdminScopedToken{Name: name, Token: token, Permissions: permissions})
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// validAdminPermission accepts the wildcard and dotted/namespaced permission
+// names such as "users.read" or "verification:decide".
+func validAdminPermission(permission string) bool {
+	if permission == adminPermissionAll {
+		return true
+	}
+	if permission == "" || len(permission) > 64 {
+		return false
+	}
+	for i := 0; i < len(permission); i++ {
+		c := permission[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '_' || c == '-':
+		case (c == '.' || c == ':') && i != 0 && i != len(permission)-1:
+		case c == '*' && i == len(permission)-1 && i > 0 && (permission[i-1] == '.' || permission[i-1] == ':'):
+			// A trailing "namespace.*" grants a whole namespace.
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validateCollectibleUsernameConfig checks the optional mint URL template. An
+// empty template is the documented default (the public-link route is derived
+// from TELESRV_PUBLIC_BASE_URL); a configured one must be a client-openable
+// absolute http(s) URL that still fits the registry's url column.
+func validateCollectibleUsernameConfig(cfg Config) error {
+	template := strings.TrimSpace(cfg.CollectibleUsernameURLTemplate)
+	if template == "" {
+		return nil
+	}
+	if len(template)+domain.MaxCollectibleUsernameLength > domain.MaxCollectibleUsernameURLLength {
+		return fmt.Errorf("TELESRV_COLLECTIBLE_USERNAME_URL_TEMPLATE is too long to hold a rendered username")
+	}
+	// Render the placeholder before parsing so a templated path segment is
+	// validated in its final shape.
+	rendered := strings.ReplaceAll(template, "{username}", "username")
+	parsed, err := url.Parse(rendered)
+	if err != nil || parsed.Host == "" || parsed.User != nil ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("TELESRV_COLLECTIBLE_USERNAME_URL_TEMPLATE must be an absolute http(s) URL without userinfo")
+	}
+	return nil
+}
+
+func validateRPCExecutionConfig(cfg Config) error {
+	if cfg.MTProtoRPCExecutionMaxEntries <= 0 || cfg.MTProtoRPCExecutionAuthMaxEntries <= 0 ||
+		cfg.MTProtoRPCExecutionSessionMaxEntries <= 0 {
+		return fmt.Errorf("MTProto rpc execution entry limits must be positive")
+	}
+	if cfg.MTProtoRPCExecutionMaxEntries < cfg.MTProtoRPCExecutionAuthMaxEntries ||
+		cfg.MTProtoRPCExecutionAuthMaxEntries < cfg.MTProtoRPCExecutionSessionMaxEntries {
+		return fmt.Errorf("MTProto rpc execution entry hierarchy must satisfy global >= auth >= session: %d/%d/%d",
+			cfg.MTProtoRPCExecutionMaxEntries, cfg.MTProtoRPCExecutionAuthMaxEntries, cfg.MTProtoRPCExecutionSessionMaxEntries)
+	}
+	if cfg.MTProtoRPCGlobalMaxTasks <= 0 || cfg.MTProtoRPCExecutionPendingPerAuth <= 0 ||
+		cfg.MTProtoRPCExecutionPendingPerAuth > cfg.MTProtoRPCGlobalMaxTasks ||
+		cfg.MTProtoRPCExecutionPendingPerAuth > cfg.MTProtoRPCExecutionAuthMaxEntries {
+		return fmt.Errorf("MTProto rpc execution pending-per-auth %d must be positive and <= global pending %d and auth entries %d",
+			cfg.MTProtoRPCExecutionPendingPerAuth, cfg.MTProtoRPCGlobalMaxTasks, cfg.MTProtoRPCExecutionAuthMaxEntries)
 	}
 	return nil
 }
@@ -752,16 +1262,6 @@ func validateLoginEmailConfig(cfg Config) error {
 	default:
 		return fmt.Errorf("TELESRV_SMTP_TLS must be starttls, tls, or none")
 	}
-	if cfg.EmailSignupEnable {
-		if len(cfg.EmailSignupPhonePrefixes) == 0 {
-			return fmt.Errorf("TELESRV_EMAIL_SIGNUP_PHONE_PREFIXES must not be empty when TELESRV_EMAIL_SIGNUP_ENABLE=true")
-		}
-		for _, prefix := range cfg.EmailSignupPhonePrefixes {
-			if !isDigitsOnly(prefix) || len(prefix) < 1 || len(prefix) > 4 {
-				return fmt.Errorf("TELESRV_EMAIL_SIGNUP_PHONE_PREFIXES entry %q must be 1-4 digits", prefix)
-			}
-		}
-	}
 	switch cfg.PhoneCodeDeliveryProvider {
 	case "development", "webhook":
 	default:
@@ -772,13 +1272,8 @@ func validateLoginEmailConfig(cfg Config) error {
 	default:
 		return fmt.Errorf("TELESRV_EMAIL_CODE_DELIVERY_PROVIDER must be smtp or webhook")
 	}
-	// EmailSignupEnable shares the same delivery channel as LoginEmailEnable
-	// (see Config.EmailSignupEnable doc), so it must gate the webhook/SMTP
-	// requirement checks identically, or an email-signup-only deployment
-	// (LoginEmailEnable=false) would skip webhook URL validation and SMTP
-	// requiredness below even though it needs one of them configured.
 	webhookEnabled := cfg.PhoneCodeDeliveryProvider == "webhook" ||
-		((cfg.LoginEmailEnable || cfg.EmailSignupEnable) && cfg.EmailCodeDeliveryProvider == "webhook")
+		(cfg.LoginEmailEnable && cfg.EmailCodeDeliveryProvider == "webhook")
 	if webhookEnabled {
 		if cfg.OTPWebhookTimeout <= 0 {
 			return fmt.Errorf("TELESRV_OTP_WEBHOOK_TIMEOUT must be positive")
@@ -788,17 +1283,17 @@ func validateLoginEmailConfig(cfg Config) error {
 			return fmt.Errorf("TELESRV_OTP_WEBHOOK_URL must be an absolute http(s) URL without userinfo")
 		}
 	}
-	if (!cfg.LoginEmailEnable && !cfg.EmailSignupEnable) || cfg.EmailCodeDeliveryProvider == "webhook" {
+	if !cfg.LoginEmailEnable || cfg.EmailCodeDeliveryProvider == "webhook" {
 		return nil
 	}
 	if strings.TrimSpace(cfg.SMTPHost) == "" {
-		return fmt.Errorf("TELESRV_SMTP_HOST is required when TELESRV_LOGIN_EMAIL_ENABLE=true or TELESRV_EMAIL_SIGNUP_ENABLE=true")
+		return fmt.Errorf("TELESRV_SMTP_HOST is required when TELESRV_LOGIN_EMAIL_ENABLE=true")
 	}
 	if cfg.SMTPPort <= 0 || cfg.SMTPPort > 65535 {
 		return fmt.Errorf("TELESRV_SMTP_PORT must be between 1 and 65535")
 	}
 	if strings.TrimSpace(cfg.SMTPFrom) == "" && strings.TrimSpace(cfg.SMTPUsername) == "" {
-		return fmt.Errorf("TELESRV_SMTP_FROM or TELESRV_SMTP_USERNAME is required when TELESRV_LOGIN_EMAIL_ENABLE=true or TELESRV_EMAIL_SIGNUP_ENABLE=true")
+		return fmt.Errorf("TELESRV_SMTP_FROM or TELESRV_SMTP_USERNAME is required when TELESRV_LOGIN_EMAIL_ENABLE=true")
 	}
 	if cfg.SMTPTimeout <= 0 {
 		return fmt.Errorf("TELESRV_SMTP_TIMEOUT must be positive")
@@ -999,18 +1494,6 @@ func (e envSource) envAllowEmptyOr(key, def string) string {
 	return def
 }
 
-func isDigitsOnly(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func (e envSource) envListOr(key string, def []string) []string {
 	v := e.envOr(key, "")
 	if v == "" {
@@ -1037,6 +1520,43 @@ func (e envSource) envIntOr(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func validateStrictMTProtoCapacityEnv(e envSource) error {
+	for _, key := range []string{
+		"TELESRV_MTPROTO_MAX_CONNECTIONS",
+		"TELESRV_MTPROTO_MAX_CONNECTIONS_PER_IP",
+		"TELESRV_MTPROTO_MAX_CONCURRENT_HANDSHAKES",
+		"TELESRV_MTPROTO_RPC_MAX_INFLIGHT",
+		"TELESRV_MTPROTO_RPC_QUEUE_SIZE",
+		"TELESRV_MTPROTO_RPC_GLOBAL_WORKERS",
+		"TELESRV_MTPROTO_RPC_GLOBAL_MAX_TASKS",
+		"TELESRV_MTPROTO_RPC_EXECUTION_MAX_ENTRIES",
+		"TELESRV_MTPROTO_RPC_EXECUTION_AUTH_MAX_ENTRIES",
+		"TELESRV_MTPROTO_RPC_EXECUTION_SESSION_MAX_ENTRIES",
+		"TELESRV_MTPROTO_RPC_EXECUTION_PENDING_PER_AUTH",
+		"TELESRV_MTPROTO_OUTBOUND_QUEUE_SIZE",
+		"TELESRV_MTPROTO_OUTBOUND_CONTROL_QUEUE_SIZE",
+	} {
+		if raw := e.envOr(key, ""); raw != "" {
+			if _, err := strconv.Atoi(raw); err != nil {
+				return fmt.Errorf("%s must be a base-10 integer: %w", key, err)
+			}
+		}
+	}
+	for _, key := range []string{
+		"TELESRV_MTPROTO_RPC_GLOBAL_MAX_BYTES",
+		"TELESRV_MTPROTO_INBOUND_FRAME_GLOBAL_MAX_BYTES",
+		"TELESRV_MTPROTO_OUTBOUND_TRACKED_GLOBAL_MAX_BYTES",
+		"TELESRV_MTPROTO_OUTBOUND_WRITE_GLOBAL_MAX_BYTES",
+	} {
+		if raw := e.envOr(key, ""); raw != "" {
+			if _, err := strconv.ParseInt(raw, 10, 64); err != nil {
+				return fmt.Errorf("%s must be a base-10 int64: %w", key, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (e envSource) envInt64Or(key string, def int64) int64 {

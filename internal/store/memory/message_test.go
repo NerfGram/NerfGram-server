@@ -1218,29 +1218,191 @@ func TestMessageStoreDeleteHistoryDeletesOrPreservesDialogAndRebuilds(t *testing
 	preservedOwner := int64(1000000003)
 	preservedPeerID := int64(1000000004)
 	preservedPeer := domain.Peer{Type: domain.PeerTypeUser, ID: preservedPeerID}
-	if _, err := messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{
-		SenderUserID:    preservedOwner,
-		RecipientUserID: preservedPeerID,
-		RandomID:        300,
-		Message:         "clear but keep dialog",
-		Date:            1700000500,
-	}); err != nil {
-		t.Fatalf("seed preserved send: %v", err)
+	var preservedTop domain.Message
+	for i := 0; i < 2; i++ {
+		sent, err := messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{
+			SenderUserID:    preservedOwner,
+			RecipientUserID: preservedPeerID,
+			RandomID:        int64(300 + i),
+			Message:         "clear but keep dialog",
+			Date:            1700000500 + i,
+		})
+		if err != nil {
+			t.Fatalf("seed preserved send %d: %v", i, err)
+		}
+		preservedTop = sent.SenderMessage
 	}
-	if _, err := messages.DeleteHistory(ctx, domain.DeleteHistoryRequest{
+	clearResult, err := messages.DeleteHistory(ctx, domain.DeleteHistoryRequest{
 		OwnerUserID: preservedOwner,
 		Peer:        preservedPeer,
 		JustClear:   true,
 		Date:        1700000600,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("DeleteHistory just_clear: %v", err)
+	}
+	clearSelf := clearResult.Self()
+	if clearSelf.Pts != 5 || clearSelf.PtsCount != 3 || len(clearSelf.MessageIDs) != 1 || len(clearSelf.Events) != 3 {
+		t.Fatalf("just_clear result = %+v, want delete+read+edit ending pts=5 count=3", clearSelf)
+	}
+	if clearSelf.Events[0].Type != domain.UpdateEventDeleteMessages ||
+		clearSelf.Events[1].Type != domain.UpdateEventReadHistoryInbox ||
+		clearSelf.Events[2].Type != domain.UpdateEventEditMessage {
+		t.Fatalf("just_clear events = %+v, want delete/read/edit order", clearSelf.Events)
 	}
 	preservedDialogs, err := dialogs.ListByUser(ctx, preservedOwner, domain.DialogFilter{Limit: 10})
 	if err != nil {
 		t.Fatalf("preserved dialogs: %v", err)
 	}
-	if len(preservedDialogs.Dialogs) != 1 || preservedDialogs.Dialogs[0].Peer != preservedPeer || preservedDialogs.Dialogs[0].TopMessage != 0 || len(preservedDialogs.Messages) != 0 {
-		t.Fatalf("preserved dialogs = %+v messages=%+v, want empty dialog kept after just_clear", preservedDialogs.Dialogs, preservedDialogs.Messages)
+	if len(preservedDialogs.Dialogs) != 1 || preservedDialogs.Dialogs[0].Peer != preservedPeer ||
+		preservedDialogs.Dialogs[0].TopMessage != preservedTop.ID || len(preservedDialogs.Messages) != 1 {
+		t.Fatalf("preserved dialogs = %+v messages=%+v, want history-clear top %d", preservedDialogs.Dialogs, preservedDialogs.Messages, preservedTop.ID)
+	}
+	clearMessage := preservedDialogs.Messages[0]
+	if !domain.IsHistoryClearServiceMessage(clearMessage) || clearMessage.ID != preservedTop.ID ||
+		!clearMessage.Out || clearMessage.From.ID != preservedOwner || clearMessage.Body != "" ||
+		clearMessage.ReplyTo != nil || clearMessage.Forward != nil || clearMessage.MediaUnread ||
+		clearMessage.ReactionUnread || clearMessage.Pinned {
+		t.Fatalf("history clear anchor = %+v, want clean owner-local service message", clearMessage)
+	}
+	repeated, err := messages.DeleteHistory(ctx, domain.DeleteHistoryRequest{
+		OwnerUserID: preservedOwner,
+		Peer:        preservedPeer,
+		JustClear:   true,
+		Date:        1700000601,
+	})
+	if err != nil {
+		t.Fatalf("repeat DeleteHistory just_clear: %v", err)
+	}
+	if repeated.Changed() || len(repeated.Deleted) != 0 || messages.nextPts[preservedOwner] != 5 {
+		t.Fatalf("repeat just_clear = %+v pts=%d, want idempotent no-op", repeated, messages.nextPts[preservedOwner])
+	}
+}
+
+func TestMessageStoreDeleteHistoryJustClearRevokeKeepsPerOwnerAnchors(t *testing.T) {
+	ctx := context.Background()
+	dialogs := NewDialogStore()
+	messages := NewMessageStore(dialogs)
+	const alice, bob = int64(1101), int64(1102)
+	var sent domain.SendPrivateTextResult
+	for i := 0; i < 2; i++ {
+		var err error
+		sent, err = messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{
+			SenderUserID: alice, RecipientUserID: bob, RandomID: int64(800 + i),
+			Message: "revoke clear", Date: 1700000700 + i,
+		})
+		if err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	res, err := messages.DeleteHistory(ctx, domain.DeleteHistoryRequest{
+		OwnerUserID: alice,
+		Peer:        domain.Peer{Type: domain.PeerTypeUser, ID: bob},
+		JustClear:   true,
+		Revoke:      true,
+		Date:        1700000800,
+	})
+	if err != nil {
+		t.Fatalf("revoke just_clear: %v", err)
+	}
+	if len(res.Deleted) != 2 {
+		t.Fatalf("deleted owners = %+v, want alice and bob", res.Deleted)
+	}
+	for _, tc := range []struct {
+		userID int64
+		peerID int64
+		topID  int
+	}{
+		{alice, bob, sent.SenderMessage.ID},
+		{bob, alice, sent.RecipientMessage.ID},
+	} {
+		history, err := messages.ListByUser(ctx, tc.userID, domain.MessageFilter{
+			HasPeer: true, Peer: domain.Peer{Type: domain.PeerTypeUser, ID: tc.peerID}, Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("history user %d: %v", tc.userID, err)
+		}
+		if len(history.Messages) != 1 || history.Messages[0].ID != tc.topID ||
+			!domain.IsHistoryClearServiceMessage(history.Messages[0]) ||
+			history.Messages[0].From.ID != tc.userID || !history.Messages[0].Out {
+			t.Fatalf("history user %d = %+v, want owner-local anchor %d", tc.userID, history.Messages, tc.topID)
+		}
+	}
+}
+
+func TestMessageStoreDeleteHistoryDateRangeDoesNotCreateHistoryClearAnchor(t *testing.T) {
+	ctx := context.Background()
+	dialogs := NewDialogStore()
+	messages := NewMessageStore(dialogs)
+	const owner, peerID = int64(1201), int64(1202)
+	peer := domain.Peer{Type: domain.PeerTypeUser, ID: peerID}
+	for i, date := range []int{100, 200} {
+		if _, err := messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{
+			SenderUserID: owner, RecipientUserID: peerID, RandomID: int64(900 + i),
+			Message: "dated", Date: date,
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if _, err := messages.DeleteHistory(ctx, domain.DeleteHistoryRequest{
+		OwnerUserID: owner, Peer: peer, JustClear: true, MinDate: 150, MaxDate: 250, Date: 300,
+	}); err != nil {
+		t.Fatalf("date delete: %v", err)
+	}
+	history, err := messages.ListByUser(ctx, owner, domain.MessageFilter{HasPeer: true, Peer: peer, Limit: 10})
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(history.Messages) != 1 || history.Messages[0].Date != 100 || domain.IsHistoryClearServiceMessage(history.Messages[0]) {
+		t.Fatalf("date history = %+v, want surviving ordinary message only", history.Messages)
+	}
+}
+
+func TestMessageStoreDeleteHistoryJustClearKeepsAnchorAcrossBatches(t *testing.T) {
+	ctx := context.Background()
+	dialogs := NewDialogStore()
+	messages := NewMessageStore(dialogs)
+	const owner, peerID = int64(1301), int64(1302)
+	peer := domain.Peer{Type: domain.PeerTypeUser, ID: peerID}
+	total := domain.MaxDeleteHistoryBatch + 2
+	var topID int
+	for i := 0; i < total; i++ {
+		sent, err := messages.SendPrivateText(ctx, domain.SendPrivateTextRequest{
+			SenderUserID: owner, RecipientUserID: peerID, RandomID: int64(10000 + i),
+			Message: "batch clear", Date: 1700010000 + i,
+		})
+		if err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+		topID = sent.SenderMessage.ID
+	}
+	first, err := messages.DeleteHistory(ctx, domain.DeleteHistoryRequest{
+		OwnerUserID: owner, Peer: peer, JustClear: true, Date: 1700020000,
+	})
+	if err != nil {
+		t.Fatalf("first clear: %v", err)
+	}
+	if first.Offset == 0 || len(first.Self().MessageIDs) != domain.MaxDeleteHistoryBatch ||
+		first.Self().PtsCount != domain.MaxDeleteHistoryBatch+2 {
+		t.Fatalf("first clear = %+v, want full batch plus one read/edit", first.Self())
+	}
+	second, err := messages.DeleteHistory(ctx, domain.DeleteHistoryRequest{
+		OwnerUserID: owner, Peer: peer, JustClear: true, Date: 1700020001,
+	})
+	if err != nil {
+		t.Fatalf("second clear: %v", err)
+	}
+	if second.Offset != 0 || len(second.Self().MessageIDs) != 1 || second.Self().PtsCount != 1 ||
+		len(second.Self().Events) != 1 || second.Self().Events[0].Type != domain.UpdateEventDeleteMessages {
+		t.Fatalf("second clear = %+v, want remaining delete only", second.Self())
+	}
+	history, err := messages.ListByUser(ctx, owner, domain.MessageFilter{HasPeer: true, Peer: peer, Limit: 10})
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(history.Messages) != 1 || history.Messages[0].ID != topID ||
+		!domain.IsHistoryClearServiceMessage(history.Messages[0]) {
+		t.Fatalf("history = %+v, want stable top anchor %d", history.Messages, topID)
 	}
 }
 

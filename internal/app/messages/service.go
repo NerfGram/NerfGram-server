@@ -16,6 +16,7 @@ type Service struct {
 	contacts     store.ContactStore
 	photos       userprojection.ProfilePhotoProvider
 	privacy      userprojection.PrivacyEvaluator
+	freezes      userprojection.AccountFreezeProvider
 	versions     store.ReadModelVersionStore
 	projector    *userprojection.Projector
 	botResponder BotResponder
@@ -57,6 +58,10 @@ func WithPrivacyEvaluator(p userprojection.PrivacyEvaluator) Option {
 	return func(s *Service) { s.privacy = p }
 }
 
+func WithAccountFreezeProvider(p userprojection.AccountFreezeProvider) Option {
+	return func(s *Service) { s.freezes = p }
+}
+
 // WithBotResponder 启用服务端内置 bot（BotFather）对私聊消息的自动应答。
 func WithBotResponder(r BotResponder) Option {
 	return func(s *Service) { s.botResponder = r }
@@ -85,6 +90,7 @@ func NewService(messages store.MessageStore, dialogs store.DialogStore, opts ...
 		userprojection.WithContactStore(s.contacts),
 		userprojection.WithPhotoProvider(s.photos),
 		userprojection.WithPrivacyEvaluator(s.privacy),
+		userprojection.WithAccountFreezeProvider(s.freezes),
 	)
 	return s
 }
@@ -214,6 +220,42 @@ func (s *Service) SetChatTheme(ctx context.Context, userID int64, req domain.Set
 	}
 	out.Send = send
 	return out, nil
+}
+
+// GetPrivateNoForwards returns the canonical content-protection state for one
+// ordinary private chat.
+func (s *Service) GetPrivateNoForwards(ctx context.Context, userID, peerUserID int64) (domain.PrivateNoForwardsState, error) {
+	if s == nil || s.messages == nil || userID == 0 || peerUserID == 0 || userID == peerUserID {
+		return domain.PrivateNoForwardsState{}, domain.ErrMessageIDInvalid
+	}
+	backend, ok := s.messages.(store.PrivateNoForwardsStore)
+	if !ok {
+		return domain.PrivateNoForwardsState{}, nil
+	}
+	return backend.GetPrivateNoForwards(ctx, userID, peerUserID)
+}
+
+// TogglePrivateNoForwards atomically mutates the pair state and appends the
+// corresponding service message when the official state machine requires one.
+func (s *Service) TogglePrivateNoForwards(ctx context.Context, userID int64, req domain.TogglePrivateNoForwardsRequest) (domain.TogglePrivateNoForwardsResult, error) {
+	if s == nil || s.messages == nil || userID == 0 {
+		return domain.TogglePrivateNoForwardsResult{}, domain.ErrMessageIDInvalid
+	}
+	if req.ActorUserID == 0 {
+		req.ActorUserID = userID
+	}
+	if req.ActorUserID != userID || req.PeerUserID == 0 || req.PeerUserID == userID ||
+		req.RequestMsgID < 0 || req.RequestMsgID > domain.MaxMessageBoxID {
+		return domain.TogglePrivateNoForwardsResult{}, domain.ErrMessageIDInvalid
+	}
+	if err := s.ensureCanSend(ctx, userID); err != nil {
+		return domain.TogglePrivateNoForwardsResult{}, err
+	}
+	backend, ok := s.messages.(store.PrivateNoForwardsStore)
+	if !ok {
+		return domain.TogglePrivateNoForwardsResult{}, domain.ErrMessageIDInvalid
+	}
+	return backend.TogglePrivateNoForwards(ctx, req)
 }
 
 func chatThemeServiceMedia(emoticon string) *domain.MessageMedia {
@@ -425,6 +467,31 @@ func (s *Service) GetMessageReactions(ctx context.Context, userID int64, req dom
 		}
 	}
 	return s.messages.GetMessageReactions(ctx, req)
+}
+
+// SavedReactionTags returns the global or one-sub-dialog Saved Messages tag list.
+func (s *Service) SavedReactionTags(ctx context.Context, userID int64, savedPeer domain.Peer, limit int) ([]domain.SavedReactionTag, error) {
+	if s == nil || s.messages == nil || userID == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > domain.MaxSavedReactionTags {
+		limit = domain.MaxSavedReactionTags
+	}
+	return s.messages.ListSavedReactionTags(ctx, domain.SavedReactionTagsRequest{
+		UserID:    userID,
+		SavedPeer: savedPeer,
+		Limit:     limit,
+	})
+}
+
+// UpdateSavedReactionTag stores or removes the optional global title for one
+// tag that is currently assigned to at least one visible Saved Message.
+func (s *Service) UpdateSavedReactionTag(ctx context.Context, userID int64, tag domain.SavedReactionTag) error {
+	if s == nil || s.messages == nil || userID == 0 || !tag.Reaction.Valid() {
+		return domain.ErrReactionInvalid
+	}
+	tag.UserID = userID
+	return s.messages.UpsertSavedReactionTag(ctx, tag)
 }
 
 // EditMessage 编辑当前账号发出的私聊文本消息。

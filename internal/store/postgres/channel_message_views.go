@@ -24,7 +24,7 @@ func (s *ChannelStore) GetChannelMessageViews(ctx context.Context, req domain.Ch
 	if req.UserID == 0 || req.ChannelID == 0 {
 		return domain.ChannelMessageViewsResult{}, domain.ErrChannelInvalid
 	}
-	channel, member, err := s.getChannelForMember(ctx, s.db, req.UserID, req.ChannelID)
+	channel, member, _, err := s.getChannelForViewer(ctx, s.db, req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ChannelMessageViewsResult{}, err
 	}
@@ -43,6 +43,16 @@ func (s *ChannelStore) GetChannelMessageViews(ctx context.Context, req domain.Ch
 		if date <= 0 {
 			date = nowUnix()
 		}
+		args := []any{req.ChannelID, id32, req.UserID, date, member.AvailableMinID}
+		visibility := ""
+		if channel.Monoforum && !member.CanManageDirectMessages() {
+			args = append(args, string(domain.PeerTypeUser), req.UserID)
+			visibility = fmt.Sprintf(
+				" AND m.saved_peer_type = $%d AND m.saved_peer_id = $%d",
+				len(args)-1,
+				len(args),
+			)
+		}
 		rows, err := s.db.Query(ctx, `
 WITH inserted AS (
     INSERT INTO channel_message_viewers (channel_id, message_id, viewer_user_id, viewed_at)
@@ -52,6 +62,7 @@ WITH inserted AS (
       AND m.id = ANY($2::int[])
       AND NOT m.deleted
       AND m.id > $5
+      `+visibility+`
     ON CONFLICT DO NOTHING
     RETURNING message_id
 ), updated AS (
@@ -65,7 +76,7 @@ WITH inserted AS (
 )
 SELECT i.message_id
 FROM inserted i
-LEFT JOIN updated u ON u.id = i.message_id`, req.ChannelID, id32, req.UserID, date, member.AvailableMinID)
+LEFT JOIN updated u ON u.id = i.message_id`, args...)
 		if err != nil {
 			return domain.ChannelMessageViewsResult{}, fmt.Errorf("increment channel message views: %w", err)
 		}
@@ -82,7 +93,7 @@ LEFT JOIN updated u ON u.id = i.message_id`, req.ChannelID, id32, req.UserID, da
 		}
 		rows.Close()
 	}
-	summaries, err := s.listChannelMessageViewSummaries(ctx, req.ChannelID, id32, member.AvailableMinID)
+	summaries, err := s.listChannelMessageViewSummaries(ctx, req.UserID, channel, member, id32)
 	if err != nil {
 		return domain.ChannelMessageViewsResult{}, err
 	}
@@ -110,12 +121,16 @@ LEFT JOIN updated u ON u.id = i.message_id`, req.ChannelID, id32, req.UserID, da
 	}, nil
 }
 
-func (s *ChannelStore) listChannelMessageViewSummaries(ctx context.Context, channelID int64, ids []int32, availableMinID int) ([]channelMessageViewSummary, error) {
-	args := []any{channelID, ids}
+func (s *ChannelStore) listChannelMessageViewSummaries(ctx context.Context, viewerUserID int64, channel domain.Channel, member domain.ChannelMember, ids []int32) ([]channelMessageViewSummary, error) {
+	args := []any{channel.ID, ids}
 	where := "channel_id = $1 AND id = ANY($2::int[]) AND NOT deleted"
-	if availableMinID > 0 {
-		args = append(args, availableMinID)
+	if member.AvailableMinID > 0 {
+		args = append(args, member.AvailableMinID)
 		where += fmt.Sprintf(" AND id > $%d", len(args))
+	}
+	if channel.Monoforum && !member.CanManageDirectMessages() {
+		args = append(args, string(domain.PeerTypeUser), viewerUserID)
+		where += fmt.Sprintf(" AND saved_peer_type = $%d AND saved_peer_id = $%d", len(args)-1, len(args))
 	}
 	rows, err := s.db.Query(ctx, `
 SELECT id, views_count, post, discussion_channel_id, discussion_message_id, sender_user_id, from_peer_type, from_peer_id

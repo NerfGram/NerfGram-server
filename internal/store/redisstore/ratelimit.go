@@ -58,21 +58,32 @@ func (l *RateLimiter) AllowN(ctx context.Context, key string, cost, limit int, w
 	if err != nil {
 		return false, 0, fmt.Errorf("redis increment rate limit: %w", err)
 	}
-	items, ok := value.([]interface{})
-	if !ok || len(items) != 2 {
-		return false, 0, fmt.Errorf("redis increment rate limit: unexpected result %T", value)
-	}
-	count, countOK := items[0].(int64)
-	ttlMillis, ttlOK := items[1].(int64)
-	if !countOK || !ttlOK || ttlMillis <= 0 {
-		return false, 0, fmt.Errorf("redis increment rate limit: invalid result %#v", items)
+	count, ttlMillis, err := decodeRateLimitIncrementResult(value)
+	if err != nil {
+		return false, 0, err
 	}
 	if count <= int64(limit) {
 		return true, 0, nil
 	}
+	// Redis PTTL returns 0 when less than one millisecond remains. That is a
+	// valid fixed-window boundary, not a corrupt result. Round it up to the
+	// smallest protocol-safe FLOOD_WAIT instead of leaking a transient 500.
 	retry := (ttlMillis + 999) / 1000
 	if retry <= 0 {
 		retry = 1
 	}
 	return false, int(retry), nil
+}
+
+func decodeRateLimitIncrementResult(value any) (count int64, ttlMillis int64, err error) {
+	items, ok := value.([]interface{})
+	if !ok || len(items) != 2 {
+		return 0, 0, fmt.Errorf("redis increment rate limit: unexpected result %T", value)
+	}
+	count, countOK := items[0].(int64)
+	ttlMillis, ttlOK := items[1].(int64)
+	if !countOK || !ttlOK || count <= 0 || ttlMillis < 0 {
+		return 0, 0, fmt.Errorf("redis increment rate limit: invalid result %#v", items)
+	}
+	return count, ttlMillis, nil
 }

@@ -71,6 +71,28 @@ func TestChannelStoreEnablingDirectMessagesCreatesMonoforum(t *testing.T) {
 	if mfTop == 0 || mfPts == 0 {
 		t.Fatalf("monoforum top/pts = %d/%d, want paid-messages service top", mfTop, mfPts)
 	}
+	read, err := channels.ReadChannelHistory(ctx, domain.ReadChannelHistoryRequest{
+		UserID: owner.ID, ChannelID: monoID, MaxID: mfTop, Date: 1700000901,
+	})
+	if err != nil {
+		t.Fatalf("read synthetic monoforum history: %v", err)
+	}
+	if !read.ReadOnly || read.Changed || read.MaxID != mfTop {
+		t.Fatalf("synthetic monoforum read = %+v, want read-only no-op at %d", read, mfTop)
+	}
+	var memberExists, dialogExists bool
+	if err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+           SELECT 1 FROM channel_members WHERE channel_id=$1 AND user_id=$2
+       ),
+       EXISTS (
+           SELECT 1 FROM channel_dialogs WHERE channel_id=$1 AND user_id=$2
+       )`, monoID, owner.ID).Scan(&memberExists, &dialogExists); err != nil {
+		t.Fatalf("check synthetic monoforum read footprint: %v", err)
+	}
+	if memberExists || dialogExists {
+		t.Fatalf("synthetic monoforum read persisted member/dialog = %v/%v", memberExists, dialogExists)
+	}
 	// 同批下发母广播频道(TDesktop 据此 resolve linked_monoforum_id 并派生 MonoforumAdmin
 	// 渲染 Direct-Messages 容器):GetChannelDialogs([mono]) 的 chats[] 必须同时带 mono 与母频道。
 	coDelivery, err := channels.GetChannelDialogs(ctx, owner.ID, []int64{monoID})

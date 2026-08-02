@@ -83,6 +83,13 @@ func (s *ChannelStore) SearchPublicChannels(_ context.Context, viewerUserID int6
 		return domain.PublicChannelSearchResult{}, nil
 	}
 	s.mu.RLock()
+	registry := s.usernameRegistry
+	s.mu.RUnlock()
+	var usernameMatches map[int64]int
+	if registry != nil {
+		usernameMatches = registry.activeUsernameMatches(query, domain.PeerTypeChannel)
+	}
+	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	type item struct {
@@ -92,6 +99,11 @@ func (s *ChannelStore) SearchPublicChannels(_ context.Context, viewerUserID int6
 	items := make([]item, 0, limit)
 	for channelID, channel := range s.channels {
 		rank, ok := publicChannelSearchRank(channel, query)
+		if usernameRank, matched := usernameMatches[channelID]; matched &&
+			!channel.Deleted && (channel.Broadcast || channel.Megagroup) &&
+			(!ok || usernameRank < rank) {
+			rank, ok = usernameRank, true
+		}
 		if !ok {
 			continue
 		}
@@ -325,9 +337,19 @@ func (s *ChannelStore) ListDirtyActiveChannelsForUser(_ context.Context, userID 
 		if !ok || member.Status != domain.ChannelMemberActive {
 			continue
 		}
+		item := domain.DirtyChannel{ChannelID: channelID, Pts: channel.Pts}
 		checkpoint := s.channelUpdateCheckpointLocked(channelID, channel)
 		if checkpoint.LatestEventDate > sinceDate {
-			out = append(out, domain.DirtyChannel{ChannelID: channelID, Pts: channel.Pts})
+			item.ChannelUpdatesDirty = true
+		}
+		if clearDate := s.historyClearDates[channelID][userID]; clearDate >= sinceDate &&
+			member.HistoryClearAnchorID > 0 &&
+			member.HistoryClearAnchorID == member.AvailableMinID {
+			item.AvailableMinID = member.AvailableMinID
+			item.HistoryClearDate = clearDate
+		}
+		if item.ChannelUpdatesDirty || item.AvailableMinID > 0 {
+			out = append(out, item)
 		}
 	}
 	for channelID, channel := range s.channels {
@@ -344,7 +366,11 @@ func (s *ChannelStore) ListDirtyActiveChannelsForUser(_ context.Context, userID 
 				}
 			}
 			if !found {
-				out = append(out, domain.DirtyChannel{ChannelID: channelID, Pts: channel.Pts})
+				out = append(out, domain.DirtyChannel{
+					ChannelID:           channelID,
+					Pts:                 channel.Pts,
+					ChannelUpdatesDirty: true,
+				})
 			}
 		}
 	}
@@ -363,7 +389,7 @@ func (s *ChannelStore) monoforumVisibleToUserLocked(mono domain.Channel, userID 
 	if !ok || parent.Deleted || !parent.BroadcastMessagesAllowed || parent.LinkedMonoforumID != mono.ID {
 		return false
 	}
-	if member, ok := s.members[parent.ID][userID]; ok && member.Status == domain.ChannelMemberActive && isChannelAdmin(member) {
+	if member, ok := s.members[parent.ID][userID]; ok && member.CanManageDirectMessages() {
 		return true
 	}
 	for _, msg := range s.messages[mono.ID] {
@@ -418,7 +444,7 @@ func (s *ChannelStore) channelForViewerLocked(userID, channelID int64) (domain.C
 	}
 	if channel.Monoforum && channel.LinkedMonoforumID != 0 {
 		parentMember, ok := s.members[channel.LinkedMonoforumID][userID]
-		if ok && parentMember.Status == domain.ChannelMemberActive && isChannelAdmin(parentMember) {
+		if ok && parentMember.CanManageDirectMessages() {
 			return channel, syntheticMonoforumAdminMember(channel, parentMember), true, nil
 		}
 		parent, ok := s.channels[channel.LinkedMonoforumID]
@@ -426,10 +452,23 @@ func (s *ChannelStore) channelForViewerLocked(userID, channelID int64) (domain.C
 			return channel, syntheticMonoforumUserMember(channel, userID), true, nil
 		}
 	}
-	if !publicPreviewableChannel(channel) {
+	if !s.publicPreviewableChannelLocked(channel) {
 		return domain.Channel{}, domain.ChannelMember{}, false, domain.ErrChannelPrivate
 	}
 	return channel, publicPreviewMember(channel, userID, existing, found), true, nil
+}
+
+// channelMessageVisibleToViewerLocked applies the message-level half of synthetic monoforum
+// access. The channel shell is visible without a channel_members row, but a subscriber may only
+// address messages in saved_peer=self; managers may address every subscriber sub-dialog.
+func channelMessageVisibleToViewerLocked(channel domain.Channel, member domain.ChannelMember, viewerUserID int64, msg domain.ChannelMessage) bool {
+	if !channel.Monoforum {
+		return true
+	}
+	if member.CanManageDirectMessages() {
+		return true
+	}
+	return msg.SavedPeer == (domain.Peer{Type: domain.PeerTypeUser, ID: viewerUserID})
 }
 
 func (s *ChannelStore) dialogForUserLocked(userID int64, channel domain.Channel) domain.ChannelDialog {
@@ -441,12 +480,16 @@ func (s *ChannelStore) dialogForMemberLocked(userID int64, channel domain.Channe
 	dialog.UserID = userID
 	dialog.ChannelID = channel.ID
 	dialog.TopMessageID = s.visibleTopMessageIDForMemberLocked(channel, member)
+	dialog.HistoryClearAnchorID = member.HistoryClearAnchorID
+	dialog.HistoryClearAnchorDate = member.HistoryClearAnchorDate
 	// TopMessageDate 必须从可见 top 消息派生(不能继承空缓存的 0),否则会话排序/分页与预览
 	// dialog 的日期全错。与 postgres GetChannelDialogs 用 getChannelMessage 设 date 对齐。
 	dialog.TopMessageDate = 0
 	if dialog.TopMessageID > 0 {
-		if top, ok := s.findMessageLocked(channel.ID, dialog.TopMessageID); ok {
+		if top, ok := s.channelMessageForMemberLocked(userID, channel.ID, dialog.TopMessageID); ok {
 			dialog.TopMessageDate = top.Date
+		} else if dialog.TopMessageID == member.HistoryClearAnchorID {
+			dialog.TopMessageDate = member.HistoryClearAnchorDate
 		}
 	}
 	if member.ReadInboxMaxID > dialog.ReadInboxMaxID {
@@ -556,8 +599,7 @@ func recommendableChannel(channel domain.Channel) bool {
 
 func publicSearchableChannel(channel domain.Channel) bool {
 	return !channel.Deleted &&
-		(channel.Broadcast || channel.Megagroup) &&
-		strings.TrimSpace(channel.Username) != ""
+		(channel.Broadcast || channel.Megagroup)
 }
 
 func channelRoleOrder(role domain.ChannelMemberRole) int {

@@ -1,4 +1,7 @@
 import {
+  AtSign,
+  BadgeCheck,
+  Bot,
   ChevronDown,
   Database,
   LayoutDashboard,
@@ -6,14 +9,21 @@ import {
   MessageSquareText,
   Server,
   Shield,
+  ShieldAlert,
   ShieldCheck,
+  Smile,
+  Stamp,
+  Trophy,
   Users,
-	Gift
+	Gift,
+	Send
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { LanguageSwitch, useI18n } from "../i18n";
+import { permissionBotVerificationReview, permissionVerificationReview, useCan } from "../permissions";
 import { type Navigate, type RouteState, routeSubtitle, routeTitle } from "../routing";
+import { ThemeSwitch } from "../theme";
 import { AppLink } from "./AppLink";
 
 export function BootScreen() {
@@ -46,6 +56,12 @@ export function Shell({
   children: ReactNode;
 }) {
   const { t } = useI18n();
+  // The verification queue is hidden for a session without verification.review:
+  // the entry would only lead to a 403 (and the route itself is gated as well).
+  const canReviewVerification = useCan(permissionVerificationReview);
+  // Same reasoning for the third-party queue, which has its own right: the two
+  // sections are granted independently, so one entry can be visible without the other.
+  const canReviewBotVerification = useCan(permissionBotVerificationReview);
   const messagesActive = route.path.startsWith("/messages");
   const [messagesOpen, setMessagesOpen] = useState(messagesActive);
 
@@ -75,7 +91,19 @@ export function Shell({
           <NavLink icon={<LayoutDashboard size={16} />} href="/" route={route} navigate={navigate}>{t("layout.dashboard")}</NavLink>
           <NavLink icon={<Users size={16} />} href="/accounts" route={route} navigate={navigate}>{t("layout.accounts")}</NavLink>
           <NavLink icon={<ShieldCheck size={16} />} href="/channels" route={route} navigate={navigate}>{t("layout.channels")}</NavLink>
+          <NavLink icon={<Bot size={16} />} href="/bots" route={route} navigate={navigate}>{t("layout.bots")}</NavLink>
+          <NavLink icon={<ShieldAlert size={16} />} href="/moderation" route={route} navigate={navigate}>{t("layout.moderation")}</NavLink>
+          {canReviewVerification && (
+            <NavLink icon={<BadgeCheck size={16} />} href="/verification" route={route} navigate={navigate}>{t("layout.verification")}</NavLink>
+          )}
+          {canReviewBotVerification && (
+            <NavLink icon={<Stamp size={16} />} href="/bot-verification" route={route} navigate={navigate}>{t("layout.botVerification")}</NavLink>
+          )}
+          <NavLink icon={<AtSign size={16} />} href="/collectible-usernames" route={route} navigate={navigate}>{t("layout.collectibleUsernames")}</NavLink>
+          <NavLink icon={<Trophy size={16} />} href="/account-ratings" route={route} navigate={navigate}>{t("layout.accountRatings")}</NavLink>
 			<NavLink icon={<Gift size={16} />} href="/gifts" route={route} navigate={navigate}>{t("layout.gifts")}</NavLink>
+          <NavLink icon={<Send size={16} />} href="/give-gifts" route={route} navigate={navigate}>{t("layout.giveGifts")}</NavLink>
+          <NavLink icon={<Smile size={16} />} href="/emoji" route={route} navigate={navigate}>{t("layout.emoji")}</NavLink>
           <div className={`nav-section ${messagesActive ? "active" : ""} ${messagesOpen ? "open" : ""}`}>
             <button
               className="nav-section-toggle"
@@ -123,6 +151,7 @@ export function Shell({
             <h1>{routeTitle(route.path, t)}</h1>
           </div>
           <div className="topbar-actions">
+            <ThemeSwitch />
             <LanguageSwitch />
             <span className="actor-pill">{t("layout.actor", { actor })}</span>
             <button className="btn ghost icon-text" type="button" onClick={logout} title={t("layout.logout")}>

@@ -405,7 +405,12 @@ func TestConsumeLoginEmailResetRequiresExactIssuedHash(t *testing.T) {
 	users := &switchablePhoneOwnerStore{UserStore: baseUsers}
 	codes := memory.NewCodeStore()
 	delivery := &captureLoginCodeDelivery{}
-	svc := NewService(users, memory.NewAuthorizationStore(), codes, nil, nil, "12345", WithLoginCodeDelivery(delivery))
+	otp := &captureOTPSender{}
+	svc := NewService(users, memory.NewAuthorizationStore(), codes, nil, nil, "12345",
+		WithLoginCodeDelivery(delivery), WithPhoneCodeDelivery(otp, 5))
+	if !svc.LoginEmailResetAvailable() {
+		t.Fatal("LoginEmailResetAvailable=false with real SMS sender")
+	}
 	seed := func(hash, channel string) {
 		t.Helper()
 		if err := codes.Set(ctx, hash, store.PhoneCode{
@@ -457,8 +462,35 @@ func TestConsumeLoginEmailResetRequiresExactIssuedHash(t *testing.T) {
 	if len(delivery.requests) != 1 || delivery.requests[0].UserID != owner.ID || delivery.requests[0].PhoneCodeHash != replacementHash {
 		t.Fatalf("replacement delivery=%+v", delivery.requests)
 	}
-	if rec, found, err := codes.Get(ctx, replacementHash); err != nil || !found || rec.Version != store.PhoneCodeVersionCurrent || rec.IssuedUserID != owner.ID || rec.Channel != codeChannelPhone {
+	if rec, found, err := codes.Get(ctx, replacementHash); err != nil || !found || rec.Version != store.PhoneCodeVersionCurrent || rec.IssuedUserID != owner.ID || rec.Channel != codeChannelSMS {
 		t.Fatalf("replacement code=%+v found=%v err=%v", rec, found, err)
+	}
+}
+
+func TestLoginEmailResetUnavailableWithoutRealSMSSender(t *testing.T) {
+	ctx := context.Background()
+	users := memory.NewUserStore()
+	owner, err := users.Create(ctx, domain.User{Phone: "15550009339", FirstName: "Owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codes := memory.NewCodeStore()
+	const hash = "unavailable-email-reset"
+	if err := codes.Set(ctx, hash, store.PhoneCode{
+		Version: store.PhoneCodeVersionCurrent, IssuedUserID: owner.ID,
+		Phone: owner.Phone, Code: "654321", Channel: codeChannelEmailLogin,
+	}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(users, memory.NewAuthorizationStore(), codes, nil, nil, "12345")
+	if svc.LoginEmailResetAvailable() {
+		t.Fatal("LoginEmailResetAvailable=true without real SMS sender")
+	}
+	if _, err := svc.ConsumeLoginEmailReset(ctx, owner.Phone, hash); !errors.Is(err, ErrCodeInvalid) {
+		t.Fatalf("ConsumeLoginEmailReset err=%v, want invalid", err)
+	}
+	if _, found, err := codes.Get(ctx, hash); err != nil || !found {
+		t.Fatalf("unavailable reset consumed proof found=%v err=%v", found, err)
 	}
 }
 
@@ -481,7 +513,8 @@ func TestConcurrentLoginEmailResetHasSingleConsumer(t *testing.T) {
 	}, time.Minute); err != nil {
 		t.Fatalf("seed code: %v", err)
 	}
-	svc := NewService(users, memory.NewAuthorizationStore(), codes, nil, nil, "12345")
+	svc := NewService(users, memory.NewAuthorizationStore(), codes, nil, nil, "12345",
+		WithPhoneCodeDelivery(&captureOTPSender{}, 5))
 	const workers = 24
 	start := make(chan struct{})
 	errs := make(chan error, workers)
@@ -542,7 +575,8 @@ func TestLoginEmailResetLocksUserAcrossOwnerTransfer(t *testing.T) {
 		t.Fatalf("seed reset code: %v", err)
 	}
 	delivery := &captureLoginCodeDelivery{}
-	authSvc := NewService(users, memory.NewAuthorizationStore(), codes, nil, nil, "12345", WithLoginCodeDelivery(delivery))
+	authSvc := NewService(users, memory.NewAuthorizationStore(), codes, nil, nil, "12345",
+		WithLoginCodeDelivery(delivery), WithPhoneCodeDelivery(&captureOTPSender{}, 5))
 	resetUserID, err := authSvc.ConsumeLoginEmailReset(ctx, ownerA.Phone, hash)
 	if err != nil || resetUserID != ownerA.ID {
 		t.Fatalf("ConsumeLoginEmailReset uid=%d err=%v", resetUserID, err)

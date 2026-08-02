@@ -36,11 +36,15 @@ func (r *Router) BuildOutboxUpdates(ctx context.Context, requests []OutboxUpdate
 		for i, item := range items {
 			update := tgUpdateForOutboxEventForViewer(events[i], viewerUserID)
 			if peers := storyUpdateEventPeers(events[i]); len(peers) > 0 {
-				update = r.withStoryUpdatePeerObjects(ctx, viewerUserID, update, peers...)
+				update = r.withStoryUpdatePeerObjectsForOutbox(ctx, viewerUserID, update, peers...)
 			}
 			out[item.index] = update
 		}
 	}
+	// Username rows are viewer-independent. Project the union once after every
+	// viewer-specific update has been built so one outbox claim never turns into
+	// a registry query per event/session.
+	r.applyUsernamesToUpdatesBatch(ctx, out)
 	return out
 }
 

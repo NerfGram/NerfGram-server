@@ -58,6 +58,9 @@ func (r *Router) onChannelsReadHistory(ctx context.Context, req *tg.ChannelsRead
 	if r.deps.Channels == nil {
 		return true, nil
 	}
+	if req == nil {
+		return false, inputRequestInvalidErr()
+	}
 	userID, _, err := r.currentUserID(ctx)
 	if err != nil {
 		return false, internalErr()
@@ -74,6 +77,9 @@ func (r *Router) onChannelsReadHistory(ctx context.Context, req *tg.ChannelsRead
 	})
 	if err != nil {
 		return false, channelInvalidErr(err)
+	}
+	if read.ReadOnly {
+		return true, nil
 	}
 	if _, err := r.recordChannelReadInbox(ctx, userID, read); err != nil {
 		return false, err

@@ -446,7 +446,7 @@ func (a *rpcRewrapAlias) storeResultOnce(s *Server, encoded *encodedOutboundMess
 	if a == nil || s == nil || encoded == nil || !a.resultStoreClaimed.CompareAndSwap(false, true) {
 		return
 	}
-	s.storeRPCResult(a.conn, a.newReqID, encoded)
+	s.completeRPCResult(a.conn, a.newReqID, encoded, true)
 }
 
 func claimRPCRewrapLogicalHook(
@@ -465,8 +465,8 @@ func claimRPCRewrapLogicalHook(
 // completeDeliveredRPCRewrapResult is safe after a watchdog has already fenced
 // this physical generation. The caller has independent proof that the
 // retargeted bytes reached the stream; deliveredFinalizeOnce, the shared hook
-// coordinator and cache publication make late/concurrent invocations converge
-// while preserving replacement -> logical -> cache -> barrier order.
+// coordinator and ledger publication make late/concurrent invocations converge
+// while preserving replacement -> logical -> ledger -> barrier order.
 func (s *Server) completeDeliveredRPCRewrapResult(
 	ctx context.Context,
 	a *rpcRewrapAlias,
@@ -510,8 +510,10 @@ const (
 	rpcRewrapObserverWorkers = 1
 	rpcRewrapObserverQueue   = 64
 	// Queue residence, physical delivery and ordered restore share one absolute
-	// deadline. An admitted alias must never retain a Conn scheduler barrier for
-	// minutes behind older slow jobs.
+	// control deadline. It prevents later stages from starting and fences logical
+	// ownership, but cannot cancel non-cooperative filesystem, transport or restore
+	// work. Failure publication may wait for replay preparation to leave its
+	// ownership transition before releasing the Conn scheduler barrier.
 	rpcRewrapDeliveryQueueTimeout = 5 * time.Second
 )
 
@@ -532,10 +534,10 @@ const (
 	rpcRewrapJobFailed
 )
 
-// rpcRewrapDeliveryControl lets an independent deadline timer retire queued,
-// running and physically committed jobs. A late worker cannot enter run after
-// the timer wins; a committed non-cooperative restore is fenced by fail, and
-// its eventual return cannot report failure or finish the barrier a second time.
+// rpcRewrapDeliveryControl lets the deadline timer independently transition
+// queued, running and physically committed jobs to Failed. A late worker cannot
+// enter run after the timer wins. The timer cannot cancel a physical transport
+// write; a late return still cannot report failure or finish the barrier twice.
 type rpcRewrapDeliveryControl struct {
 	state   atomic.Uint32
 	timerMu sync.Mutex
@@ -550,9 +552,9 @@ type rpcRewrapPhysicalOutcome struct {
 // waitRPCRewrapPhysicalTerminal deliberately keeps one of the four bounded
 // workers attached to an in-progress actor write even after the watchdog fences
 // the Conn. A broken transport may therefore strand at most four workers, while
-// queued jobs still time out independently. If that transport later reports
-// success, the worker cannot lose the logical hook merely because timeout won
-// before its goroutine resumed.
+// queued jobs still transition to Failed at their control deadlines. If that
+// transport later reports success, the worker cannot lose the logical hook
+// merely because timeout won before its goroutine resumed.
 func waitRPCRewrapPhysicalTerminal(
 	c *Conn,
 	ctx context.Context,
@@ -616,7 +618,7 @@ func (c *rpcRewrapDeliveryControl) timeout() bool {
 
 // commit records successful physical delivery (or an already-proven retarget)
 // without disarming the watchdog. The same absolute deadline covers the
-// replacement/logical restore and cache/barrier terminal path; complete is the
+// replacement/logical restore and ledger/barrier terminal path; complete is the
 // only successful transition that stops the timer.
 func (c *rpcRewrapDeliveryControl) commit() bool {
 	if c == nil || !c.transition(rpcRewrapJobRunning, rpcRewrapJobCommitted) {
@@ -700,12 +702,6 @@ func runRPCRewrapDeliveryJob(j rpcRewrapDeliveryJob) {
 	if !control.transition(rpcRewrapJobPending, rpcRewrapJobRunning) {
 		return
 	}
-	if !j.deadline.IsZero() && !time.Now().Before(j.deadline) {
-		if control.fail() {
-			j.reportFailure(context.DeadlineExceeded)
-		}
-		return
-	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			if control.fail() {
@@ -716,6 +712,12 @@ func runRPCRewrapDeliveryJob(j rpcRewrapDeliveryJob) {
 		}
 		control.complete()
 	}()
+	if !j.deadline.IsZero() && !time.Now().Before(j.deadline) {
+		if control.fail() {
+			j.reportFailure(context.DeadlineExceeded)
+		}
+		return
+	}
 	j.run(control, j.deadline)
 }
 
@@ -747,9 +749,10 @@ func scheduleRPCRewrapJob(
 		delay = 0
 	}
 	timer := time.AfterFunc(delay, func() {
-		if job.control.timeout() {
-			job.reportFailure(context.DeadlineExceeded)
+		if !job.control.timeout() {
+			return
 		}
+		job.reportFailure(context.DeadlineExceeded)
 	})
 	job.control.installTimer(timer)
 	select {
@@ -764,6 +767,22 @@ func scheduleRPCRewrapJob(
 		}
 		return true
 	}
+}
+
+func (s *Server) attachRPCRewrapReplayPreparation(
+	job *rpcRewrapDeliveryJob,
+	c *Conn,
+	reqMsgID int64,
+	method string,
+	encoded *encodedOutboundMessage,
+) {
+	if job == nil || s == nil || c == nil || encoded == nil {
+		return
+	}
+	// Freeze scheduling metadata before the watchdog can publish the compact
+	// receipt. Exact wire bytes are owned only by the logical-session outbox, so
+	// there is no pre-send spool preparation or I/O gate.
+	encoded.priority = rpcResultPriority(method, encoded)
 }
 
 func scheduleRPCRewrapDeliveryJob(job rpcRewrapDeliveryJob) bool {
@@ -821,7 +840,7 @@ func (s *Server) failRPCRewrapResultJob(
 	publish := a.newOwner.HandOff()
 	encoded.markReplayable()
 	encoded.releaseDeferredLogicalDeliveryHook()
-	// Release the connection-local scheduler before any defensive cache panic;
+	// Release the connection-local scheduler before any defensive ledger panic;
 	// the physical generation is already fenced, so no following task can run.
 	a.releaseReplayRestoreBarrier()
 	if publish {
@@ -953,6 +972,7 @@ func (a *rpcRewrapAlias) activate(s *Server) error {
 					s.log.Debug("Retargeted RPC restore failed", zap.Error(restoreErr))
 				}
 			})
+			s.attachRPCRewrapReplayPreparation(&job, a.conn, a.newReqID, a.method, clone)
 			job.fail = func(err error) {
 				// Never enter deliveredFinalizeOnce from the timer goroutine: the worker
 				// may already own a non-cooperative restore. Fence and release its Conn
@@ -978,6 +998,7 @@ func (a *rpcRewrapAlias) activate(s *Server) error {
 		job := s.rpcRewrapRestoreJob(a, "pending init rewrap result", func(control *rpcRewrapDeliveryControl, deadline time.Time) {
 			s.publishRewrappedRPCResult(a.conn, a.newReqID, a.method, a.newOwner, clone, a, control, deadline)
 		})
+		s.attachRPCRewrapReplayPreparation(&job, a.conn, a.newReqID, a.method, clone)
 		// Once this alias consumed the source candidate, expiration or panic of
 		// the admitted worker job must still publish the immutable result under
 		// the new msg_id. Otherwise the alias owner would remain pending forever
@@ -1067,14 +1088,15 @@ func (s *Server) publishRewrappedRPCResult(
 		alias.releaseBodyReservation()
 		return
 	}
-	priority := rpcResultPriority(method, encoded)
-	encoded.priority = priority
-	encoded.markQueued()
 	if deadline.IsZero() {
 		deadline = time.Now().Add(rpcRewrapDeliveryQueueTimeout)
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
+	// attachRPCRewrapReplayPreparation froze replay-copied scheduling metadata
+	// before the watchdog started. The delivery path must not mutate plain fields
+	// that a concurrent timeout publication can copy into the replay ledger.
+	encoded.markQueued()
 	// Rewrap delivery is synchronous on this small bounded worker pool. This
 	// makes the queue deadline cover the physical write and lets the pending
 	// logical hook join the same per-Conn ordered restore, without touching the
@@ -1093,10 +1115,10 @@ func (s *Server) publishRewrappedRPCResult(
 		return
 	}
 	// Physical success outranks an already-fired watchdog. The timeout path may
-	// have fenced and cached a replayable clone, but it cannot revoke bytes; the
+	// have fenced and published a replayable receipt, but it cannot revoke bytes; the
 	// shared once/coordinator below still completes logical state exactly once.
 	// Run replacement metadata then the original logical hook before publishing
-	// the alias cache entry. Whole-finalization once also covers a watchdog racing
+	// the alias receipt. Whole-finalization once also covers a watchdog racing
 	// a late physical terminal, so completed metadata cannot be overwritten.
 	restoreParent := ctx
 	if !outcome.owned {

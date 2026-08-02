@@ -574,8 +574,10 @@ WHERE channel_id = $1 AND user_id = $2`, channelID, member.ID).Scan(&storedTop, 
 	if err != nil {
 		t.Fatalf("get large channel after local clear: %v", err)
 	}
-	if afterClear.Dialog.TopMessageID != 0 || afterClear.Dialog.UnreadCount != 0 {
-		t.Fatalf("large dialog after local clear = %+v, want no visible unread top", afterClear.Dialog)
+	if afterClear.Dialog.TopMessageID != sent.Message.ID ||
+		afterClear.Dialog.HistoryClearAnchorID != sent.Message.ID ||
+		afterClear.Dialog.UnreadCount != 0 {
+		t.Fatalf("large dialog after local clear = %+v, want anchored top %d with no unread", afterClear.Dialog, sent.Message.ID)
 	}
 }
 

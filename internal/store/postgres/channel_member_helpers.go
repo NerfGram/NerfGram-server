@@ -189,6 +189,7 @@ func getChannelMemberByID(ctx context.Context, db sqlcgen.DBTX, channelID, userI
 	row := db.QueryRow(ctx, `
 SELECT channel_id, user_id, inviter_user_id, role, status, joined_at, left_at,
        admin_rights::text, banned_rights::text, rank, available_min_id, available_min_pts,
+       history_clear_anchor_id, history_clear_anchor_date,
        read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
 FROM channel_members
 WHERE channel_id = $1 AND user_id = $2`, channelID, userID)
@@ -214,8 +215,9 @@ func upsertChannelMemberTx(ctx context.Context, tx pgx.Tx, channel domain.Channe
 	if _, err := tx.Exec(ctx, `
 INSERT INTO channel_members (
     channel_id, user_id, inviter_user_id, role, status, joined_at, left_at, admin_rights, banned_rights,
-    rank, available_min_id, available_min_pts, read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+    rank, available_min_id, available_min_pts, history_clear_anchor_id, history_clear_anchor_date,
+    read_inbox_max_id, read_outbox_max_id, unread_mark, slowmode_last_send_date
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 ON CONFLICT (channel_id, user_id) DO UPDATE SET
     inviter_user_id = EXCLUDED.inviter_user_id,
     role = EXCLUDED.role,
@@ -231,7 +233,8 @@ ON CONFLICT (channel_id, user_id) DO UPDATE SET
     updated_at = now()`,
 		member.ChannelID, member.UserID, member.InviterUserID, string(member.Role), string(member.Status),
 		member.JoinedAt, member.LeftAt, adminRights, bannedRights, member.Rank, member.AvailableMinID,
-		member.AvailableMinPts, member.ReadInboxMaxID, member.ReadOutboxMaxID, member.UnreadMark, member.SlowmodeLastSendDate); err != nil {
+		member.AvailableMinPts, member.HistoryClearAnchorID, member.HistoryClearAnchorDate,
+		member.ReadInboxMaxID, member.ReadOutboxMaxID, member.UnreadMark, member.SlowmodeLastSendDate); err != nil {
 		return fmt.Errorf("upsert channel member: %w", err)
 	}
 	return upsertUserChannelMemberIndexTx(ctx, tx, channel, member)
@@ -316,7 +319,8 @@ func scanChannelWithMember(row rowScanner) (domain.Channel, domain.ChannelMember
 	dest := append(channelScanDest(&ch, &defaultRights, &reactionPolicy, &wallpaper),
 		&member.ChannelID, &member.UserID, &member.InviterUserID, &role, &status,
 		&member.JoinedAt, &member.LeftAt, &adminRights, &bannedRights, &member.Rank,
-		&member.AvailableMinID, &member.AvailableMinPts, &member.ReadInboxMaxID, &member.ReadOutboxMaxID, &member.UnreadMark, &member.SlowmodeLastSendDate,
+		&member.AvailableMinID, &member.AvailableMinPts, &member.HistoryClearAnchorID, &member.HistoryClearAnchorDate,
+		&member.ReadInboxMaxID, &member.ReadOutboxMaxID, &member.UnreadMark, &member.SlowmodeLastSendDate,
 	)
 	if err := row.Scan(dest...); err != nil {
 		return domain.Channel{}, domain.ChannelMember{}, err
@@ -351,7 +355,8 @@ func scanChannelMember(row rowScanner) (domain.ChannelMember, error) {
 	if err := row.Scan(
 		&member.ChannelID, &member.UserID, &member.InviterUserID, &role, &status,
 		&member.JoinedAt, &member.LeftAt, &adminRights, &bannedRights, &member.Rank,
-		&member.AvailableMinID, &member.AvailableMinPts, &member.ReadInboxMaxID, &member.ReadOutboxMaxID, &member.UnreadMark, &member.SlowmodeLastSendDate,
+		&member.AvailableMinID, &member.AvailableMinPts, &member.HistoryClearAnchorID, &member.HistoryClearAnchorDate,
+		&member.ReadInboxMaxID, &member.ReadOutboxMaxID, &member.UnreadMark, &member.SlowmodeLastSendDate,
 	); err != nil {
 		return domain.ChannelMember{}, err
 	}
@@ -370,7 +375,8 @@ func scanChannelMemberWithCount(row rowScanner) (domain.ChannelMember, int, erro
 	if err := row.Scan(
 		&member.ChannelID, &member.UserID, &member.InviterUserID, &role, &status,
 		&member.JoinedAt, &member.LeftAt, &adminRights, &bannedRights, &member.Rank,
-		&member.AvailableMinID, &member.AvailableMinPts, &member.ReadInboxMaxID, &member.ReadOutboxMaxID, &member.UnreadMark, &member.SlowmodeLastSendDate,
+		&member.AvailableMinID, &member.AvailableMinPts, &member.HistoryClearAnchorID, &member.HistoryClearAnchorDate,
+		&member.ReadInboxMaxID, &member.ReadOutboxMaxID, &member.UnreadMark, &member.SlowmodeLastSendDate,
 		&count,
 	); err != nil {
 		return domain.ChannelMember{}, 0, err
@@ -454,7 +460,7 @@ func (s *ChannelStore) monoforumAdminPreview(ctx context.Context, db sqlcgen.DBT
 		}
 		return domain.ChannelMember{}, domain.Channel{}, false, err
 	}
-	if !isChannelAdmin(parentMember) {
+	if !parentMember.CanManageDirectMessages() {
 		return domain.ChannelMember{}, domain.Channel{}, false, nil
 	}
 	return syntheticMonoforumAdminMember(mono, parentMember), parent, true, nil
@@ -471,6 +477,8 @@ func syntheticMonoforumAdminMember(mono domain.Channel, parentMember domain.Chan
 	}
 	member.AvailableMinID = 0
 	member.AvailableMinPts = 0
+	member.HistoryClearAnchorID = 0
+	member.HistoryClearAnchorDate = 0
 	member.ReadInboxMaxID = mono.TopMessageID
 	member.ReadOutboxMaxID = mono.TopMessageID
 	member.UnreadMark = false

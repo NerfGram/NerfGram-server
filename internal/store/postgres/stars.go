@@ -130,12 +130,13 @@ func (s *StarsStore) Debit(ctx context.Context, userID, amount int64, reason dom
 	return out, nil
 }
 
-func (s *StarsStore) ListTransactions(ctx context.Context, userID int64, offset string, limit int) (domain.StarsTransactionPage, error) {
+func (s *StarsStore) ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error) {
 	if userID == 0 {
 		return domain.StarsTransactionPage{}, nil
 	}
-	if limit <= 0 || limit > domain.MaxStarsTransactionsLimit {
-		limit = domain.MaxStarsTransactionsLimit
+	query, err := domain.NormalizeStarsTransactionQuery(query)
+	if err != nil {
+		return domain.StarsTransactionPage{}, err
 	}
 	bal, err := s.GetBalance(ctx, userID)
 	if err != nil {
@@ -143,29 +144,19 @@ func (s *StarsStore) ListTransactions(ctx context.Context, userID int64, offset 
 	}
 	page := domain.StarsTransactionPage{Balance: bal.Balance}
 
-	// keyset：多取一条以探测是否还有下一页。
-	args := []any{userID, limit + 1}
-	query := `
+	// keyset：方向过滤先于 LIMIT，多取一条以探测同一视图是否还有下一页。
+	where, order, args := starsTransactionQueryParts("user_id", "amount", userID, query)
+	rows, err := s.db.Query(ctx, `
 SELECT id, peer_type, peer_id, amount, reason, title, description, date
 FROM stars_transactions
-WHERE user_id = $1
-ORDER BY id DESC
-LIMIT $2`
-	if cursor, ok := domain.DecodeStarsCursor(offset); ok {
-		query = `
-SELECT id, peer_type, peer_id, amount, reason, title, description, date
-FROM stars_transactions
-WHERE user_id = $1 AND id < $3
-ORDER BY id DESC
-LIMIT $2`
-		args = append(args, cursor)
-	}
-	rows, err := s.db.Query(ctx, query, args...)
+WHERE `+where+`
+ORDER BY id `+order+`
+LIMIT $2`, args...)
 	if err != nil {
 		return domain.StarsTransactionPage{}, fmt.Errorf("list stars transactions: %w", err)
 	}
 	defer rows.Close()
-	txns := make([]domain.StarsTransaction, 0, limit)
+	txns := make([]domain.StarsTransaction, 0, query.Limit+1)
 	for rows.Next() {
 		var (
 			t        domain.StarsTransaction
@@ -186,27 +177,35 @@ LIMIT $2`
 	if err := rows.Err(); err != nil {
 		return domain.StarsTransactionPage{}, fmt.Errorf("iterate stars transactions: %w", err)
 	}
-	if len(txns) > limit {
-		txns = txns[:limit]
+	if len(txns) > query.Limit {
+		txns = txns[:query.Limit]
 		page.NextOffset = domain.EncodeStarsCursor(txns[len(txns)-1].ID)
 	}
 	page.Transactions = txns
 	return page, nil
 }
 
-func (s *StarsStore) TotalSpent(ctx context.Context, userID int64) (int64, error) {
-	if userID == 0 {
-		return 0, nil
+// starsTransactionQueryParts centralizes the sign predicate and keyset
+// direction for personal/channel Stars and TON ledgers. Column names are only
+// package-owned constants; client values remain bind parameters.
+func starsTransactionQueryParts(ownerColumn, amountColumn string, ownerID int64, query domain.StarsTransactionQuery) (string, string, []any) {
+	where := ownerColumn + "=$1"
+	switch query.Direction {
+	case domain.StarsTransactionDirectionIncoming:
+		where += " AND " + amountColumn + ">0"
+	case domain.StarsTransactionDirectionOutgoing:
+		where += " AND " + amountColumn + "<0"
 	}
-	var spent int64
-	err := s.db.QueryRow(ctx, `
-SELECT COALESCE(SUM(-amount), 0)
-FROM stars_transactions
-WHERE user_id = $1 AND amount < 0`, userID).Scan(&spent)
-	if err != nil {
-		return 0, fmt.Errorf("sum stars spent: %w", err)
+	order, comparator := "DESC", "<"
+	if query.Ascending {
+		order, comparator = "ASC", ">"
 	}
-	return spent, nil
+	args := []any{ownerID, query.Limit + 1}
+	if cursor, ok := domain.DecodeStarsCursor(query.Offset); ok {
+		where += " AND id" + comparator + "$3"
+		args = append(args, cursor)
+	}
+	return where, order, args
 }
 
 // insertStarsTxn 在事务内写一条流水（amount 带符号）。

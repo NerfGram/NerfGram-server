@@ -33,6 +33,13 @@ func (s *MessageStore) ForwardPrivateMessages(ctx context.Context, req domain.Fo
 	if req.Date == 0 {
 		req.Date = int(time.Now().Unix())
 	}
+	protected, err := s.privateNoForwardsEnabled(ctx, req.OwnerUserID, req.FromPeer.ID)
+	if err != nil {
+		return res, err
+	}
+	if protected {
+		return res, domain.ErrChatForwardsRestricted
+	}
 	boxIDs := make([]int32, 0, len(req.MessageIDs))
 	for i, id := range req.MessageIDs {
 		if id <= 0 || id > domain.MaxMessageBoxID || req.RandomIDs[i] == 0 {

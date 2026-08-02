@@ -29,6 +29,21 @@ type failAfterTransport struct {
 	last   []byte
 }
 
+type acknowledgementCaptureMetrics struct {
+	NopMetrics
+	count      atomic.Int64
+	bytes      atomic.Int64
+	retainedNS atomic.Int64
+	rpcResult  atomic.Bool
+}
+
+func (m *acknowledgementCaptureMetrics) LogicalOutboxAcknowledged(bytes int, retainedFor time.Duration, rpcResult bool) {
+	m.count.Add(1)
+	m.bytes.Add(int64(bytes))
+	m.retainedNS.Store(int64(retainedFor))
+	m.rpcResult.Store(rpcResult)
+}
+
 func TestRPCResultReplayAttemptHooksArePhysicalConnectionLocal(t *testing.T) {
 	const reqMsgID = int64(771)
 	base := &encodedOutboundMessage{
@@ -544,7 +559,7 @@ func TestOutboundActorSerializesConcurrentSends(t *testing.T) {
 	conn, auth, cipher := dialHandshake(t, addr, dc, pub)
 
 	clientMsgID := proto.NewMessageIDGen(time.Now)
-	sendEncrypted(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), &mt.PingRequest{PingID: 1})
+	sendEncryptedWithSeq(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), 1, &mt.PingRequest{PingID: 1})
 	collectReplies(t, conn, cipher, auth.AuthKey, mt.MsgsAckTypeID)
 	freezeActiveTestSessionProfile(t, srv.Conns(), auth.AuthKey.ID, auth.SessionID, tlprofile.ProfileCanonical)
 	srv.Conns().SetReceivesUpdates(auth.SessionID, true)
@@ -814,6 +829,8 @@ func TestOutboundTrackedBudgetAckAndCloseReturnExactly(t *testing.T) {
 		budget := newOutboundTrackedBudget(64)
 		tr := &failAfterTransport{}
 		c := newOutboundTestConn(t, tr, budget)
+		metrics := &acknowledgementCaptureMetrics{}
+		c.metrics = metrics
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		body := exactTestUpdatesEncoded(t, c, make([]byte, 12))
@@ -827,6 +844,9 @@ func TestOutboundTrackedBudgetAckAndCloseReturnExactly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decrypt frame: %v", err)
 		}
+		// Windows wall-clock resolution can otherwise make an immediate ACK look
+		// like zero retention even though sentAt was populated after the write.
+		time.Sleep(time.Millisecond)
 		c.AckServerMessages([]int64{data.MessageID})
 		deadline := time.Now().Add(time.Second)
 		for budget.snapshot() != 0 && time.Now().Before(deadline) {
@@ -834,6 +854,18 @@ func TestOutboundTrackedBudgetAckAndCloseReturnExactly(t *testing.T) {
 		}
 		if got := budget.snapshot(); got != 0 {
 			t.Fatalf("tracked bytes after ack = %d, want 0", got)
+		}
+		if got := metrics.count.Load(); got != 1 {
+			t.Fatalf("logical ACK metric count = %d, want 1", got)
+		}
+		if got := metrics.bytes.Load(); got != 12 {
+			t.Fatalf("logical ACK metric bytes = %d, want 12", got)
+		}
+		if metrics.retainedNS.Load() <= 0 {
+			t.Fatal("logical ACK metric did not record positive retention")
+		}
+		if metrics.rpcResult.Load() {
+			t.Fatal("ordinary update ACK was classified as rpc_result")
 		}
 	})
 
@@ -1034,7 +1066,7 @@ func TestOutboundResendAndAckState(t *testing.T) {
 	conn, auth, cipher := dialHandshake(t, addr, dc, pub)
 
 	clientMsgID := proto.NewMessageIDGen(time.Now)
-	sendEncrypted(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), &mt.PingRequest{PingID: 1})
+	sendEncryptedWithSeq(t, conn, cipher, auth, clientMsgID.New(proto.MessageFromClient), 1, &mt.PingRequest{PingID: 1})
 	collectReplies(t, conn, cipher, auth.AuthKey, mt.MsgsAckTypeID)
 	freezeActiveTestSessionProfile(t, srv.Conns(), auth.AuthKey.ID, auth.SessionID, tlprofile.ProfileCanonical)
 	srv.Conns().SetReceivesUpdates(auth.SessionID, true)

@@ -1,0 +1,5 @@
+-- Reserved development migration version.
+-- account privacy is authoritative absolute state: updatePrivacy has no
+-- pts/pts_count, so this migration must not add a privacy event type or payload
+-- table. The earlier development-only definition was corrected in place
+-- because no user/production database can contain that unpublished shape.

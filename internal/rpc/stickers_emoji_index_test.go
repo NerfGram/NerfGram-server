@@ -15,15 +15,21 @@ func emojiStickerRouter(t *testing.T) *Router {
 	t.Helper()
 	files := &fakeFiles{
 		docs: map[int64]domain.Document{
-			201: {ID: 201, AccessHash: 1, MimeType: "application/x-tgsticker"},
-			202: {ID: 202, AccessHash: 2, MimeType: "application/x-tgsticker"},
-			301: {ID: 301, AccessHash: 3, MimeType: "application/x-tgsticker"},
+			201: {ID: 201, AccessHash: 1, MimeType: "application/x-tgsticker", Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}}},
+			202: {ID: 202, AccessHash: 2, MimeType: "application/x-tgsticker", Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}}},
+			301: {ID: 301, AccessHash: 3, MimeType: "application/x-tgsticker", Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}}},
+			401: {ID: 401, AccessHash: 4, MimeType: "application/x-tgsticker", Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}}},
+			402: {ID: 402, AccessHash: 5, MimeType: "application/x-tgsticker", Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}}},
+			403: {ID: 403, AccessHash: 6, MimeType: "application/x-tgsticker", Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}}},
 		},
 		sets: map[domain.StickerSetKind][]domain.StickerSet{
 			domain.StickerSetKindStickers: {
 				{ID: 10, Hash: 1, Packs: []domain.StickerPack{
 					{Emoticon: "👍", DocumentIDs: []int64{201, 202}},
 					{Emoticon: "🔥", DocumentIDs: []int64{301}},
+					{Emoticon: "👋", DocumentIDs: []int64{401}},
+					{Emoticon: "⭐", DocumentIDs: []int64{402}},
+					{Emoticon: "📂", DocumentIDs: []int64{403}},
 				}},
 				{ID: 12, Hash: 2, Archived: true, Packs: []domain.StickerPack{
 					{Emoticon: "👍", DocumentIDs: []int64{999}}, // 归档集应被排除
@@ -95,6 +101,54 @@ func TestMessagesGetStickersByEmoji(t *testing.T) {
 	// 未知 emoji → 空。
 	if ids := stickerDocIDs(t, mustStickers(t, r, ctx, "🦄", 0)); len(ids) != 0 {
 		t.Fatalf("unknown emoji stickers = %v, want empty", ids)
+	}
+}
+
+// TestMessagesGetStickersSpecialCategories 固定 TDesktop、DrKLO Android 与
+// Telegram-iOS 共用的特殊类别标记。这些标记不是普通复合 emoji：服务端应把它们
+// 解析到对应的基础目录，同时不能拆分任意多 emoji 查询。
+func TestMessagesGetStickersSpecialCategories(t *testing.T) {
+	r := emojiStickerRouter(t)
+	ctx := WithUserID(context.Background(), 1000000001)
+
+	tests := []struct {
+		name      string
+		emoticon  string
+		base      string
+		wantDocID int64
+	}{
+		{name: "greeting", emoticon: "👋⭐️", base: "👋", wantDocID: 401},
+		{name: "greeting_without_vs16", emoticon: "👋⭐", base: "👋", wantDocID: 401},
+		{name: "premium_preview", emoticon: "⭐️⭐️", base: "⭐", wantDocID: 402},
+		{name: "premium_preview_mixed_vs16", emoticon: "⭐⭐️", base: "⭐", wantDocID: 402},
+		{name: "all_premium", emoticon: "📂⭐️", base: "📂", wantDocID: 403},
+		{name: "all_premium_without_vs16", emoticon: "📂⭐", base: "📂", wantDocID: 403},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := mustStickers(t, r, ctx, tt.base, 0).(*tg.MessagesStickers)
+			got := mustStickers(t, r, ctx, tt.emoticon, 0)
+			ids := stickerDocIDs(t, got)
+			if len(ids) != 1 || ids[0] != tt.wantDocID {
+				t.Fatalf("%q stickers = %v, want [%d]", tt.emoticon, ids, tt.wantDocID)
+			}
+			full := got.(*tg.MessagesStickers)
+			if full.Hash == 0 || full.Hash != base.Hash {
+				t.Fatalf("%q hash = %d, base %q hash = %d", tt.emoticon, full.Hash, tt.base, base.Hash)
+			}
+			if again, err := r.onMessagesGetStickers(ctx, &tg.MessagesGetStickersRequest{
+				Emoticon: tt.emoticon,
+				Hash:     full.Hash,
+			}); err != nil {
+				t.Fatalf("getStickers %q hash: %v", tt.emoticon, err)
+			} else if _, ok := again.(*tg.MessagesStickersNotModified); !ok {
+				t.Fatalf("getStickers %q with matching hash = %T, want NotModified", tt.emoticon, again)
+			}
+		})
+	}
+
+	if ids := stickerDocIDs(t, mustStickers(t, r, ctx, "👋🔥", 0)); len(ids) != 0 {
+		t.Fatalf("ordinary compound emoji stickers = %v, want empty", ids)
 	}
 }
 

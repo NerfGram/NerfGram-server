@@ -76,6 +76,11 @@ type PhoneCode struct {
 	VerifiedEmail  bool
 	RequireSignUp  bool
 	LoginEmailHash string
+	// RecoveryBinding ties a password-recovery code to the exact 2FA state
+	// which existed when the code was issued. A password or recovery-email
+	// change makes an older code unusable without relying on cross-store
+	// best-effort invalidation.
+	RecoveryBinding string
 	// AccountDeletionHash is the hex-encoded SHA-256 digest of the validated
 	// confirmphone link token. It binds account.confirmPhone to one pending
 	// deletion without persisting the raw link credential in the code record.

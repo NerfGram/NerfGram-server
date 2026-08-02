@@ -1,22 +1,11 @@
 package rpc
 
 import (
-	"strings"
 	"time"
 
 	"github.com/iamxvbaba/td/tg"
 	"telesrv/internal/domain"
 )
-
-func userCollectibles(u domain.User) []domain.CollectibleUsername {
-	if len(u.CollectibleUsernames) > 0 {
-		return u.CollectibleUsernames
-	}
-	if u.CollectibleUsername != "" {
-		return []domain.CollectibleUsername{{Username: u.CollectibleUsername, Active: u.CollectibleUsernameActive}}
-	}
-	return nil
-}
 
 // tgSelfUser 把 domain.User 转为 self 标记的 tg.User（optional 字段由 Encode 自动 SetFlags）。
 func tgSelfUser(u domain.User) *tg.User {
@@ -28,20 +17,21 @@ func tgSelfUser(u domain.User) *tg.User {
 		AccessHash:    u.AccessHash,
 		FirstName:     u.FirstName,
 		LastName:      u.LastName,
-		Username:      tgActiveUsername(u.Username, userCollectibles(u)),
+		Username:      u.Username,
 		Phone:         u.Phone,
 		Self:          true,
 		Verified:      u.Verified,
+		Scam:          u.Scam,
 		Fake:          u.Fake,
 		Support:       u.Support,
 		Contact:       u.Contact,
 		MutualContact: u.Mutual,
 		CloseFriend:   u.CloseFriend,
-		Usernames:     tgUsernames(u.Username, userCollectibles(u)),
 	}
 	applyTgUserBotFields(out, u)
 	applyTgUserPremiumFields(out, u)
 	applyTgUserColorFields(out, u)
+	applyTgUserRestrictionFields(out, u)
 	if u.LinkedCommunityID != 0 {
 		out.SetLinkedCommunityID(u.LinkedCommunityID)
 	}
@@ -60,19 +50,20 @@ func tgUser(u domain.User) *tg.User {
 		AccessHash:    u.AccessHash,
 		FirstName:     u.FirstName,
 		LastName:      u.LastName,
-		Username:      tgActiveUsername(u.Username, userCollectibles(u)),
+		Username:      u.Username,
 		Phone:         u.Phone,
 		Verified:      u.Verified,
+		Scam:          u.Scam,
 		Fake:          u.Fake,
 		Support:       u.Support,
 		Contact:       u.Contact,
 		MutualContact: u.Mutual,
 		CloseFriend:   u.CloseFriend,
-		Usernames:     tgUsernames(u.Username, userCollectibles(u)),
 	}
 	applyTgUserBotFields(out, u)
 	applyTgUserPremiumFields(out, u)
 	applyTgUserColorFields(out, u)
+	applyTgUserRestrictionFields(out, u)
 	if u.LinkedCommunityID != 0 {
 		out.SetLinkedCommunityID(u.LinkedCommunityID)
 	}
@@ -80,6 +71,28 @@ func tgUser(u domain.User) *tg.User {
 		out.Photo = photo
 	}
 	return out
+}
+
+func applyTgUserRestrictionFields(out *tg.User, u domain.User) {
+	if out == nil || len(u.RestrictionReasons) == 0 {
+		return
+	}
+	reasons := make([]tg.RestrictionReason, 0, len(u.RestrictionReasons))
+	for _, reason := range u.RestrictionReasons {
+		if reason.Platform == "" || reason.Reason == "" || reason.Text == "" {
+			continue
+		}
+		reasons = append(reasons, tg.RestrictionReason{
+			Platform: reason.Platform,
+			Reason:   reason.Reason,
+			Text:     reason.Text,
+		})
+	}
+	if len(reasons) == 0 {
+		return
+	}
+	out.Restricted = true
+	out.SetRestrictionReason(reasons)
 }
 
 // applyTgUserPremiumFields 由到期时间即时派生 premium flag（bit28，独立位）与
@@ -225,54 +238,53 @@ func tgUserStatus(status domain.UserStatus) tg.UserStatusClass {
 	return &tg.UserStatusRecently{}
 }
 
-// tgUsernames builds the usernames[] vector: the account's own editable
-// username plus every admin-issued collectible username. Exactly one entry is
-// Active at a time -- whichever the owner last selected via
-// account.toggleUsername (defaulting to the editable one).
-func tgUsernames(username string, collectibles []domain.CollectibleUsername) []tg.Username {
-	activeCollectible := ""
-	for _, cu := range collectibles {
-		if cu.Active && cu.Username != "" {
-			activeCollectible = cu.Username
-			break
-		}
+// tgUsernames builds the vector carried by updateUserName. Ordinary user/channel
+// constructors keep using their scalar username until at least one collectible
+// is associated with the peer.
+func tgUsernames(username string) []tg.Username {
+	if username == "" {
+		return nil
 	}
-	editableActive := username != "" && activeCollectible == ""
+	return []tg.Username{{Editable: true, Active: true, Username: username}}
+}
 
-	seen := make(map[string]struct{}, 1+len(collectibles))
-	var out []tg.Username
-	if username != "" {
-		out = append(out, tg.Username{Editable: true, Active: editableActive, Username: username})
-		seen[strings.ToLower(username)] = struct{}{}
+// tgUsernamesFromRegistry is the single builder of the full username#b4073647
+// vector in stored order (see domain.SortUsernames), with editable/active taken
+// from the registry row rather than assumed.
+//
+// It degrades to tgUsernames(fallback) whenever the registry contributed nothing
+// usable, which is what keeps a missing/failing registry service byte-identical
+// to the pre-collectible wire shape.
+func tgUsernamesFromRegistry(list []domain.Username, fallback string) []tg.Username {
+	if len(list) == 0 {
+		return tgUsernames(fallback)
 	}
-	for _, cu := range collectibles {
-		if cu.Username == "" {
+	sorted := domain.SortUsernames(list)
+	out := make([]tg.Username, 0, len(sorted))
+	for _, item := range sorted {
+		name := domain.NormalizeUsername(item.Username)
+		if name == "" {
 			continue
 		}
-		lower := strings.ToLower(cu.Username)
-		if _, dup := seen[lower]; dup {
-			continue
-		}
-		seen[lower] = struct{}{}
 		out = append(out, tg.Username{
-			Editable: false,
-			Active:   cu.Active,
-			Username: cu.Username,
+			Editable: item.Editable,
+			Active:   item.Active,
+			Username: name,
 		})
+	}
+	if len(out) == 0 {
+		return tgUsernames(fallback)
 	}
 	return out
 }
 
-// tgActiveUsername returns whichever username should populate the top-level
-// (legacy, pre-multi-username) Username field: the active collectible one if
-// any, otherwise the account's editable username.
-func tgActiveUsername(username string, collectibles []domain.CollectibleUsername) string {
-	for _, cu := range collectibles {
-		if cu.Active && cu.Username != "" {
-			return cu.Username
+func hasCollectibleUsername(list []domain.Username) bool {
+	for _, item := range list {
+		if item.Collectible() {
+			return true
 		}
 	}
-	return username
+	return false
 }
 
 func tgContacts(list domain.ContactList) tg.ContactsContactsClass {

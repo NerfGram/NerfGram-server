@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/iamxvbaba/td/clock"
 	"github.com/iamxvbaba/td/tg"
@@ -10,8 +11,20 @@ import (
 
 	appaccount "telesrv/internal/app/account"
 	"telesrv/internal/domain"
+	"telesrv/internal/otpdelivery"
 	"telesrv/internal/store/memory"
 )
+
+type capturePasswordRecoveryMailSender struct {
+	to   string
+	code string
+}
+
+func (s *capturePasswordRecoveryMailSender) Deliver(_ context.Context, req otpdelivery.Request) (otpdelivery.Result, error) {
+	s.to = req.Recipient
+	s.code = req.Code
+	return otpdelivery.Result{}, nil
+}
 
 func TestAccountGetPasswordUsesPendingPasswordUser(t *testing.T) {
 	ctx := pendingPasswordContext()
@@ -65,9 +78,11 @@ func TestAuthRecoverPasswordCompletesPendingSignIn(t *testing.T) {
 		pendingPassword:       true,
 	}
 	sessions := &captureSessions{}
+	sender := &capturePasswordRecoveryMailSender{}
 	router := New(Config{}, Deps{
-		Auth:     auth,
-		Account:  appaccount.NewService(passwords),
+		Auth: auth,
+		Account: appaccount.NewService(passwords,
+			appaccount.WithLoginEmailVerification(memory.NewCodeStore(), sender, time.Minute, 3, 6)),
 		Users:    staticUsersService{user: domain.User{ID: userID, AccessHash: 7, Phone: "15550000042", FirstName: "Alice"}},
 		Sessions: sessions,
 	}, zaptest.NewLogger(t), clock.System)
@@ -75,7 +90,10 @@ func TestAuthRecoverPasswordCompletesPendingSignIn(t *testing.T) {
 	if _, err := router.onAuthRequestPasswordRecovery(ctx); err != nil {
 		t.Fatalf("auth.requestPasswordRecovery: %v", err)
 	}
-	if _, err := router.onAuthRecoverPassword(ctx, &tg.AuthRecoverPasswordRequest{Code: "12345"}); err != nil {
+	if sender.to != "alice@example.com" || sender.code == "" {
+		t.Fatalf("recovery delivery=%+v", sender)
+	}
+	if _, err := router.onAuthRecoverPassword(ctx, &tg.AuthRecoverPasswordRequest{Code: sender.code}); err != nil {
 		t.Fatalf("auth.recoverPassword: %v", err)
 	}
 	if auth.completePasswordCount != 1 || auth.completedPasswordKey != authKeyID {

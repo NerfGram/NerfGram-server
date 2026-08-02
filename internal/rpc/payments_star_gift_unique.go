@@ -233,7 +233,7 @@ func (r *Router) onPaymentsGetStarGiftUpgradePreview(ctx context.Context, giftID
 	if giftID <= 0 || r.deps.Gifts == nil {
 		return nil, starGiftInvalidErr()
 	}
-	preview, found, err := r.deps.Gifts.CollectiblePreview(ctx, giftID)
+	preview, found, err := r.deps.Gifts.CollectiblePreviewSample(ctx, giftID)
 	if err != nil {
 		return nil, internalErr()
 	}

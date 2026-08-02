@@ -102,7 +102,14 @@ func (s *Service) Create(ctx context.Context, spec domain.ThemeSpec) (domain.The
 
 func (s *Service) resolve(ctx context.Context, ref domain.ThemeRef) (domain.Theme, bool, error) {
 	if ref.ID != 0 {
-		return s.store.GetThemeByID(ctx, ref.ID)
+		t, ok, err := s.store.GetThemeByID(ctx, ref.ID)
+		if err != nil || !ok {
+			return domain.Theme{}, ok, err
+		}
+		if t.AccessHash != ref.AccessHash {
+			return domain.Theme{}, false, nil
+		}
+		return t, true, nil
 	}
 	if ref.Slug != "" {
 		return s.store.GetThemeBySlug(ctx, ref.Slug)

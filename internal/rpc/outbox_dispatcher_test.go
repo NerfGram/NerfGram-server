@@ -293,6 +293,83 @@ func TestRouterBuildOutboxUpdatesProjectsSenderPerViewerAndCaches(t *testing.T) 
 	}
 }
 
+func TestRouterBuildOutboxUpdatesProjectsUsernamesOncePerClaim(t *testing.T) {
+	const (
+		viewerUserID  = int64(1000000003)
+		senderAUserID = int64(1000000001)
+		senderBUserID = int64(1000000002)
+	)
+	users := &countingOutboxUsersService{users: map[int64]domain.User{
+		senderAUserID: {ID: senderAUserID, FirstName: "Sender A", Username: "sender_a"},
+		senderBUserID: {ID: senderBUserID, FirstName: "Sender B", Username: "sender_b"},
+	}}
+	registry := newFakeUsernameRegistry()
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: senderAUserID}] = []domain.Username{
+		{Username: "sender_a", Editable: true, Active: true, SortOrder: 0},
+		{Username: "sender_a_collectible", Active: true, SortOrder: 1, CollectibleID: 11},
+	}
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: senderBUserID}] = []domain.Username{
+		{Username: "sender_b", Editable: true, Active: true, SortOrder: 0},
+		{Username: "sender_b_collectible", Active: true, SortOrder: 1, CollectibleID: 12},
+	}
+	router := New(Config{}, Deps{Users: users, Usernames: registry}, zaptest.NewLogger(t), clock.System)
+
+	senderIDs := []int64{senderAUserID, senderBUserID, senderAUserID}
+	requests := make([]OutboxUpdateRequest, 0, len(senderIDs))
+	for i, senderID := range senderIDs {
+		msg := domain.Message{
+			ID:          20 + i,
+			OwnerUserID: viewerUserID,
+			Peer:        domain.Peer{Type: domain.PeerTypeUser, ID: senderID},
+			From:        domain.Peer{Type: domain.PeerTypeUser, ID: senderID},
+			Date:        1700000400 + i,
+			Body:        "hello",
+			Pts:         20 + i,
+		}
+		requests = append(requests, OutboxUpdateRequest{
+			TargetUserID: viewerUserID,
+			Event: domain.UpdateEvent{
+				UserID:   viewerUserID,
+				Type:     domain.UpdateEventNewMessage,
+				Pts:      msg.Pts,
+				PtsCount: 1,
+				Date:     msg.Date,
+				Message:  msg,
+			},
+		})
+	}
+
+	updates := router.BuildOutboxUpdates(context.Background(), requests)
+	if len(updates) != len(requests) {
+		t.Fatalf("updates count = %d, want %d", len(updates), len(requests))
+	}
+	for i, update := range updates {
+		if update == nil || len(update.Users) != 1 {
+			t.Fatalf("updates[%d].Users = %+v, want one sender", i, update)
+		}
+		user, ok := update.Users[0].(*tg.User)
+		if !ok {
+			t.Fatalf("updates[%d].Users[0] = %T, want *tg.User", i, update.Users[0])
+		}
+		wantScalar := "sender_a"
+		wantCollectible := "sender_a_collectible"
+		if senderIDs[i] == senderBUserID {
+			wantScalar = "sender_b"
+			wantCollectible = "sender_b_collectible"
+		}
+		if scalar, set := user.GetUsername(); !set || scalar != wantScalar {
+			t.Fatalf("updates[%d] scalar username = %q (set %v), want %q", i, scalar, set, wantScalar)
+		}
+		vector, set := user.GetUsernames()
+		if !set || !reflect.DeepEqual(usernameStrings(vector), []string{wantScalar, wantCollectible}) {
+			t.Fatalf("updates[%d] usernames = %v (set %v), want [%s %s]", i, usernameStrings(vector), set, wantScalar, wantCollectible)
+		}
+	}
+	if registry.batchCalls != 1 || registry.peerCalls != 0 {
+		t.Fatalf("registry reads = batch %d / peer %d, want one batch read for the whole claim", registry.batchCalls, registry.peerCalls)
+	}
+}
+
 func TestRouterBuildOutboxUpdatesSeparatesViewerCache(t *testing.T) {
 	const senderUserID = int64(1000000001)
 	users := &viewerSpecificOutboxUsersService{}

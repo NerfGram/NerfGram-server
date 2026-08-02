@@ -35,6 +35,11 @@ type ChannelStore interface {
 	CheckUsername(ctx context.Context, userID, channelID int64, username string) (bool, error)
 	UpdateUsername(ctx context.Context, req domain.UpdateChannelUsernameRequest) (domain.Channel, error)
 	SetChannelVerified(ctx context.Context, channelID int64, verified bool) (domain.Channel, error)
+	SetChannelScamFake(ctx context.Context, channelID int64, scam, fake bool) (domain.Channel, error)
+	SetChannelAdminSettings(ctx context.Context, channelID int64, patch domain.ChannelAdminSettings) (domain.Channel, error)
+	SetChannelUsernameAdmin(ctx context.Context, channelID int64, username string) (domain.Channel, error)
+	SetChannelColorAdmin(ctx context.Context, channelID int64, forProfile bool, color domain.ChannelPeerColor) (domain.Channel, error)
+	SetChannelEmojiStatusAdmin(ctx context.Context, channelID int64, status domain.ChannelEmojiStatus) (domain.Channel, error)
 	ListAdminedPublicChannels(ctx context.Context, userID int64) ([]domain.Channel, error)
 	ListCommunityLinkableChannels(ctx context.Context, userID int64) ([]domain.Channel, error)
 	ListStoryPostableChannels(ctx context.Context, userID int64) ([]domain.Channel, error)
@@ -77,8 +82,6 @@ type ChannelStore interface {
 	ListTopMessageReactions(ctx context.Context, userID int64, limit int) ([]domain.MessageReaction, error)
 	ListRecentMessageReactions(ctx context.Context, userID int64, limit int) ([]domain.MessageReaction, error)
 	ClearRecentMessageReactions(ctx context.Context, userID int64) error
-	ListSavedReactionTags(ctx context.Context, userID int64, limit int) ([]domain.SavedReactionTag, error)
-	UpsertSavedReactionTag(ctx context.Context, tag domain.SavedReactionTag) error
 	GetPremiumBoostStatus(ctx context.Context, viewerUserID, channelID int64, now int) (domain.PremiumBoostStatus, error)
 	ListPremiumBoosts(ctx context.Context, viewerUserID, channelID int64, gifts bool, offset string, limit, now int) (domain.PremiumBoostList, error)
 	GetPremiumMyBoosts(ctx context.Context, userID int64, now, premiumUntil int) (domain.PremiumMyBoosts, error)
@@ -183,6 +186,10 @@ type ChannelStore interface {
 	ListActiveChannelMembers(ctx context.Context, viewerUserID, channelID int64, limit int) (domain.Channel, domain.ChannelMember, []domain.ChannelMember, error)
 	ListChannelInviteAdminMemberIDs(ctx context.Context, channelID int64, limit int) ([]int64, error)
 	FilterActiveChannelMemberIDs(ctx context.Context, channelID int64, userIDs []int64) ([]int64, error)
+	// FilterChannelMessageAudienceIDs authoritatively intersects a bounded online
+	// candidate set with users allowed to receive channel message-box updates:
+	// active members plus non-banned public-channel preview subscribers.
+	FilterChannelMessageAudienceIDs(ctx context.Context, channelID int64, userIDs []int64) ([]int64, error)
 	MaxChannelPts(ctx context.Context, channelID int64) (int, error)
 	// MaxChannelPtsBatch returns existing channel watermarks with one bounded store round trip.
 	// Missing/deleted ids are omitted so a stale process-local membership key cannot poison the

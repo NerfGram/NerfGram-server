@@ -15,7 +15,7 @@ func TestEncryptedConnectionSwitchesAuthKeyEvenWhenSessionIDIsReused(t *testing.
 	_, authB, cipherB := dialHandshake(t, addr, dc, pub)
 	msgID := proto.NewMessageIDGen(time.Now)
 
-	sendEncrypted(t, connA, cipherA, authA, msgID.New(proto.MessageFromClient), &mt.PingRequest{PingID: 1})
+	sendEncryptedWithSeq(t, connA, cipherA, authA, msgID.New(proto.MessageFromClient), 1, &mt.PingRequest{PingID: 1})
 	for range 3 { // new_session_created + pong + msgs_ack; leave no A-key frame on the socket.
 		readServerMessage(t, connA, cipherA, authA.AuthKey)
 	}

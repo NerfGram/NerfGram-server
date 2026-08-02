@@ -7,24 +7,38 @@ import (
 	"encoding/hex"
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	ratingapp "telesrv/internal/app/rating"
 	stargiftapp "telesrv/internal/app/stargifts"
+	usernamesapp "telesrv/internal/app/usernames"
 	"telesrv/internal/domain"
 	"telesrv/internal/officialgifts"
 	"telesrv/internal/store/memory"
+)
+
+// Compile-time proof that the shipped use-case services satisfy the admin ports.
+// cmd/telesrv wires *usernames.Service and *rating.Service into
+// Dependencies.Usernames / Dependencies.Rating directly, so a drifting method set
+// has to fail here rather than at integration time.
+var (
+	_ CollectibleUsernamesService = (*usernamesapp.Service)(nil)
+	_ AccountRatingService        = (*ratingapp.Service)(nil)
 )
 
 func TestSetAccountFrozenDryRunExecuteAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	repo := newMemoryCommandRepo()
 	restrictions := &fakeRestrictionStore{}
+	notifier := &fakeAccountFreezeNotifier{}
 	svc := NewService(Dependencies{
-		Commands:     repo,
-		Restrictions: restrictions,
-		Now:          fixedNow,
+		Commands:       repo,
+		Restrictions:   restrictions,
+		FreezeNotifier: notifier,
+		Now:            fixedNow,
 	})
 
 	dry, err := svc.SetAccountFrozen(ctx, SetAccountFrozenRequest{
@@ -55,6 +69,9 @@ func TestSetAccountFrozenDryRunExecuteAndIdempotency(t *testing.T) {
 	if exec.Status != string(domain.AdminCommandCompleted) || restrictions.setCalls != 1 {
 		t.Fatalf("execute result=%+v setCalls=%d", exec, restrictions.setCalls)
 	}
+	if len(notifier.items) != 1 || notifier.items[0].UserID != 1001 || !notifier.items[0].Frozen || notifier.items[0].Version != 1 {
+		t.Fatalf("freeze notifications = %+v, want one versioned frozen state", notifier.items)
+	}
 	if err := svc.CanSendMessages(ctx, 1001); !errors.Is(err, domain.ErrUserFrozen) {
 		t.Fatalf("CanSendMessages err=%v, want ErrUserFrozen", err)
 	}
@@ -69,6 +86,128 @@ func TestSetAccountFrozenDryRunExecuteAndIdempotency(t *testing.T) {
 	}
 	if !again.AlreadyExecuted || restrictions.setCalls != 1 {
 		t.Fatalf("duplicate result=%+v setCalls=%d, want idempotent replay", again, restrictions.setCalls)
+	}
+	if len(notifier.items) != 1 {
+		t.Fatalf("idempotent replay emitted duplicate notification: %+v", notifier.items)
+	}
+}
+
+func TestCreateBotReturnsTokenOnceWithoutPersistingCredential(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemoryCommandRepo()
+	bots := &fakeBotService{token: "test-one-time-bot-credential"}
+	svc := NewService(Dependencies{Commands: repo, Bots: bots, Now: fixedNow})
+	req := CreateBotRequest{
+		CommandMeta: CommandMeta{CommandID: "create-bot-once", Actor: "ops", Reason: "requested"},
+		OwnerUserID: 1001,
+		Name:        "Audit Safe Bot",
+		Username:    "audit_safe_bot",
+	}
+
+	first, err := svc.CreateBot(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateBot: %v", err)
+	}
+	if first.Details["token"] != bots.token || bots.createCalls != 1 {
+		t.Fatalf("first result=%+v createCalls=%d", first, bots.createCalls)
+	}
+	stored := repo.items[req.CommandID].ResultJSON
+	if bytes.Contains(stored, []byte(bots.token)) || bytes.Contains(stored, []byte(`"token"`)) {
+		t.Fatalf("persisted admin result contains bot credential: %s", stored)
+	}
+
+	replay, err := svc.CreateBot(ctx, req)
+	if err != nil {
+		t.Fatalf("CreateBot replay: %v", err)
+	}
+	if !replay.AlreadyExecuted || bots.createCalls != 1 {
+		t.Fatalf("replay=%+v createCalls=%d", replay, bots.createCalls)
+	}
+	if _, leaked := replay.Details["token"]; leaked {
+		t.Fatalf("replayed command exposed one-time bot token: %+v", replay)
+	}
+}
+
+func TestModerationFlagsRejectImpossibleScamFakeState(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemoryCommandRepo()
+	users := &fakeUsersService{users: map[int64]domain.User{1001: {ID: 1001}}}
+	channels := &fakeChannelsService{channels: map[int64]domain.Channel{2001: {
+		ID: 2001, Megagroup: true,
+	}}}
+	svc := NewService(Dependencies{Commands: repo, Users: users, Channels: channels, Now: fixedNow})
+	meta := CommandMeta{CommandID: "invalid-user-flags", Actor: "ops", Reason: "test"}
+	if _, err := svc.SetUserFlags(ctx, SetUserFlagsRequest{
+		CommandMeta: meta, UserID: 1001, Scam: true, Fake: true,
+	}); !errors.Is(err, domain.ErrPeerModerationFlagsInvalid) {
+		t.Fatalf("SetUserFlags error=%v", err)
+	}
+	meta.CommandID = "invalid-channel-flags"
+	if _, err := svc.SetChannelFlags(ctx, SetChannelFlagsRequest{
+		CommandMeta: meta, ChannelID: 2001, Scam: true, Fake: true,
+	}); !errors.Is(err, domain.ErrPeerModerationFlagsInvalid) {
+		t.Fatalf("SetChannelFlags error=%v", err)
+	}
+	if len(repo.items) != 0 || users.users[1001].Scam || users.users[1001].Fake ||
+		channels.channels[2001].Scam || channels.channels[2001].Fake {
+		t.Fatalf("invalid moderation state reached command/store boundary: commands=%d user=%+v channel=%+v",
+			len(repo.items), users.users[1001], channels.channels[2001])
+	}
+}
+
+func TestSetUserFlagsUsesNonPTSModerationNotifier(t *testing.T) {
+	ctx := context.Background()
+	users := &fakeUsersService{users: map[int64]domain.User{
+		1001: {ID: 1001, FirstName: "Alice"},
+	}}
+	ordinaryNotifier := &fakeUserNotifier{}
+	moderationNotifier := &fakeUserModerationNotifier{}
+	svc := NewService(Dependencies{
+		Commands:               newMemoryCommandRepo(),
+		Users:                  users,
+		UserNotifier:           ordinaryNotifier,
+		UserModerationNotifier: moderationNotifier,
+		Now:                    fixedNow,
+	})
+
+	if _, err := svc.SetUserFlags(ctx, SetUserFlagsRequest{
+		CommandMeta: CommandMeta{CommandID: "set-user-scam", Actor: "ops", Reason: "confirmed report"},
+		UserID:      1001,
+		Scam:        true,
+	}); err != nil {
+		t.Fatalf("SetUserFlags: %v", err)
+	}
+	if got := users.users[1001]; !got.Scam || got.Fake {
+		t.Fatalf("updated user = %+v", got)
+	}
+	if len(moderationNotifier.users) != 1 || moderationNotifier.users[0] != 1001 {
+		t.Fatalf("moderation notifications = %v", moderationNotifier.users)
+	}
+	if len(ordinaryNotifier.users) != 0 {
+		t.Fatalf("ordinary notifications = %v, want dedicated non-PTS path", ordinaryNotifier.users)
+	}
+}
+
+func TestAccountFreezesBatchesAndReturnsOnlyActiveFacts(t *testing.T) {
+	now := fixedNow()
+	store := &fakeBatchRestrictionStore{fakeRestrictionStore: fakeRestrictionStore{items: map[int64]domain.AccountFreeze{
+		1001: {
+			UserID: 1001, Frozen: true, Version: 2, Since: now,
+			Until: now.Add(time.Hour), AppealURL: "https://appeals.example.test/1001",
+		},
+		1002: {UserID: 1002, Frozen: false, Version: 4},
+	}}}
+	svc := NewService(Dependencies{Restrictions: store, Now: fixedNow})
+
+	got, err := svc.AccountFreezes(context.Background(), []int64{1001, 1001, 0, 1002})
+	if err != nil {
+		t.Fatalf("AccountFreezes: %v", err)
+	}
+	if len(store.requests) != 1 || !reflect.DeepEqual(store.requests[0], []int64{1001, 1002}) {
+		t.Fatalf("batch requests = %v, want one deduplicated request", store.requests)
+	}
+	if len(got) != 1 || !got[1001].Frozen || got[1001].Version != 2 {
+		t.Fatalf("AccountFreezes = %+v, want active user 1001 only", got)
 	}
 }
 
@@ -474,6 +613,22 @@ func (m *memoryCommandRepo) FinishCommand(_ context.Context, commandID string, s
 	return cmd, nil
 }
 
+type fakeBotService struct {
+	token       string
+	createCalls int
+	deleteCalls int
+}
+
+func (f *fakeBotService) CreateBot(_ context.Context, _ int64, name, username string) (domain.User, string, error) {
+	f.createCalls++
+	return domain.User{ID: 2001, FirstName: name, Username: username, Bot: true}, f.token, nil
+}
+
+func (f *fakeBotService) DeleteBot(_ context.Context, botUserID int64) (domain.User, error) {
+	f.deleteCalls++
+	return domain.User{ID: botUserID, Bot: true, Deleted: true}, nil
+}
+
 type fakeRestrictionStore struct {
 	items    map[int64]domain.AccountFreeze
 	setCalls int
@@ -492,9 +647,35 @@ func (f *fakeRestrictionStore) SetAccountFreeze(_ context.Context, r domain.Acco
 		f.items = map[int64]domain.AccountFreeze{}
 	}
 	f.setCalls++
+	r.Version = f.items[r.UserID].Version + 1
 	r.UpdatedAt = fixedNow()
 	f.items[r.UserID] = r
 	return r, nil
+}
+
+type fakeBatchRestrictionStore struct {
+	fakeRestrictionStore
+	requests [][]int64
+}
+
+func (f *fakeBatchRestrictionStore) GetAccountFreezes(_ context.Context, userIDs []int64) (map[int64]domain.AccountFreeze, error) {
+	f.requests = append(f.requests, append([]int64(nil), userIDs...))
+	out := make(map[int64]domain.AccountFreeze)
+	for _, id := range userIDs {
+		if freeze, ok := f.items[id]; ok && freeze.Frozen {
+			out[id] = freeze
+		}
+	}
+	return out, nil
+}
+
+type fakeAccountFreezeNotifier struct {
+	items []domain.AccountFreeze
+}
+
+func (f *fakeAccountFreezeNotifier) NotifyAccountFreezeChanged(_ context.Context, freeze domain.AccountFreeze) error {
+	f.items = append(f.items, freeze)
+	return nil
 }
 
 type fakeMessagesService struct {
@@ -623,6 +804,60 @@ func (f *fakeUsersService) SetVerified(_ context.Context, userID int64, verified
 	return u, nil
 }
 
+func (f *fakeUsersService) SetScamFake(_ context.Context, userID int64, scam, fake bool) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	u.Scam = scam
+	u.Fake = fake
+	f.users[userID] = u
+	return u, nil
+}
+
+func (f *fakeUsersService) SetSupport(_ context.Context, userID int64, support bool) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	u.Support = support
+	f.users[userID] = u
+	return u, nil
+}
+
+func (f *fakeUsersService) UpdateUsername(_ context.Context, userID int64, username string) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	u.Username = username
+	f.users[userID] = u
+	return u, nil
+}
+
+func (f *fakeUsersService) UpdateColor(_ context.Context, userID int64, forProfile bool, color domain.PeerColor) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	if forProfile {
+		u.ProfileColor = color
+	} else {
+		u.Color = color
+	}
+	f.users[userID] = u
+	return u, nil
+}
+
+func (f *fakeUsersService) UpdateEmojiStatus(_ context.Context, userID int64, status domain.UserEmojiStatus) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	f.users[userID] = u
+	return u, nil
+}
+
 type fakeStarsService struct {
 	balances    map[int64]domain.StarsBalance
 	creditCalls int
@@ -673,6 +908,15 @@ func (f *fakeUserNotifier) NotifyUserChanged(_ context.Context, u domain.User) e
 	return nil
 }
 
+type fakeUserModerationNotifier struct {
+	users []int64
+}
+
+func (f *fakeUserModerationNotifier) NotifyUserModerationFlagsChanged(_ context.Context, u domain.User) error {
+	f.users = append(f.users, u.ID)
+	return nil
+}
+
 type fakeChannelsService struct {
 	channels      map[int64]domain.Channel
 	verifiedCalls int
@@ -693,6 +937,66 @@ func (f *fakeChannelsService) SetVerified(_ context.Context, channelID int64, ve
 		return domain.Channel{}, domain.ErrChannelInvalid
 	}
 	ch.Verified = verified
+	f.channels[channelID] = ch
+	return ch, nil
+}
+
+func (f *fakeChannelsService) SetScamFake(_ context.Context, channelID int64, scam, fake bool) (domain.Channel, error) {
+	ch, ok := f.channels[channelID]
+	if !ok {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	ch.Scam = scam
+	ch.Fake = fake
+	f.channels[channelID] = ch
+	return ch, nil
+}
+
+func (f *fakeChannelsService) AdminSetSettings(_ context.Context, channelID int64, patch domain.ChannelAdminSettings) (domain.Channel, error) {
+	ch, ok := f.channels[channelID]
+	if !ok {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	if patch.Gigagroup != nil {
+		ch.Gigagroup = *patch.Gigagroup
+	}
+	if patch.SlowmodeSeconds != nil {
+		ch.SlowmodeSeconds = *patch.SlowmodeSeconds
+	}
+	f.channels[channelID] = ch
+	return ch, nil
+}
+
+func (f *fakeChannelsService) AdminSetUsername(_ context.Context, channelID int64, username string) (domain.Channel, error) {
+	ch, ok := f.channels[channelID]
+	if !ok {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	ch.Username = username
+	f.channels[channelID] = ch
+	return ch, nil
+}
+
+func (f *fakeChannelsService) AdminSetColor(_ context.Context, channelID int64, forProfile bool, color domain.ChannelPeerColor) (domain.Channel, error) {
+	ch, ok := f.channels[channelID]
+	if !ok {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	if forProfile {
+		ch.ProfileColor = color
+	} else {
+		ch.Color = color
+	}
+	f.channels[channelID] = ch
+	return ch, nil
+}
+
+func (f *fakeChannelsService) AdminSetEmojiStatus(_ context.Context, channelID int64, status domain.ChannelEmojiStatus) (domain.Channel, error) {
+	ch, ok := f.channels[channelID]
+	if !ok {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	ch.EmojiStatus = status
 	f.channels[channelID] = ch
 	return ch, nil
 }
@@ -741,9 +1045,18 @@ func TestPublishStarGiftCollectiblesDryRunThenConfirm(t *testing.T) {
 	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: gifts, Now: fixedNow})
 	base := PublishStarGiftCollectiblesRequest{
 		GiftID: 11, UpgradeStars: 125, SupplyTotal: 100, SlugPrefix: "cake",
-		Models:    []StarGiftCollectibleAnimationUpload{{Name: "Ruby", RarityPermille: 1000, FileKey: "model-0", FileName: "ruby.lottie", Data: []byte("model")}},
-		Patterns:  []StarGiftCollectibleAnimationUpload{{Name: "Stars", RarityPermille: 1000, FileKey: "pattern-0", FileName: "stars.tgs", Data: []byte("pattern")}},
-		Backdrops: []StarGiftCollectibleBackdropInput{{Name: "Night", BackdropID: 1, CenterColor: 0x112233, EdgeColor: 0x223344, PatternColor: 0x334455, TextColor: 0xffffff, RarityPermille: 1000}},
+		Models: []StarGiftCollectibleAnimationUpload{
+			{Name: "Ruby", RarityPermille: 500, FileKey: "model-0", FileName: "ruby.lottie", Data: []byte("model")},
+			{Name: "Sapphire", RarityPermille: 500, FileKey: "model-1", FileName: "sapphire.lottie", Data: []byte("model-1")},
+		},
+		Patterns: []StarGiftCollectibleAnimationUpload{
+			{Name: "Stars", RarityPermille: 500, FileKey: "pattern-0", FileName: "stars.tgs", Data: []byte("pattern")},
+			{Name: "Moons", RarityPermille: 500, FileKey: "pattern-1", FileName: "moons.tgs", Data: []byte("pattern-1")},
+		},
+		Backdrops: []StarGiftCollectibleBackdropInput{
+			{Name: "Night", BackdropID: 1, CenterColor: 0x112233, EdgeColor: 0x223344, PatternColor: 0x334455, TextColor: 0xffffff, RarityPermille: 500},
+			{Name: "Day", BackdropID: 2, CenterColor: 0xaabbcc, EdgeColor: 0x778899, PatternColor: 0xddeeff, TextColor: 0x111111, RarityPermille: 500},
+		},
 	}
 	base.CommandMeta = CommandMeta{CommandID: "dry-collectibles", Actor: "ops", Reason: "pool", DryRun: true}
 	preview, err := svc.PublishStarGiftCollectibles(context.Background(), base)
@@ -754,6 +1067,45 @@ func TestPublishStarGiftCollectiblesDryRunThenConfirm(t *testing.T) {
 	result, err := svc.PublishStarGiftCollectibles(context.Background(), base)
 	if err != nil || gifts.createCalls != 1 || result.Details["revision_id"] != "33" || result.Details["published"] != true {
 		t.Fatalf("result=%+v err=%v create=%d", result, err, gifts.createCalls)
+	}
+}
+
+func TestPublishStarGiftCollectiblesRejectsUnsafeClientPreviewPool(t *testing.T) {
+	valid := func() PublishStarGiftCollectiblesRequest {
+		return PublishStarGiftCollectiblesRequest{
+			CommandMeta: CommandMeta{CommandID: "unsafe-pool", Actor: "ops", Reason: "regression", DryRun: true},
+			GiftID:      11, UpgradeStars: 125, SupplyTotal: 100, SlugPrefix: "cake",
+			Models: []StarGiftCollectibleAnimationUpload{
+				{Name: "Ruby", RarityPermille: 500, FileName: "ruby.lottie", Data: []byte("ruby")},
+				{Name: "Sapphire", RarityPermille: 500, FileName: "sapphire.lottie", Data: []byte("sapphire")},
+			},
+			Patterns: []StarGiftCollectibleAnimationUpload{
+				{Name: "Stars", RarityPermille: 500, FileName: "stars.lottie", Data: []byte("stars")},
+				{Name: "Moons", RarityPermille: 500, FileName: "moons.lottie", Data: []byte("moons")},
+			},
+			Backdrops: []StarGiftCollectibleBackdropInput{
+				{Name: "Night", BackdropID: 1, RarityPermille: 500},
+				{Name: "Day", BackdropID: 2, RarityPermille: 500},
+			},
+		}
+	}
+	tests := map[string]func(*PublishStarGiftCollectiblesRequest){
+		"single model":    func(req *PublishStarGiftCollectiblesRequest) { req.Models = req.Models[:1] },
+		"single pattern":  func(req *PublishStarGiftCollectiblesRequest) { req.Patterns = req.Patterns[:1] },
+		"single backdrop": func(req *PublishStarGiftCollectiblesRequest) { req.Backdrops = req.Backdrops[:1] },
+		"duplicate backdrop id": func(req *PublishStarGiftCollectiblesRequest) {
+			req.Backdrops[1].BackdropID = req.Backdrops[0].BackdropID
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			req := valid()
+			mutate(&req)
+			svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Gifts: &fakeGiftsService{}, Now: fixedNow})
+			if _, err := svc.PublishStarGiftCollectibles(context.Background(), req); !errors.Is(err, domain.ErrStarGiftCollectibleInvalid) {
+				t.Fatalf("err=%v, want ErrStarGiftCollectibleInvalid", err)
+			}
+		})
 	}
 }
 
@@ -771,10 +1123,17 @@ func TestImportOfficialStarGiftPreservesCraftedRarityAndPublishesBundle(t *testi
 		Collectible: &officialgifts.CollectibleSet{
 			Models: []officialgifts.Model{
 				{Name: "Regular", DocumentID: 2, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: officialgifts.Document{ID: 2, FileName: "regular.tgs", SHA256: strings.Repeat("b", 64), Data: []byte("regular")}},
+				{Name: "Regular Two", DocumentID: 5, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: officialgifts.Document{ID: 5, FileName: "regular-two.tgs", SHA256: strings.Repeat("e", 64), Data: []byte("regular-two")}},
 				{Name: "Crafted", DocumentID: 3, Crafted: true, Rarity: officialgifts.Rarity{Kind: "legendary"}, Document: officialgifts.Document{ID: 3, FileName: "crafted.tgs", SHA256: strings.Repeat("c", 64), Data: []byte("crafted")}},
 			},
-			Patterns:  []officialgifts.Pattern{{Name: "Pattern", DocumentID: 4, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: officialgifts.Document{ID: 4, FileName: "pattern.tgs", SHA256: strings.Repeat("d", 64), Data: []byte("pattern")}}},
-			Backdrops: []officialgifts.Backdrop{{Name: "Black", BackdropID: 0, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}}},
+			Patterns: []officialgifts.Pattern{
+				{Name: "Pattern", DocumentID: 4, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: officialgifts.Document{ID: 4, FileName: "pattern.tgs", SHA256: strings.Repeat("d", 64), Data: []byte("pattern")}},
+				{Name: "Pattern Two", DocumentID: 6, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: officialgifts.Document{ID: 6, FileName: "pattern-two.tgs", SHA256: strings.Repeat("f", 64), Data: []byte("pattern-two")}},
+			},
+			Backdrops: []officialgifts.Backdrop{
+				{Name: "Black", BackdropID: 0, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}},
+				{Name: "White", BackdropID: 1, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}},
+			},
 		},
 	}}
 	gifts := &fakeGiftsService{}
@@ -791,7 +1150,7 @@ func TestImportOfficialStarGiftPreservesCraftedRarityAndPublishesBundle(t *testi
 		t.Fatalf("result=%+v err=%v create=%d", result, err, gifts.createCalls)
 	}
 	models := gifts.lastBundle.Collectible.Models
-	if len(models) != 2 || !models[1].Crafted || models[1].RarityKind != domain.StarGiftRarityLegendary || models[1].RarityPermille != 0 ||
+	if len(models) != 3 || !models[2].Crafted || models[2].RarityKind != domain.StarGiftRarityLegendary || models[2].RarityPermille != 0 ||
 		models[0].RarityPermille != 922 || gifts.lastBundle.Collectible.Backdrops[0].BackdropID != 0 {
 		t.Fatalf("imported models=%+v backdrops=%+v", models, gifts.lastBundle.Collectible.Backdrops)
 	}
@@ -823,17 +1182,18 @@ func TestImportOfficialStarGiftPublishesThroughRealGiftService(t *testing.T) {
 		},
 		BaseDocument: document(1, "gift.json"),
 		Collectible: &officialgifts.CollectibleSet{
-			Models: []officialgifts.Model{{
-				Name: "Model", DocumentID: 2, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille},
-				Document: document(2, "model.json"),
-			}},
-			Patterns: []officialgifts.Pattern{{
-				Name: "Pattern", DocumentID: 3, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille},
-				Document: document(3, "pattern.json"),
-			}},
-			Backdrops: []officialgifts.Backdrop{{
-				Name: "Backdrop", BackdropID: 0, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille},
-			}},
+			Models: []officialgifts.Model{
+				{Name: "Model", DocumentID: 2, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: document(2, "model.json")},
+				{Name: "Model Two", DocumentID: 4, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: document(4, "model-two.json")},
+			},
+			Patterns: []officialgifts.Pattern{
+				{Name: "Pattern", DocumentID: 3, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: document(3, "pattern.json")},
+				{Name: "Pattern Two", DocumentID: 5, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}, Document: document(5, "pattern-two.json")},
+			},
+			Backdrops: []officialgifts.Backdrop{
+				{Name: "Backdrop", BackdropID: 0, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}},
+				{Name: "Backdrop Two", BackdropID: 1, Rarity: officialgifts.Rarity{Kind: "permille", Permille: &permille}},
+			},
 		},
 	}}
 	ctx := context.Background()
@@ -854,7 +1214,7 @@ func TestImportOfficialStarGiftPublishesThroughRealGiftService(t *testing.T) {
 		t.Fatalf("catalog=%+v err=%v, want one imported gift", catalog, err)
 	}
 	preview, ok, err := giftService.CollectiblePreview(ctx, catalog[0].ID)
-	if err != nil || !ok || len(preview.Models) != 1 || len(preview.Patterns) != 1 {
+	if err != nil || !ok || len(preview.Models) != 2 || len(preview.Patterns) != 2 {
 		t.Fatalf("preview=%+v ok=%v err=%v", preview, ok, err)
 	}
 	model := preview.Models[0].Document
@@ -908,6 +1268,12 @@ type fakeGiftsService struct {
 	lastBundle  domain.StarGiftCatalogBundleWrite
 }
 
+func (f *fakeGiftsService) GiftByID(_ context.Context, id int64) (domain.StarGift, bool, error) {
+	if id <= 0 {
+		return domain.StarGift{}, false, nil
+	}
+	return domain.StarGift{ID: id, Stars: 50, Title: "Test Gift"}, true, nil
+}
 func (f *fakeGiftsService) PrepareAnimation(name string, data []byte) (domain.StarGiftAnimation, error) {
 	sum := sha256.Sum256(data)
 	return domain.StarGiftAnimation{
@@ -956,4 +1322,654 @@ func (*fakeGiftsService) CollectibleAnimationJSON(context.Context, int64, domain
 func (f *fakeChannelNotifier) NotifyChannelChanged(_ context.Context, ch domain.Channel) error {
 	f.channels = append(f.channels, ch.ID)
 	return nil
+}
+
+// fakeCollectibleUsernamesService is an in-memory collectible lifecycle: enough
+// state to observe occupancy, replay-by-command-key and the burned terminal
+// state, which is exactly what the admin commands are expected to reason about.
+type fakeCollectibleUsernamesService struct {
+	assets        map[string]domain.CollectibleUsername
+	log           map[int64][]domain.CollectibleUsernameTransfer
+	commandKeys   map[string]int64
+	nextID        int64
+	mintCalls     int
+	transferCalls int
+	revokeCalls   int
+	deleteCalls   int
+}
+
+func newFakeCollectibleUsernames() *fakeCollectibleUsernamesService {
+	return &fakeCollectibleUsernamesService{
+		assets:      map[string]domain.CollectibleUsername{},
+		log:         map[int64][]domain.CollectibleUsernameTransfer{},
+		commandKeys: map[string]int64{},
+		nextID:      100,
+	}
+}
+
+func (f *fakeCollectibleUsernamesService) Mint(_ context.Context, req domain.MintCollectibleUsernameRequest) (domain.CollectibleUsername, bool, error) {
+	f.mintCalls++
+	if id, ok := f.commandKeys[req.CommandKey]; ok && req.CommandKey != "" {
+		return f.byID(id), false, nil
+	}
+	key := strings.ToLower(req.Username)
+	if _, ok := f.assets[key]; ok {
+		return domain.CollectibleUsername{}, false, domain.ErrUsernameOccupied
+	}
+	f.nextID++
+	asset := domain.CollectibleUsername{
+		ID: f.nextID, Username: req.Username, Status: domain.CollectibleUsernameStatusVault,
+		PurchaseDate: req.PurchaseDate, Currency: req.Currency, Amount: req.Amount,
+		CryptoCurrency: req.CryptoCurrency, CryptoAmount: req.CryptoAmount, URL: req.URL,
+		Version: 1,
+	}
+	if req.Owner.Type != "" {
+		asset.Status = domain.CollectibleUsernameStatusOwned
+		asset.Owner = req.Owner
+		asset.OriginalOwner = req.Owner
+	}
+	f.assets[key] = asset
+	f.commandKeys[req.CommandKey] = asset.ID
+	f.log[asset.ID] = append(f.log[asset.ID], domain.CollectibleUsernameTransfer{
+		ID: asset.ID, CollectibleID: asset.ID, Kind: domain.CollectibleUsernameKindMint,
+		To: req.Owner, Actor: req.Actor, Reason: req.Reason, CommandKey: req.CommandKey,
+	})
+	return asset, true, nil
+}
+
+func (f *fakeCollectibleUsernamesService) Transfer(_ context.Context, req domain.TransferCollectibleUsernameRequest) (domain.CollectibleUsername, bool, error) {
+	f.transferCalls++
+	key := strings.ToLower(req.Username)
+	asset, ok := f.assets[key]
+	if !ok {
+		return domain.CollectibleUsername{}, false, domain.ErrCollectibleUsernameNotFound
+	}
+	if asset.Status == domain.CollectibleUsernameStatusBurned {
+		return domain.CollectibleUsername{}, false, domain.ErrCollectibleUsernameBurned
+	}
+	if asset.Owned() && asset.Owner == req.To {
+		return asset, false, nil
+	}
+	asset.Status = domain.CollectibleUsernameStatusOwned
+	asset.Owner = req.To
+	if asset.OriginalOwner.Type == "" {
+		asset.OriginalOwner = req.To
+	}
+	asset.TransferCount++
+	asset.Version++
+	f.assets[key] = asset
+	return asset, true, nil
+}
+
+func (f *fakeCollectibleUsernamesService) Delete(_ context.Context, req domain.DeleteCollectibleUsernameRequest) (bool, error) {
+	f.deleteCalls++
+	key := strings.ToLower(req.Username)
+	asset, ok := f.assets[key]
+	if !ok {
+		return false, nil
+	}
+	if asset.Status == domain.CollectibleUsernameStatusBurned {
+		return false, nil
+	}
+	delete(f.assets, key)
+	return true, nil
+}
+
+func (f *fakeCollectibleUsernamesService) Revoke(_ context.Context, req domain.RevokeCollectibleUsernameRequest) (domain.CollectibleUsername, bool, error) {
+	f.revokeCalls++
+	key := strings.ToLower(req.Username)
+	asset, ok := f.assets[key]
+	if !ok {
+		return domain.CollectibleUsername{}, false, domain.ErrCollectibleUsernameNotFound
+	}
+	if asset.Status == domain.CollectibleUsernameStatusBurned {
+		return domain.CollectibleUsername{}, false, domain.ErrCollectibleUsernameBurned
+	}
+	asset.Owner = domain.Peer{}
+	asset.Status = domain.CollectibleUsernameStatusVault
+	if req.Burn {
+		asset.Status = domain.CollectibleUsernameStatusBurned
+	}
+	asset.Version++
+	f.assets[key] = asset
+	return asset, true, nil
+}
+
+func (f *fakeCollectibleUsernamesService) Collectible(_ context.Context, username string) (domain.CollectibleUsername, error) {
+	asset, ok := f.assets[strings.ToLower(username)]
+	if !ok {
+		return domain.CollectibleUsername{}, domain.ErrCollectibleUsernameNotFound
+	}
+	return asset, nil
+}
+
+func (f *fakeCollectibleUsernamesService) List(_ context.Context, filter domain.CollectibleUsernameFilter) ([]domain.CollectibleUsername, error) {
+	out := make([]domain.CollectibleUsername, 0, len(f.assets))
+	for _, asset := range f.assets {
+		if filter.Status != "" && asset.Status != filter.Status {
+			continue
+		}
+		if filter.BeforeID != 0 && asset.ID >= filter.BeforeID {
+			continue
+		}
+		out = append(out, asset)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
+	return out, nil
+}
+
+func (f *fakeCollectibleUsernamesService) Transfers(_ context.Context, collectibleID int64, _ int) ([]domain.CollectibleUsernameTransfer, error) {
+	return f.log[collectibleID], nil
+}
+
+func (f *fakeCollectibleUsernamesService) byID(id int64) domain.CollectibleUsername {
+	for _, asset := range f.assets {
+		if asset.ID == id {
+			return asset
+		}
+	}
+	return domain.CollectibleUsername{}
+}
+
+// fakeAccountRatingService recomputes from the manual component only, which
+// keeps the arithmetic in the domain and the fake focused on ledger replay.
+type fakeAccountRatingService struct {
+	ratings        map[int64]domain.AccountRating
+	manual         map[int64]int64
+	commandKeys    map[string]bool
+	recomputeCalls int
+	adjustCalls    int
+}
+
+func newFakeAccountRating() *fakeAccountRatingService {
+	return &fakeAccountRatingService{
+		ratings:     map[int64]domain.AccountRating{},
+		manual:      map[int64]int64{},
+		commandKeys: map[string]bool{},
+	}
+}
+
+func (f *fakeAccountRatingService) Rating(_ context.Context, userID int64) (domain.AccountRating, error) {
+	rating, ok := f.ratings[userID]
+	if !ok {
+		return domain.AccountRating{}, domain.ErrAccountRatingNotFound
+	}
+	return rating, nil
+}
+
+func (f *fakeAccountRatingService) Recompute(_ context.Context, userID int64) (domain.AccountRating, error) {
+	f.recomputeCalls++
+	rating := domain.ComputeAccountRating(domain.AccountRatingSignals{
+		UserID: userID, StarsReceived: 5000, Manual: f.manual[userID],
+	}, domain.DefaultAccountRatingWeights(), fixedNow())
+	rating.Version = f.ratings[userID].Version + 1
+	f.ratings[userID] = rating
+	return rating, nil
+}
+
+func (f *fakeAccountRatingService) Adjust(ctx context.Context, req domain.AdjustAccountRatingRequest) (domain.AccountRating, bool, error) {
+	f.adjustCalls++
+	if err := req.Validate(); err != nil {
+		return domain.AccountRating{}, false, err
+	}
+	applied := true
+	if f.commandKeys[req.CommandKey] {
+		applied = false
+	} else {
+		f.commandKeys[req.CommandKey] = true
+		f.manual[req.UserID] += req.Amount
+	}
+	rating, err := f.Recompute(ctx, req.UserID)
+	if err != nil {
+		return domain.AccountRating{}, applied, err
+	}
+	return rating, applied, nil
+}
+
+func (f *fakeAccountRatingService) List(_ context.Context, filter domain.AccountRatingFilter) ([]domain.AccountRating, error) {
+	out := make([]domain.AccountRating, 0, len(f.ratings))
+	for _, rating := range f.ratings {
+		if rating.Level < filter.MinLevel {
+			continue
+		}
+		out = append(out, rating)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UserID < out[j].UserID })
+	return out, nil
+}
+
+func (f *fakeAccountRatingService) Events(_ context.Context, userID int64, _ int) ([]domain.AccountRatingEvent, error) {
+	if f.manual[userID] == 0 {
+		return nil, nil
+	}
+	return []domain.AccountRatingEvent{{
+		ID: 1, UserID: userID, Kind: domain.AccountRatingEventManual, Amount: f.manual[userID],
+	}}, nil
+}
+
+func TestMintCollectibleUsernameDryRunExecuteAndIdempotency(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemoryCommandRepo()
+	usernames := newFakeCollectibleUsernames()
+	svc := NewService(Dependencies{Commands: repo, Usernames: usernames, Now: fixedNow})
+
+	dry, err := svc.MintCollectibleUsername(ctx, MintCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "dry-mint", Actor: "ops", Reason: "fragment import", DryRun: true},
+		Username:    "@Durov", OwnerUserID: 1001, Currency: domain.CollectibleCurrencyTON,
+		Amount: 250_000_000_000, CryptoCurrency: domain.CollectibleCryptoCurrencyTON, CryptoAmount: 250_000_000_000,
+	})
+	if err != nil {
+		t.Fatalf("dry-run mint: %v", err)
+	}
+	if !dry.DryRun || dry.Status != string(domain.AdminCommandCompleted) || usernames.mintCalls != 0 {
+		t.Fatalf("dry-run result=%+v mintCalls=%d, want validation without mutation", dry, usernames.mintCalls)
+	}
+	if dry.Details["username"] != "Durov" || dry.Details["purchase_date"] != fixedNow().Format(time.RFC3339) {
+		t.Fatalf("dry-run details=%+v, want a normalised name and a stamped purchase date", dry.Details)
+	}
+
+	execReq := MintCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "exec-mint", Actor: "ops", Reason: "fragment import"},
+		Username:    "Durov", OwnerUserID: 1001, Currency: domain.CollectibleCurrencyTON,
+		Amount: 250_000_000_000, CryptoCurrency: domain.CollectibleCryptoCurrencyTON, CryptoAmount: 250_000_000_000,
+	}
+	exec, err := svc.MintCollectibleUsername(ctx, execReq)
+	if err != nil {
+		t.Fatalf("execute mint: %v", err)
+	}
+	if exec.Status != string(domain.AdminCommandCompleted) || usernames.mintCalls != 1 ||
+		exec.Details["status"] != string(domain.CollectibleUsernameStatusOwned) {
+		t.Fatalf("execute result=%+v mintCalls=%d", exec, usernames.mintCalls)
+	}
+
+	again, err := svc.MintCollectibleUsername(ctx, execReq)
+	if err != nil {
+		t.Fatalf("replay mint: %v", err)
+	}
+	if !again.AlreadyExecuted || usernames.mintCalls != 1 {
+		t.Fatalf("replay result=%+v mintCalls=%d, want idempotent replay", again, usernames.mintCalls)
+	}
+
+	occupied, err := svc.MintCollectibleUsername(ctx, MintCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "exec-mint-2", Actor: "ops", Reason: "duplicate"},
+		Username:    "durov", Currency: domain.CollectibleCurrencyUSD, Amount: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), CodeUsernameOccupied) {
+		t.Fatalf("duplicate mint err=%v, want %s", err, CodeUsernameOccupied)
+	}
+	if occupied.Status != string(domain.AdminCommandFailed) || usernames.mintCalls != 1 {
+		t.Fatalf("duplicate result=%+v mintCalls=%d, want a journalled failure without mutation", occupied, usernames.mintCalls)
+	}
+}
+
+func TestMintCollectibleUsernameValidatesBeforeJournallingCommand(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemoryCommandRepo()
+	usernames := newFakeCollectibleUsernames()
+	svc := NewService(Dependencies{Commands: repo, Usernames: usernames, Now: fixedNow})
+
+	cases := []struct {
+		name string
+		req  MintCollectibleUsernameRequest
+		code string
+	}{
+		{
+			name: "short username",
+			req: MintCollectibleUsernameRequest{
+				CommandMeta: CommandMeta{CommandID: "bad-1", Actor: "ops", Reason: "invalid"},
+				Username:    "ab", Currency: domain.CollectibleCurrencyUSD, Amount: 1,
+			},
+			code: CodeUsernameInvalid,
+		},
+		{
+			name: "unsupported currency",
+			req: MintCollectibleUsernameRequest{
+				CommandMeta: CommandMeta{CommandID: "bad-2", Actor: "ops", Reason: "invalid"},
+				Username:    "durov", Currency: "EUR", Amount: 1,
+			},
+			code: CodeCollectibleCurrencyInvalid,
+		},
+		{
+			name: "crypto amount without currency",
+			req: MintCollectibleUsernameRequest{
+				CommandMeta: CommandMeta{CommandID: "bad-3", Actor: "ops", Reason: "invalid"},
+				Username:    "durov", Currency: domain.CollectibleCurrencyUSD, Amount: 1, CryptoAmount: 5,
+			},
+			code: CodeCollectibleCurrencyInvalid,
+		},
+	}
+	for _, item := range cases {
+		if _, err := svc.MintCollectibleUsername(ctx, item.req); err == nil || !strings.Contains(err.Error(), item.code) {
+			t.Fatalf("%s err=%v, want %s", item.name, err, item.code)
+		}
+		if _, journalled := repo.items[item.req.CommandID]; journalled {
+			t.Fatalf("%s journalled a rejected command", item.name)
+		}
+	}
+	if usernames.mintCalls != 0 {
+		t.Fatalf("rejected requests reached the lifecycle: mintCalls=%d", usernames.mintCalls)
+	}
+}
+
+func TestTransferCollectibleUsernameRequiresRecipientAndRejectsBurned(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemoryCommandRepo()
+	usernames := newFakeCollectibleUsernames()
+	svc := NewService(Dependencies{Commands: repo, Usernames: usernames, Now: fixedNow})
+	if _, _, err := usernames.Mint(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "durov", Currency: domain.CollectibleCurrencyUSD, Amount: 1, CommandKey: "seed",
+	}); err != nil {
+		t.Fatalf("seed mint: %v", err)
+	}
+
+	if _, err := svc.TransferCollectibleUsername(ctx, TransferCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "t-none", Actor: "ops", Reason: "sold"}, Username: "durov",
+	}); err == nil || !strings.Contains(err.Error(), "to_user_id") {
+		t.Fatalf("transfer without recipient err=%v", err)
+	}
+	if _, err := svc.TransferCollectibleUsername(ctx, TransferCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "t-both", Actor: "ops", Reason: "sold"},
+		Username:    "durov", ToUserID: 1001, ToChannelID: 2002,
+	}); err == nil {
+		t.Fatal("transfer accepted two recipients")
+	}
+
+	dry, err := svc.TransferCollectibleUsername(ctx, TransferCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "t-dry", Actor: "ops", Reason: "sold", DryRun: true},
+		Username:    "durov", ToUserID: 1001,
+	})
+	if err != nil {
+		t.Fatalf("dry-run transfer: %v", err)
+	}
+	if usernames.transferCalls != 0 || dry.Details["would_change"] != true {
+		t.Fatalf("dry-run transfer result=%+v transferCalls=%d", dry, usernames.transferCalls)
+	}
+
+	if _, err := svc.TransferCollectibleUsername(ctx, TransferCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "t-exec", Actor: "ops", Reason: "sold"},
+		Username:    "durov", ToUserID: 1001,
+	}); err != nil {
+		t.Fatalf("execute transfer: %v", err)
+	}
+	if usernames.transferCalls != 1 {
+		t.Fatalf("transferCalls=%d, want one mutation", usernames.transferCalls)
+	}
+
+	if _, err := svc.RevokeCollectibleUsername(ctx, RevokeCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "burn-1", Actor: "ops", Reason: "fraud"},
+		Username:    "durov", Burn: true,
+	}); err != nil {
+		t.Fatalf("burn: %v", err)
+	}
+	if _, err := svc.TransferCollectibleUsername(ctx, TransferCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "t-burned", Actor: "ops", Reason: "sold"},
+		Username:    "durov", ToUserID: 1002,
+	}); err == nil || !strings.Contains(err.Error(), CodeCollectibleBurned) {
+		t.Fatalf("transfer of a burned asset err=%v, want %s", err, CodeCollectibleBurned)
+	}
+	if _, err := svc.TransferCollectibleUsername(ctx, TransferCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "t-missing", Actor: "ops", Reason: "sold"},
+		Username:    "nobody_holds_this", ToUserID: 1002,
+	}); err == nil || !strings.Contains(err.Error(), CodeCollectibleNotFound) {
+		t.Fatalf("transfer of a missing asset err=%v, want %s", err, CodeCollectibleNotFound)
+	}
+}
+
+func TestRevokeCollectibleUsernameRejectsVaultAssetWithoutBurn(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemoryCommandRepo()
+	usernames := newFakeCollectibleUsernames()
+	svc := NewService(Dependencies{Commands: repo, Usernames: usernames, Now: fixedNow})
+	if _, _, err := usernames.Mint(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "durov", Currency: domain.CollectibleCurrencyUSD, Amount: 1, CommandKey: "seed",
+	}); err != nil {
+		t.Fatalf("seed mint: %v", err)
+	}
+
+	if _, err := svc.RevokeCollectibleUsername(ctx, RevokeCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "rv-vault", Actor: "ops", Reason: "nothing to take"},
+		Username:    "durov",
+	}); err == nil || !strings.Contains(err.Error(), CodeCollectibleNotOwned) {
+		t.Fatalf("revoke of a vault asset err=%v, want %s", err, CodeCollectibleNotOwned)
+	}
+	if usernames.revokeCalls != 0 {
+		t.Fatalf("revokeCalls=%d, want no mutation", usernames.revokeCalls)
+	}
+
+	burnDry, err := svc.RevokeCollectibleUsername(ctx, RevokeCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "rv-burn-dry", Actor: "ops", Reason: "fraud", DryRun: true},
+		Username:    "durov", Burn: true,
+	})
+	if err != nil {
+		t.Fatalf("dry-run burn: %v", err)
+	}
+	if usernames.revokeCalls != 0 || burnDry.Details["burn"] != true {
+		t.Fatalf("dry-run burn result=%+v revokeCalls=%d", burnDry, usernames.revokeCalls)
+	}
+}
+
+func TestCollectibleUsernameByIDUsesKeysetFallback(t *testing.T) {
+	ctx := context.Background()
+	usernames := newFakeCollectibleUsernames()
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Usernames: usernames, Now: fixedNow})
+	first, _, err := usernames.Mint(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "durov", Currency: domain.CollectibleCurrencyUSD, Amount: 1, CommandKey: "seed-1",
+	})
+	if err != nil {
+		t.Fatalf("seed mint: %v", err)
+	}
+	if _, _, err := usernames.Mint(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "telegram", Currency: domain.CollectibleCurrencyUSD, Amount: 1, CommandKey: "seed-2",
+	}); err != nil {
+		t.Fatalf("seed mint: %v", err)
+	}
+
+	got, err := svc.CollectibleUsernameByID(ctx, first.ID)
+	if err != nil || got.ID != first.ID || got.Username != "durov" {
+		t.Fatalf("CollectibleUsernameByID(%d) = %+v err=%v", first.ID, got, err)
+	}
+	if _, err := svc.CollectibleUsernameByID(ctx, first.ID-1); !errors.Is(err, domain.ErrCollectibleUsernameNotFound) {
+		t.Fatalf("missing id err=%v, want ErrCollectibleUsernameNotFound", err)
+	}
+}
+
+func TestAdjustAccountRatingDryRunExecuteAndIdempotency(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemoryCommandRepo()
+	rating := newFakeAccountRating()
+	svc := NewService(Dependencies{Commands: repo, Rating: rating, Now: fixedNow})
+
+	dry, err := svc.AdjustAccountRating(ctx, AdjustAccountRatingRequest{
+		CommandMeta: CommandMeta{CommandID: "dry-adjust", Actor: "ops", Reason: "penalty", DryRun: true},
+		UserID:      1001, Amount: -2500,
+	})
+	if err != nil {
+		t.Fatalf("dry-run adjust: %v", err)
+	}
+	if rating.adjustCalls != 0 || dry.Details["previous_found"] != false || dry.Details["amount"] != "-2500" {
+		t.Fatalf("dry-run adjust result=%+v adjustCalls=%d", dry, rating.adjustCalls)
+	}
+
+	execReq := AdjustAccountRatingRequest{
+		CommandMeta: CommandMeta{CommandID: "exec-adjust", Actor: "ops", Reason: "penalty"},
+		UserID:      1001, Amount: -2500,
+	}
+	exec, err := svc.AdjustAccountRating(ctx, execReq)
+	if err != nil {
+		t.Fatalf("execute adjust: %v", err)
+	}
+	if rating.adjustCalls != 1 || exec.Details["applied"] != true ||
+		exec.Details["manual_component"] != "-2500" || exec.Details["stars"] != "2500" {
+		t.Fatalf("execute adjust result=%+v adjustCalls=%d", exec, rating.adjustCalls)
+	}
+
+	again, err := svc.AdjustAccountRating(ctx, execReq)
+	if err != nil {
+		t.Fatalf("replay adjust: %v", err)
+	}
+	if !again.AlreadyExecuted || rating.adjustCalls != 1 || rating.manual[1001] != -2500 {
+		t.Fatalf("replay adjust result=%+v adjustCalls=%d manual=%d", again, rating.adjustCalls, rating.manual[1001])
+	}
+
+	for _, amount := range []int64{0, maxAccountRatingAdjustment + 1, -maxAccountRatingAdjustment - 1} {
+		if _, err := svc.AdjustAccountRating(ctx, AdjustAccountRatingRequest{
+			CommandMeta: CommandMeta{CommandID: "bad-adjust", Actor: "ops", Reason: "invalid"},
+			UserID:      1001, Amount: amount,
+		}); err == nil || !strings.Contains(err.Error(), CodeRatingAdjustmentInvalid) {
+			t.Fatalf("adjust by %d err=%v, want %s", amount, err, CodeRatingAdjustmentInvalid)
+		}
+	}
+	if _, journalled := repo.items["bad-adjust"]; journalled {
+		t.Fatal("journalled a rejected adjustment")
+	}
+}
+
+func TestRecomputeAccountRatingDryRunAndExecute(t *testing.T) {
+	ctx := context.Background()
+	repo := newMemoryCommandRepo()
+	rating := newFakeAccountRating()
+	svc := NewService(Dependencies{Commands: repo, Rating: rating, Now: fixedNow})
+
+	if _, err := svc.RecomputeAccountRating(ctx, RecomputeAccountRatingRequest{
+		CommandMeta: CommandMeta{CommandID: "rc-invalid", Actor: "ops", Reason: "support"},
+	}); err == nil || !strings.Contains(err.Error(), "user_id") {
+		t.Fatalf("recompute without user err=%v", err)
+	}
+
+	dry, err := svc.RecomputeAccountRating(ctx, RecomputeAccountRatingRequest{
+		CommandMeta: CommandMeta{CommandID: "rc-dry", Actor: "ops", Reason: "support", DryRun: true},
+		UserID:      1001,
+	})
+	if err != nil {
+		t.Fatalf("dry-run recompute: %v", err)
+	}
+	if rating.recomputeCalls != 0 || dry.Details["previous_found"] != false {
+		t.Fatalf("dry-run recompute result=%+v recomputeCalls=%d", dry, rating.recomputeCalls)
+	}
+
+	exec, err := svc.RecomputeAccountRating(ctx, RecomputeAccountRatingRequest{
+		CommandMeta: CommandMeta{CommandID: "rc-exec", Actor: "ops", Reason: "support"},
+		UserID:      1001,
+	})
+	if err != nil {
+		t.Fatalf("execute recompute: %v", err)
+	}
+	if rating.recomputeCalls != 1 || exec.Details["stars"] != "5000" || exec.Details["version"] != "1" {
+		t.Fatalf("execute recompute result=%+v recomputeCalls=%d", exec, rating.recomputeCalls)
+	}
+
+	stored, err := svc.AccountRating(ctx, 1001)
+	if err != nil || stored.Stars != 5000 {
+		t.Fatalf("AccountRating = %+v err=%v", stored, err)
+	}
+	if events, err := svc.AccountRatingEvents(ctx, 1001, 10); err != nil || len(events) != 0 {
+		t.Fatalf("AccountRatingEvents = %+v err=%v, want an empty ledger", events, err)
+	}
+}
+
+func TestCollectibleAndRatingCommandsRequireConfiguredDependencies(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Now: fixedNow})
+	if _, err := svc.MintCollectibleUsername(ctx, MintCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "c-1", Actor: "ops", Reason: "x"},
+		Username:    "durov", Currency: domain.CollectibleCurrencyUSD, Amount: 1,
+	}); err == nil || !strings.Contains(err.Error(), "collectible username dependency") {
+		t.Fatalf("mint without dependency err=%v", err)
+	}
+	if _, err := svc.AdjustAccountRating(ctx, AdjustAccountRatingRequest{
+		CommandMeta: CommandMeta{CommandID: "c-2", Actor: "ops", Reason: "x"},
+		UserID:      1001, Amount: 5,
+	}); err == nil || !strings.Contains(err.Error(), "account rating dependency") {
+		t.Fatalf("adjust without dependency err=%v", err)
+	}
+	if _, err := svc.CollectibleUsernames(ctx, domain.CollectibleUsernameFilter{}); err == nil {
+		t.Fatal("listing without dependency succeeded")
+	}
+	if _, err := svc.AccountRatings(ctx, domain.AccountRatingFilter{}); err == nil {
+		t.Fatal("rating listing without dependency succeeded")
+	}
+}
+
+// TestDeleteCollectibleUsernameCommand covers the hard-delete command: the
+// journal captures what was removed before the record disappears, a dry-run
+// mutates nothing, and a burned asset is refused.
+func TestDeleteCollectibleUsernameCommand(t *testing.T) {
+	ctx := context.Background()
+	usernames := newFakeCollectibleUsernames()
+	repo := newMemoryCommandRepo()
+	svc := NewService(Dependencies{Commands: repo, Usernames: usernames, Now: fixedNow})
+	holder := domain.Peer{Type: domain.PeerTypeUser, ID: 8801}
+	if _, _, err := usernames.Mint(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "wrongname", Owner: holder, Currency: domain.CollectibleCurrencyStars, Amount: 100,
+	}); err != nil {
+		t.Fatalf("seed mint: %v", err)
+	}
+
+	dry, err := svc.DeleteCollectibleUsername(ctx, DeleteCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "del-dry", Actor: "ops", Reason: "mistake", DryRun: true},
+		Username:    "@wrongname",
+	})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if !dry.DryRun || usernames.deleteCalls != 0 {
+		t.Fatalf("dry run mutated: result=%+v calls=%d", dry, usernames.deleteCalls)
+	}
+	if dry.Details["previous_owner_id"] != "8801" {
+		t.Fatalf("dry run details = %+v, want the holder captured", dry.Details)
+	}
+
+	exec, err := svc.DeleteCollectibleUsername(ctx, DeleteCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "del-exec", Actor: "ops", Reason: "mistake"},
+		Username:    "wrongname",
+	})
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if usernames.deleteCalls != 1 || exec.Details["deleted"] != true {
+		t.Fatalf("exec = %+v calls=%d", exec, usernames.deleteCalls)
+	}
+	if exec.Details["previous_status"] != string(domain.CollectibleUsernameStatusOwned) {
+		t.Fatalf("journal lost the pre-delete state: %+v", exec.Details)
+	}
+
+	// Replaying the same command id must not touch the store again.
+	if _, err := svc.DeleteCollectibleUsername(ctx, DeleteCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "del-exec", Actor: "ops", Reason: "mistake"},
+		Username:    "wrongname",
+	}); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if usernames.deleteCalls != 1 {
+		t.Fatalf("replay called the store again: calls=%d", usernames.deleteCalls)
+	}
+
+	// A burned asset is history: it is released by re-issuing the name, not deleted.
+	if _, _, err := usernames.Mint(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "burnedname", Owner: holder, Currency: domain.CollectibleCurrencyStars, Amount: 100,
+	}); err != nil {
+		t.Fatalf("seed burned mint: %v", err)
+	}
+	if _, _, err := usernames.Revoke(ctx, domain.RevokeCollectibleUsernameRequest{
+		Username: "burnedname", Burn: true,
+	}); err != nil {
+		t.Fatalf("seed burn: %v", err)
+	}
+	if _, err := svc.DeleteCollectibleUsername(ctx, DeleteCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "del-burned", Actor: "ops", Reason: "cleanup"},
+		Username:    "burnedname",
+	}); err == nil || !strings.Contains(err.Error(), CodeCollectibleBurned) {
+		t.Fatalf("delete of burned asset err = %v, want %s", err, CodeCollectibleBurned)
+	}
+
+	// A short name is rejected before a command is journalled at all.
+	if _, err := svc.DeleteCollectibleUsername(ctx, DeleteCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "del-short", Actor: "ops", Reason: "cleanup"},
+		Username:    "no",
+	}); err == nil {
+		t.Fatalf("delete of invalid name = nil error, want rejection")
+	}
 }

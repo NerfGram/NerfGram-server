@@ -47,7 +47,8 @@ type outgoingSend struct {
 	groupedID int64
 	// effect 是消息特效 id（私聊专属，0 表无特效）。调用方已对 catalog 校验合法性；
 	// 频道侧忽略（官方群/频道不渲染特效）。
-	effect int64
+	effect         int64
+	allowPaidStars int64
 }
 
 // sendOutgoing 把一条出站消息落地到私聊或频道，返回 *tg.Updates、是否重复、错误。
@@ -126,6 +127,12 @@ func (r *Router) sendOutgoing(ctx context.Context, userID int64, peer domain.Pee
 	}
 	if r.deps.Messages == nil {
 		return nil, false, peerIDInvalidErr()
+	}
+	if err := r.ensurePrivateContactAllowed(ctx, userID, peer.ID, p.allowPaidStars, 1); err != nil {
+		return nil, false, err
+	}
+	if err := r.ensureVoiceMessagesAllowed(ctx, userID, peer, p.media != nil && p.media.HasUnreadPayload()); err != nil {
+		return nil, false, err
 	}
 	if r.deps.Users != nil && peer.ID != userID {
 		if _, found, err := r.deps.Users.ByID(ctx, userID, peer.ID); err != nil {
@@ -262,7 +269,9 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 	// 原始 TL 指纹；编码失败则留空，由 store 使用 domain fallback。
 	idempotencyFingerprint, _ := sendMediaIdempotencyFingerprint(req)
 	// 媒体 caption 里的链接/@mention/#hashtag 等同样补自动高亮实体（客户端未带时）。
-	req.Entities = augmentAutoEntities(req.Message, req.Entities)
+	// 派生结果保持在局部变量中，不能回写原始 TL request，否则同一请求对象重试时指纹会
+	// 从“客户端输入”变成“服务端派生输入”，错误触发 RANDOM_ID_DUPLICATE。
+	entities := r.augmentAutoEntities(req.Message, req.Entities)
 	userID, _, err := r.currentUserID(ctx)
 	if err != nil {
 		return nil, internalErr()
@@ -344,7 +353,7 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 			IdempotencyFingerprint: idempotencyFingerprint,
 			IdempotencyPreflighted: replay.checked,
 			Message:                req.Message,
-			Entities:               domainMessageEntities(req.Entities),
+			Entities:               domainMessageEntities(entities),
 			Media:                  media,
 			ReplyTo:                replyTo,
 			Silent:                 req.Silent,
@@ -354,7 +363,7 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 			ClearDraft:             req.ClearDraft,
 		})
 	}
-	if req.AllowPaidStars > 0 || req.AllowPaidFloodskip {
+	if req.AllowPaidFloodskip {
 		return nil, paymentUnsupportedErr()
 	}
 	replay, err := r.lookupOutgoingReplay(ctx, userID, peer, req.RandomID, idempotencyFingerprint)
@@ -373,6 +382,13 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 	}
 	peer, err = r.checkedDomainPeerFromInputPeer(ctx, userID, req.Peer)
 	if err != nil {
+		return nil, err
+	}
+	voiceOrRound, err := r.preflightVoiceOrRound(ctx, []tg.InputMediaClass{req.Media})
+	if err != nil {
+		return nil, err
+	}
+	if err := r.ensureVoiceMessagesAllowed(ctx, userID, peer, voiceOrRound); err != nil {
 		return nil, err
 	}
 	media, err := r.resolveInputMedia(ctx, userID, req.Media)
@@ -400,13 +416,14 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 			idempotencyFingerprint: idempotencyFingerprint,
 			idempotencyPreflighted: replay.checked,
 			message:                req.Message,
-			entities:               req.Entities,
+			entities:               entities,
 			media:                  media,
 			silent:                 req.Silent,
 			noforwards:             req.Noforwards,
 			replyToInput:           req.ReplyTo,
 			sendAsInput:            req.SendAs,
 			clearDraft:             req.ClearDraft,
+			allowPaidStars:         req.AllowPaidStars,
 		}, req.ScheduleDate, req.ScheduleRepeatPeriod)
 	}
 	updates, _, err := r.sendOutgoing(ctx, userID, peer, outgoingSend{
@@ -414,7 +431,7 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 		idempotencyFingerprint: idempotencyFingerprint,
 		idempotencyPreflighted: replay.checked,
 		message:                req.Message,
-		entities:               req.Entities,
+		entities:               entities,
 		media:                  media,
 		silent:                 req.Silent,
 		noforwards:             req.Noforwards,
@@ -423,6 +440,7 @@ func (r *Router) onMessagesSendMedia(ctx context.Context, req *tg.MessagesSendMe
 		clearDraft:             req.ClearDraft,
 		replyMarkup:            replyMarkup,
 		effect:                 req.Effect,
+		allowPaidStars:         req.AllowPaidStars,
 	})
 	if err != nil {
 		return nil, err
@@ -441,6 +459,12 @@ func (r *Router) onMessagesSendMultiMedia(ctx context.Context, req *tg.MessagesS
 	}
 	if len(req.MultiMedia) == 0 || len(req.MultiMedia) > maxSendMultiMediaItems {
 		return nil, limitInvalidErr()
+	}
+	if req.AllowPaidStars < 0 {
+		return nil, starsAmountInvalidErr()
+	}
+	if req.AllowPaidFloodskip {
+		return nil, paymentUnsupportedErr()
 	}
 	peer, ok := r.domainPeerFromInputPeer(userID, req.Peer)
 	if !ok || peer.ID == 0 {
@@ -501,6 +525,27 @@ func (r *Router) onMessagesSendMultiMedia(ctx context.Context, req *tg.MessagesS
 	if err != nil {
 		return nil, err
 	}
+	if peer.Type == domain.PeerTypeUser {
+		if req.AllowPaidFloodskip {
+			return nil, paymentUnsupportedErr()
+		}
+		if err := r.ensurePrivateContactAllowed(ctx, userID, peer.ID, req.AllowPaidStars, absentCount); err != nil {
+			return nil, err
+		}
+	}
+	pendingMedia := make([]tg.InputMediaClass, 0, absentCount)
+	for i, item := range req.MultiMedia {
+		if !replays[i].found {
+			pendingMedia = append(pendingMedia, item.Media)
+		}
+	}
+	voiceOrRound, err := r.preflightVoiceOrRound(ctx, pendingMedia)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.ensureVoiceMessagesAllowed(ctx, userID, peer, voiceOrRound); err != nil {
+		return nil, err
+	}
 
 	// 必须在 resolveInputMedia 或发送任何 item 之前原子预留：首次请求若在第 N 条
 	// 失败，客户端只重试失败子集时仍从已绑定 random_id 恢复整包 grouped_id。
@@ -540,7 +585,7 @@ func (r *Router) onMessagesSendMultiMedia(ctx context.Context, req *tg.MessagesS
 			idempotencyFingerprint: idempotencyFingerprint,
 			idempotencyPreflighted: replays[i].checked,
 			message:                item.Message,
-			entities:               augmentAutoEntities(item.Message, item.Entities),
+			entities:               r.augmentAutoEntities(item.Message, item.Entities),
 			media:                  media,
 			silent:                 req.Silent,
 			noforwards:             req.Noforwards,
@@ -548,6 +593,7 @@ func (r *Router) onMessagesSendMultiMedia(ctx context.Context, req *tg.MessagesS
 			sendAsInput:            req.SendAs,
 			clearDraft:             clearDraftPending,
 			groupedID:              groupedID,
+			allowPaidStars:         req.AllowPaidStars,
 		}
 		var result tg.UpdatesClass
 		duplicate := false

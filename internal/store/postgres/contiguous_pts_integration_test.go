@@ -8,6 +8,88 @@ import (
 	"telesrv/internal/domain"
 )
 
+func TestReserveUserPtsRejectsZeroBeforeQuery(t *testing.T) {
+	if _, err := reserveUserPts(context.Background(), nil, 0, 1); err == nil {
+		t.Fatal("reserveUserPts user=0 succeeded, want fail-fast before DB access")
+	}
+}
+
+// TestAppendAllocatedFirstPtsRangeAndRollback covers both branches of the
+// single-statement watermark upsert through a legal durable update. A rolled
+// back first allocation must leave no watermark; the committed retry must
+// create one range ending at pts=3 with pts_count=3.
+func TestAppendAllocatedFirstPtsRangeAndRollback(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	suffix := randomSuffix(t)
+	owner, err := NewUserStore(pool).Create(ctx, domain.User{
+		AccessHash: 4,
+		Phone:      "+1555" + suffix + "01",
+		FirstName:  "FirstPtsRange",
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM users WHERE id = $1", owner.ID)
+	})
+
+	event := domain.UpdateEvent{
+		Type:       domain.UpdateEventDeleteMessages,
+		PtsCount:   3,
+		Date:       1700000003,
+		MessageIDs: []int{101, 102, 103},
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin rollback allocation: %v", err)
+	}
+	allocated, err := NewUpdateEventStore(tx).AppendAllocated(ctx, owner.ID, event)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("append allocated before rollback: %v", err)
+	}
+	if allocated.Pts != 3 || allocated.PtsCount != 3 {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("allocated before rollback = pts %d count %d, want 3/3", allocated.Pts, allocated.PtsCount)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("rollback first allocation: %v", err)
+	}
+
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM user_update_watermarks WHERE user_id=$1`, owner.ID).Scan(&rows); err != nil {
+		t.Fatalf("count watermark after rollback: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("watermark rows after rollback = %d, want 0", rows)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*)::int FROM user_update_events WHERE user_id=$1`, owner.ID).Scan(&rows); err != nil {
+		t.Fatalf("count events after rollback: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("event rows after rollback = %d, want 0", rows)
+	}
+
+	allocated, err = NewUpdateEventStore(pool).AppendAllocated(ctx, owner.ID, event)
+	if err != nil {
+		t.Fatalf("append allocated after rollback: %v", err)
+	}
+	if allocated.Pts != 3 || allocated.PtsCount != 3 {
+		t.Fatalf("committed allocation = pts %d count %d, want 3/3", allocated.Pts, allocated.PtsCount)
+	}
+	if pts, err := NewUpdateEventStore(pool).MaxContiguousPts(ctx, owner.ID); err != nil || pts != 3 {
+		t.Fatalf("MaxContiguousPts = %d err=%v, want 3", pts, err)
+	}
+	events, err := NewUpdateEventStore(pool).ListAfter(ctx, owner.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("ListAfter: %v", err)
+	}
+	if len(events) != 1 || events[0].Pts != 3 || events[0].PtsCount != 3 || len(events[0].MessageIDs) != 3 {
+		t.Fatalf("events = %+v, want one delete range ending at 3", events)
+	}
+}
+
 // TestAppendRejectsPtsHole 用真实 PG 验证显式 pts 写入不能制造空洞。
 func TestAppendRejectsPtsHole(t *testing.T) {
 	pool := testPool(t)

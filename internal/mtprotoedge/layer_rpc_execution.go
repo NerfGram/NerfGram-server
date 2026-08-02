@@ -82,7 +82,7 @@ var errLayerRPCResultIdentityMismatch = errors.New("layer RPC result does not ma
 // generated dispatcher. A LayerRPCHandler implementation must return the
 // result capability created from this exact admission; accepting a result from
 // another request would pair the wrong result TypeRef/profile with this
-// flight/cache identity even when both methods happen to share a Go type.
+// execution-ledger identity even when both methods happen to share a Go type.
 func bindAdmittedLayerRPCResult(request tlprofile.Admission, result tlprofile.Result) (*layerRPCResultEncoder, error) {
 	if result == nil {
 		return nil, nil

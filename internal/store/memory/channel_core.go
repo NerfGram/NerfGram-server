@@ -229,8 +229,15 @@ func (s *ChannelStore) GetChannelByID(_ context.Context, channelID int64) (domai
 	return cloneChannel(channel), nil
 }
 
-func publicPreviewableChannel(channel domain.Channel) bool {
-	return publicSearchableChannel(channel)
+func (s *ChannelStore) publicPreviewableChannelLocked(channel domain.Channel) bool {
+	hasActiveUsername := strings.TrimSpace(channel.Username) != ""
+	if !hasActiveUsername && s.usernameRegistry != nil {
+		hasActiveUsername = s.usernameRegistry.peerHasActiveCollectibleUsername(domain.Peer{
+			Type: domain.PeerTypeChannel,
+			ID:   channel.ID,
+		})
+	}
+	return publicSearchableChannel(channel) && hasActiveUsername
 }
 
 func minInt(a, b int) int {

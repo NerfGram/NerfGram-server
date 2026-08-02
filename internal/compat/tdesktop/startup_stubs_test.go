@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/iamxvbaba/td/tg"
+
+	"telesrv/internal/seed/appearance"
 )
 
 func TestNotifySettingsDefaultIsAudible(t *testing.T) {
@@ -41,6 +43,8 @@ func TestAppConfigIncludesStoryStealthPeriods(t *testing.T) {
 	values := make(map[string]float64)
 	strings := make(map[string]string)
 	arrays := make(map[string]*tg.JSONArray)
+	bools := make(map[string]bool)
+	boolSeen := make(map[string]bool)
 	if object, ok := got.Config.(*tg.JSONObject); ok && object != nil {
 		for _, entry := range object.Value {
 			if number, ok := entry.Value.(*tg.JSONNumber); ok {
@@ -52,12 +56,20 @@ func TestAppConfigIncludesStoryStealthPeriods(t *testing.T) {
 			if array, ok := entry.Value.(*tg.JSONArray); ok {
 				arrays[entry.Key] = array
 			}
+			if boolean, ok := entry.Value.(*tg.JSONBool); ok {
+				bools[entry.Key] = boolean.Value
+				boolSeen[entry.Key] = true
+			}
 		}
 	}
 	want := map[string]float64{
 		"stories_stealth_future_period":   1500,
 		"stories_stealth_past_period":     300,
 		"stories_stealth_cooldown_period": 10800,
+		"giveaway_boosts_per_premium":     4,
+		"giveaway_countries_max":          10,
+		"giveaway_add_peers_max":          10,
+		"giveaway_period_max":             604800,
 	}
 	for key, expected := range want {
 		if values[key] != expected {
@@ -67,6 +79,10 @@ func TestAppConfigIncludesStoryStealthPeriods(t *testing.T) {
 	if strings["rich_message_posting"] != "enabled" {
 		t.Fatalf("AppConfig[rich_message_posting] = %q, want enabled", strings["rich_message_posting"])
 	}
+	if !boolSeen["stars_purchase_blocked"] || bools["stars_purchase_blocked"] ||
+		!boolSeen["giveaway_gifts_purchase_available"] || !bools["giveaway_gifts_purchase_available"] {
+		t.Fatalf("AppConfig purchase flags = stars_blocked:%v giveaway_available:%v", bools["stars_purchase_blocked"], bools["giveaway_gifts_purchase_available"])
+	}
 	fragmentPrefixes := arrays["fragment_prefixes"]
 	if fragmentPrefixes == nil || len(fragmentPrefixes.Value) != 1 {
 		t.Fatalf("AppConfig[fragment_prefixes] = %#v, want one-element array", fragmentPrefixes)
@@ -75,12 +91,25 @@ func TestAppConfigIncludesStoryStealthPeriods(t *testing.T) {
 	if !ok || prefix.Value != "888" {
 		t.Fatalf("AppConfig[fragment_prefixes][0] = %#v, want \"888\"", fragmentPrefixes.Value[0])
 	}
+	directCurrencies := arrays["premium_playmarket_direct_currency_list"]
+	if directCurrencies == nil || !tgJSONArrayContainsString(directCurrencies, "USD") {
+		t.Fatalf("AppConfig[premium_playmarket_direct_currency_list] = %#v, want USD", directCurrencies)
+	}
 	if _, ok := AppConfig(got.Hash).(*tg.HelpAppConfigNotModified); !ok {
 		t.Fatalf("AppConfig(hash) = %#v, want notModified", AppConfig(got.Hash))
 	}
 	if _, ok := AppConfig(got.Hash - 1).(*tg.HelpAppConfig); !ok {
 		t.Fatalf("AppConfig(old hash) = %#v, want refreshed config", AppConfig(got.Hash-1))
 	}
+}
+
+func tgJSONArrayContainsString(array *tg.JSONArray, want string) bool {
+	for _, value := range array.Value {
+		if text, ok := value.(*tg.JSONString); ok && text.Value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestFallbackAppConfigOmitsMapboxToken(t *testing.T) {
@@ -216,6 +245,68 @@ func TestDefaultThemesAreDefaultFlaggedForPicker(t *testing.T) {
 	}
 }
 
+func TestDefaultThemeSettingsFollowDrKLOPickerIndices(t *testing.T) {
+	for _, theme := range DefaultThemeList() {
+		settings, ok := theme.GetSettings()
+		if !ok || len(settings) < 5 {
+			t.Fatalf("theme %d settings len=%d ok=%v, want five stable base slots", theme.ID, len(settings), ok)
+		}
+		if _, ok := settings[0].BaseTheme.(*tg.BaseThemeClassic); !ok {
+			t.Fatalf("theme %d settings[0] base = %T, want classic", theme.ID, settings[0].BaseTheme)
+		}
+		if _, ok := settings[1].BaseTheme.(*tg.BaseThemeDay); !ok {
+			t.Fatalf("theme %d settings[1] base = %T, want day", theme.ID, settings[1].BaseTheme)
+		}
+		if _, ok := settings[2].BaseTheme.(*tg.BaseThemeNight); !ok {
+			t.Fatalf("theme %d settings[2] base = %T, want night", theme.ID, settings[2].BaseTheme)
+		}
+		if _, ok := settings[3].BaseTheme.(*tg.BaseThemeTinted); !ok {
+			t.Fatalf("theme %d settings[3] base = %T, want tinted", theme.ID, settings[3].BaseTheme)
+		}
+		if _, ok := settings[4].BaseTheme.(*tg.BaseThemeArctic); !ok {
+			t.Fatalf("theme %d settings[4] base = %T, want arctic", theme.ID, settings[4].BaseTheme)
+		}
+		wallpaperClass, ok := settings[2].GetWallpaper()
+		wallpaper, fileWallpaper := wallpaperClass.(*tg.WallPaper)
+		if !ok || !fileWallpaper || !wallpaper.GetDark() {
+			t.Fatalf("theme %d night slot wallpaper = %#v ok=%v, want dark file wallpaper", theme.ID, wallpaperClass, ok)
+		}
+	}
+
+	if _, ok := ChatThemes(2026062501).(*tg.AccountThemesNotModified); ok {
+		t.Fatal("pre-fix chat theme hash was not invalidated after settings reorder")
+	}
+}
+
+func TestLookupDefaultThemeValidatesIdentity(t *testing.T) {
+	themes := DefaultThemeList()
+	if len(themes) == 0 {
+		t.Fatal("DefaultThemeList is empty")
+	}
+	for _, theme := range themes {
+		byID, ok := LookupDefaultTheme(&tg.InputTheme{
+			ID:         theme.ID,
+			AccessHash: theme.AccessHash,
+		})
+		if !ok || byID.ID != theme.ID {
+			t.Fatalf("lookup id %d = id %d ok=%v, want exact theme", theme.ID, byID.ID, ok)
+		}
+		bySlug, ok := LookupDefaultTheme(&tg.InputThemeSlug{Slug: theme.Slug})
+		if !ok || bySlug.ID != theme.ID {
+			t.Fatalf("lookup slug %q = id %d ok=%v, want %d", theme.Slug, bySlug.ID, ok, theme.ID)
+		}
+		if _, ok := LookupDefaultTheme(&tg.InputTheme{
+			ID:         theme.ID,
+			AccessHash: theme.AccessHash + 1,
+		}); ok {
+			t.Fatalf("lookup id %d accepted forged access hash", theme.ID)
+		}
+	}
+	if _, ok := LookupDefaultTheme(&tg.InputThemeSlug{}); ok {
+		t.Fatal("lookup accepted empty slug")
+	}
+}
+
 func TestUniqueGiftChatThemesIsEmptyHashableStub(t *testing.T) {
 	got, ok := UniqueGiftChatThemes(0).(*tg.AccountChatThemes)
 	if !ok {
@@ -296,6 +387,76 @@ func TestLookupWallPaperByIDAndSlug(t *testing.T) {
 	})
 	if !ok || len(multi) != 2 {
 		t.Fatalf("LookupWallPapers = len %d ok %v, want 2 true", len(multi), ok)
+	}
+}
+
+func TestDefaultThemeWallpaperReferencesResolve(t *testing.T) {
+	themes := DefaultThemeList()
+	var checked int
+	for _, theme := range themes {
+		settings, ok := theme.GetSettings()
+		if !ok {
+			continue
+		}
+		for i, setting := range settings {
+			wallpaperClass, ok := setting.GetWallpaper()
+			if !ok {
+				continue
+			}
+			wallpaper, ok := wallpaperClass.(*tg.WallPaper)
+			if !ok {
+				continue
+			}
+			checked++
+			byID, ok := LookupWallPaper(&tg.InputWallPaper{
+				ID:         wallpaper.ID,
+				AccessHash: wallpaper.AccessHash,
+			})
+			if !ok {
+				t.Fatalf("theme %d settings[%d] wallpaper id %d was not resolvable", theme.ID, i, wallpaper.ID)
+			}
+			gotByID, ok := byID.(*tg.WallPaper)
+			if !ok || gotByID.ID != wallpaper.ID || gotByID.AccessHash != wallpaper.AccessHash {
+				t.Fatalf("theme %d settings[%d] wallpaper id lookup = %#v", theme.ID, i, byID)
+			}
+			bySlug, ok := LookupWallPaper(&tg.InputWallPaperSlug{Slug: wallpaper.Slug})
+			if !ok {
+				t.Fatalf("theme %d settings[%d] wallpaper slug %q was not resolvable", theme.ID, i, wallpaper.Slug)
+			}
+			gotBySlug, ok := bySlug.(*tg.WallPaper)
+			if !ok || gotBySlug.Slug != wallpaper.Slug {
+				t.Fatalf("theme %d settings[%d] wallpaper slug lookup = %#v", theme.ID, i, bySlug)
+			}
+		}
+		byThemeSlug, ok := LookupWallPaper(&tg.InputWallPaperSlug{Slug: theme.Slug})
+		if !ok {
+			t.Fatalf("theme %d fallback wallpaper alias %q was not resolvable", theme.ID, theme.Slug)
+		}
+		aliasWallpaper, ok := byThemeSlug.(*tg.WallPaper)
+		firstWallpaperClass, firstOK := settings[0].GetWallpaper()
+		firstWallpaper, firstFile := firstWallpaperClass.(*tg.WallPaper)
+		if !ok || !firstOK || !firstFile || aliasWallpaper.ID != firstWallpaper.ID || aliasWallpaper.Slug != firstWallpaper.Slug {
+			t.Fatalf("theme %d fallback alias = %#v, want settings[0] wallpaper %#v", theme.ID, byThemeSlug, firstWallpaperClass)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("default themes exposed no file wallpapers")
+	}
+}
+
+func TestChatThemeWallpaperAliasRejectsAmbiguousSettings(t *testing.T) {
+	themes := []appearance.ChatTheme{{
+		Slug: "theme-alias",
+		Settings: []appearance.ThemeSettings{
+			{Wallpaper: appearance.Wallpaper{ID: 1, AccessHash: 11, Slug: "wallpaper-one"}},
+			{Wallpaper: appearance.Wallpaper{ID: 2, AccessHash: 22, Slug: "wallpaper-two"}},
+		},
+	}}
+	if _, ok := lookupChatThemeWallpaperAlias(themes, "theme-alias"); ok {
+		t.Fatal("ambiguous theme wallpaper alias was accepted")
+	}
+	if _, ok := lookupChatThemeWallpaperAlias(themes, "unknown"); ok {
+		t.Fatal("unknown theme wallpaper alias was accepted")
 	}
 }
 

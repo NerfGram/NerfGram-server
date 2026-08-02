@@ -865,10 +865,23 @@ func (s *Service) CancelCodeForAuthKey(ctx context.Context, authKeyID [8]byte, p
 	return s.cancelCode(ctx, authKeyID, phone, phoneCodeHash)
 }
 
+// LoginEmailResetAvailable reports whether this deployment can complete the
+// SMS fallback promised by auth.resetLoginEmail. Fixed development codes are
+// deliberately not a recovery channel.
+func (s *Service) LoginEmailResetAvailable() bool {
+	return s != nil && s.phoneCodeSender != nil && s.codes != nil && s.users != nil
+}
+
 // ConsumeLoginEmailReset authorizes auth.resetLoginEmail with the exact
 // email-login hash previously issued for this phone owner. Possession of only
 // a phone number is never sufficient to remove an authentication factor.
 func (s *Service) ConsumeLoginEmailReset(ctx context.Context, phone, phoneCodeHash string) (int64, error) {
+	// Refuse before consuming the email proof or clearing any account state. If
+	// there is no real SMS sender, the successor code would be the public
+	// development code and could strip the login-email factor.
+	if !s.LoginEmailResetAvailable() || s.codes == nil {
+		return 0, ErrCodeInvalid
+	}
 	phone = normalizePhone(phone)
 	rec, found, err := s.codes.Get(ctx, phoneCodeHash)
 	if err != nil {
@@ -1459,18 +1472,7 @@ func (s *Service) ResetAuthorization(ctx context.Context, userID, hash int64) (d
 	if revoker, ok := s.auths.(authorizationRevoker); ok {
 		return revoker.RevokeByHash(ctx, userID, hash)
 	}
-	target, found, err := s.authorizationByHash(ctx, userID, hash)
-	if err != nil || !found {
-		return target, found, err
-	}
-	if err := s.deleteAuthKey(ctx, target.AuthKeyID); err != nil {
-		return target, true, err
-	}
-	deleted, found, err := s.auths.DeleteByHash(ctx, userID, hash)
-	if err != nil || !found {
-		return deleted, found, err
-	}
-	return deleted, true, nil
+	return s.auths.DeleteByHash(ctx, userID, hash)
 }
 
 func (s *Service) ResetAuthorizations(ctx context.Context, userID int64, keepAuthKeyID [8]byte) ([]domain.Authorization, error) {
@@ -1480,54 +1482,7 @@ func (s *Service) ResetAuthorizations(ctx context.Context, userID int64, keepAut
 	if revoker, ok := s.auths.(authorizationRevoker); ok {
 		return revoker.RevokeByUserExcept(ctx, userID, keepAuthKeyID)
 	}
-	targets, err := s.authorizationsByUserExcept(ctx, userID, keepAuthKeyID)
-	if err != nil {
-		return nil, err
-	}
-	for _, a := range targets {
-		if err := s.deleteAuthKey(ctx, a.AuthKeyID); err != nil {
-			return nil, err
-		}
-	}
-	deleted, err := s.auths.DeleteByUserExcept(ctx, userID, keepAuthKeyID)
-	if err != nil {
-		return nil, err
-	}
-	return deleted, nil
-}
-
-func (s *Service) deleteAuthKey(ctx context.Context, authKeyID [8]byte) error {
-	if s == nil || s.authKeys == nil || authKeyID == ([8]byte{}) {
-		return nil
-	}
-	return s.authKeys.Delete(ctx, authKeyID)
-}
-
-func (s *Service) authorizationByHash(ctx context.Context, userID, hash int64) (domain.Authorization, bool, error) {
-	items, err := s.auths.ListByUser(ctx, userID)
-	if err != nil {
-		return domain.Authorization{}, false, err
-	}
-	for _, a := range items {
-		if a.Hash == hash {
-			return a, true, nil
-		}
-	}
-	return domain.Authorization{}, false, nil
-}
-
-func (s *Service) authorizationsByUserExcept(ctx context.Context, userID int64, keepAuthKeyID [8]byte) ([]domain.Authorization, error) {
-	items, err := s.auths.ListByUser(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]domain.Authorization, 0, len(items))
-	for _, a := range items {
-		if a.AuthKeyID != keepAuthKeyID {
-			out = append(out, a)
-		}
-	}
-	return out, nil
+	return s.auths.DeleteByUserExcept(ctx, userID, keepAuthKeyID)
 }
 
 func (s *Service) bind(ctx context.Context, auth domain.Authorization, userID int64) error {

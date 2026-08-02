@@ -30,6 +30,7 @@ const (
 	PurposeLoginEmailChange Purpose = "login_email_change"
 	PurposeChangePhone      Purpose = "change_phone"
 	PurposeConfirmPhone     Purpose = "confirm_phone"
+	PurposePasswordRecovery Purpose = "password_recovery"
 )
 
 type Request struct {
@@ -47,7 +48,7 @@ func (r Request) Validate(now time.Time) error {
 		return fmt.Errorf("delivery id is empty or too long")
 	}
 	switch r.Purpose {
-	case PurposeLoginEmail, PurposeLoginSMS, PurposeLoginEmailSetup, PurposeLoginEmailChange, PurposeChangePhone, PurposeConfirmPhone:
+	case PurposeLoginEmail, PurposeLoginSMS, PurposeLoginEmailSetup, PurposeLoginEmailChange, PurposeChangePhone, PurposeConfirmPhone, PurposePasswordRecovery:
 	default:
 		return fmt.Errorf("unsupported delivery purpose %q", r.Purpose)
 	}

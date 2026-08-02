@@ -71,7 +71,7 @@ func (s *MessageStore) DeleteMessages(ctx context.Context, req domain.DeleteMess
 		}
 		deleted = append(deleted, deletedRowsFromPrivateRows(peerRows)...)
 	}
-	res, err = s.finishDeleteMessagesTx(ctx, tx, qtx, req.OwnerUserID, req.OriginAuthKeyID, req.OriginSessionID, req.Date, deleted, false)
+	res, err = s.finishDeleteMessagesTx(ctx, tx, qtx, req.OwnerUserID, req.OriginAuthKeyID, req.OriginSessionID, req.Date, deleted, nil)
 	if err != nil {
 		return res, err
 	}
@@ -118,9 +118,53 @@ type deletedOwnerPeerKey struct {
 	peer   domain.Peer
 }
 
-func (s *MessageStore) finishDeleteMessagesTx(ctx context.Context, db sqlcgen.DBTX, q *sqlcgen.Queries, ownerUserID int64, excludeAuthKeyID [8]byte, excludeSessionID int64, date int, rows []deletedBox, preserveEmptyDialogs bool) (domain.DeleteMessagesResult, error) {
+type historyClearAnchor struct {
+	userID       int64
+	peer         domain.Peer
+	boxID        int
+	uid          int64
+	messageDate  int
+	materialized bool
+}
+
+func (s *MessageStore) loadHistoryClearAnchor(ctx context.Context, q *sqlcgen.Queries, userID int64, peer domain.Peer) (historyClearAnchor, bool, error) {
+	top, err := q.TopVisibleMessageBoxByPeer(ctx, sqlcgen.TopVisibleMessageBoxByPeerParams{
+		OwnerUserID: userID,
+		PeerType:    string(peer.Type),
+		PeerID:      peer.ID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return historyClearAnchor{}, false, nil
+	}
+	if err != nil {
+		return historyClearAnchor{}, false, fmt.Errorf("load history clear top: %w", err)
+	}
+	row, err := q.GetMessageBoxForEdit(ctx, sqlcgen.GetMessageBoxForEditParams{
+		OwnerUserID: userID,
+		BoxID:       top.BoxID,
+		PeerType:    string(peer.Type),
+		PeerID:      peer.ID,
+	})
+	if err != nil {
+		return historyClearAnchor{}, false, fmt.Errorf("lock history clear top: %w", err)
+	}
+	media, err := decodeMessageMedia(row.MediaJson)
+	if err != nil {
+		return historyClearAnchor{}, false, fmt.Errorf("decode history clear top media: %w", err)
+	}
+	return historyClearAnchor{
+		userID:       userID,
+		peer:         peer,
+		boxID:        int(row.BoxID),
+		uid:          row.PrivateMessageID,
+		messageDate:  int(row.MessageDate),
+		materialized: domain.IsHistoryClearServiceMessage(domain.Message{Media: media}),
+	}, true, nil
+}
+
+func (s *MessageStore) finishDeleteMessagesTx(ctx context.Context, db sqlcgen.DBTX, q *sqlcgen.Queries, ownerUserID int64, excludeAuthKeyID [8]byte, excludeSessionID int64, date int, rows []deletedBox, anchors map[int64]historyClearAnchor) (domain.DeleteMessagesResult, error) {
 	res := domain.DeleteMessagesResult{OwnerUserID: ownerUserID}
-	if len(rows) == 0 {
+	if len(rows) == 0 && len(anchors) == 0 {
 		return res, nil
 	}
 	peersByOwner := make(map[int64]map[domain.Peer]struct{})
@@ -145,6 +189,20 @@ func (s *MessageStore) finishDeleteMessagesTx(ctx context.Context, db sqlcgen.DB
 			incomingDeletedByPeer[key][row.boxID] = struct{}{}
 		}
 	}
+	for userID, anchor := range anchors {
+		if anchor.boxID <= 0 || anchor.peer.ID == 0 {
+			continue
+		}
+		if peersByOwner[userID] == nil {
+			peersByOwner[userID] = make(map[domain.Peer]struct{})
+		}
+		peersByOwner[userID][anchor.peer] = struct{}{}
+		if !anchor.materialized {
+			// 首次物化锚点会用一条 max_id=anchor 的真实 read update 覆盖该
+			// peer 的全部已读校正；不能再为本批删除的 incoming prefix 重复推进。
+			delete(incomingDeletedByPeer, deletedOwnerPeerKey{userID: userID, peer: anchor.peer})
+		}
+	}
 	// 按 owner 升序重建 dialog，使两个反向 delete（X 删与 Y 的会话 / Y 删与 X 的会话）以一致顺序
 	// 获取 dialog 行锁，配合下方 watermark 的升序推进，彻底避免 delete-delete 之间的 AB-BA 死锁。
 	rebuildOwners := make([]int64, 0, len(peersByOwner))
@@ -154,11 +212,12 @@ func (s *MessageStore) finishDeleteMessagesTx(ctx context.Context, db sqlcgen.DB
 	sort.Slice(rebuildOwners, func(i, j int) bool { return rebuildOwners[i] < rebuildOwners[j] })
 	for _, userID := range rebuildOwners {
 		for peer := range peersByOwner[userID] {
-			// just_clear（preserveEmptyDialogs）是请求者的本端语义"清空但保留我这侧
-			// 空会话"。revoke 反查出的对端并未选择 just_clear，其空会话应按普通删除
-			// 处理（无存活消息则移除 dialog），不能也被保留成空会话。
-			preserve := preserveEmptyDialogs && userID == ownerUserID
-			if err := rebuildDialogAfterMessageDelete(ctx, q, userID, peer, preserve); err != nil {
+			if anchor, ok := anchors[userID]; ok && anchor.peer == peer && !anchor.materialized {
+				// 先分配 edit PTS 并原位转换锚点，再按转换后的 outgoing
+				// 状态重算 dialog；否则会短暂把 incoming anchor 计为未读。
+				continue
+			}
+			if err := rebuildDialogAfterMessageDelete(ctx, q, userID, peer); err != nil {
 				return res, err
 			}
 		}
@@ -168,8 +227,17 @@ func (s *MessageStore) finishDeleteMessagesTx(ctx context.Context, db sqlcgen.DB
 		return res, err
 	}
 
-	ownerIDs := make([]int64, 0, len(idsByOwner))
+	ownerSet := make(map[int64]struct{}, len(idsByOwner)+len(anchors))
 	for userID := range idsByOwner {
+		ownerSet[userID] = struct{}{}
+	}
+	for userID, anchor := range anchors {
+		if !anchor.materialized {
+			ownerSet[userID] = struct{}{}
+		}
+	}
+	ownerIDs := make([]int64, 0, len(ownerSet))
+	for userID := range ownerSet {
 		ownerIDs = append(ownerIDs, userID)
 	}
 	sort.Slice(ownerIDs, func(i, j int) bool { return ownerIDs[i] < ownerIDs[j] })
@@ -177,36 +245,56 @@ func (s *MessageStore) finishDeleteMessagesTx(ctx context.Context, db sqlcgen.DB
 	res.Deleted = make([]domain.DeletedMessagesForUser, 0, len(ownerIDs))
 	for _, userID := range ownerIDs {
 		ids := normalizeMessageIDs(idsByOwner[userID])
-		if len(ids) == 0 {
+		corrections := readCorrectionsByOwner[userID]
+		anchor, hasAnchor := anchors[userID]
+		materializeAnchor := hasAnchor && !anchor.materialized
+		totalPtsCount := len(ids) + len(corrections)
+		if materializeAnchor {
+			totalPtsCount += 2 // updateReadHistoryInbox + updateEditMessage
+		}
+		if totalPtsCount == 0 {
 			continue
 		}
-		corrections := readCorrectionsByOwner[userID]
-		totalPtsCount := len(ids) + len(corrections)
 		pts, err := s.reservePtsN(ctx, db, userID, totalPtsCount)
 		if err != nil {
 			return res, fmt.Errorf("allocate delete messages pts: %w", err)
 		}
-		deletePts := pts - len(corrections)
-		event := domain.UpdateEvent{
+		cursor := pts - totalPtsCount
+		item := domain.DeletedMessagesForUser{
 			UserID:     userID,
-			Type:       domain.UpdateEventDeleteMessages,
-			Pts:        deletePts,
-			PtsCount:   len(ids),
-			Date:       date,
 			MessageIDs: ids,
+			Pts:        pts,
+			PtsCount:   totalPtsCount,
+			Events:     make([]domain.UpdateEvent, 0, 1+len(corrections)+2),
 		}
-		deleteIDsJSON, err := encodeEventMessageIDs(event.MessageIDs)
-		if err != nil {
-			return res, fmt.Errorf("encode sender delete receipt ids: %w", err)
+		dispatchAuthKeyID := [8]byte{}
+		dispatchSessionID := int64(0)
+		if userID == ownerUserID {
+			dispatchAuthKeyID = excludeAuthKeyID
+			dispatchSessionID = excludeSessionID
 		}
-		senderPrivateIDs := make([]int64, 0, len(rows))
-		for _, row := range rows {
-			if row.ownerUserID == userID && row.messageSenderID == userID && row.privateMessageID != 0 {
-				senderPrivateIDs = append(senderPrivateIDs, row.privateMessageID)
+		if len(ids) > 0 {
+			cursor += len(ids)
+			event := domain.UpdateEvent{
+				UserID:     userID,
+				Type:       domain.UpdateEventDeleteMessages,
+				Pts:        cursor,
+				PtsCount:   len(ids),
+				Date:       date,
+				MessageIDs: ids,
 			}
-		}
-		if len(senderPrivateIDs) > 0 {
-			if _, err := db.Exec(ctx, `
+			deleteIDsJSON, err := encodeEventMessageIDs(event.MessageIDs)
+			if err != nil {
+				return res, fmt.Errorf("encode sender delete receipt ids: %w", err)
+			}
+			senderPrivateIDs := make([]int64, 0, len(rows))
+			for _, row := range rows {
+				if row.ownerUserID == userID && row.messageSenderID == userID && row.privateMessageID != 0 {
+					senderPrivateIDs = append(senderPrivateIDs, row.privateMessageID)
+				}
+			}
+			if len(senderPrivateIDs) > 0 {
+				if _, err := db.Exec(ctx, `
 UPDATE private_messages
 SET sender_delete_pts = $3,
     sender_delete_pts_count = $4,
@@ -215,34 +303,27 @@ SET sender_delete_pts = $3,
 WHERE sender_user_id = $1
   AND id = ANY($2::bigint[])
   AND sender_box_id > 0`, userID, senderPrivateIDs, event.Pts, event.PtsCount, event.Date, deleteIDsJSON); err != nil {
-				return res, fmt.Errorf("save sender delete replay receipt: %w", err)
+					return res, fmt.Errorf("save sender delete replay receipt: %w", err)
+				}
 			}
+			if err := appendDeleteMessagesEvent(ctx, q, event); err != nil {
+				return res, err
+			}
+			if err := enqueueDispatch(ctx, q, sqlcgen.EnqueueDispatchParams{
+				TargetUserID:     userID,
+				Pts:              int32(event.Pts),
+				EventType:        string(domain.UpdateEventDeleteMessages),
+				ExcludeAuthKeyID: authKeyIDToInt64(dispatchAuthKeyID),
+				ExcludeSessionID: dispatchSessionID,
+			}); err != nil {
+				return res, fmt.Errorf("enqueue delete messages dispatch: %w", err)
+			}
+			item.Event = event
+			item.Events = append(item.Events, event)
 		}
-		if err := appendDeleteMessagesEvent(ctx, q, event); err != nil {
-			return res, err
-		}
-		dispatchAuthKeyID := [8]byte{}
-		dispatchSessionID := int64(0)
-		if userID == ownerUserID {
-			dispatchAuthKeyID = excludeAuthKeyID
-			dispatchSessionID = excludeSessionID
-		}
-		if err := enqueueDispatch(ctx, q, sqlcgen.EnqueueDispatchParams{
-			TargetUserID:     userID,
-			Pts:              int32(deletePts),
-			EventType:        string(domain.UpdateEventDeleteMessages),
-			ExcludeAuthKeyID: authKeyIDToInt64(dispatchAuthKeyID),
-			ExcludeSessionID: dispatchSessionID,
-		}); err != nil {
-			return res, fmt.Errorf("enqueue delete messages dispatch: %w", err)
-		}
-		res.Deleted = append(res.Deleted, domain.DeletedMessagesForUser{
-			UserID:     userID,
-			MessageIDs: ids,
-			Event:      event,
-		})
-		for i, correction := range corrections {
-			correction.Pts = deletePts + i + 1
+		for _, correction := range corrections {
+			cursor++
+			correction.Pts = cursor
 			if err := appendUserUpdateEvent(ctx, db, q, userID, correction); err != nil {
 				return res, fmt.Errorf("append delete unread correction event: %w", err)
 			}
@@ -263,9 +344,140 @@ WHERE sender_user_id = $1
 			}); err != nil {
 				return res, fmt.Errorf("enqueue delete unread correction dispatch: %w", err)
 			}
+			item.Events = append(item.Events, correction)
 		}
+		if materializeAnchor {
+			readPts := cursor + 1
+			editPts := readPts + 1
+			msg, err := materializeHistoryClearAnchorTx(ctx, db, anchor, editPts)
+			if err != nil {
+				return res, err
+			}
+			if err := rebuildDialogAfterMessageDelete(ctx, q, userID, anchor.peer); err != nil {
+				return res, err
+			}
+			readEvent := domain.UpdateEvent{
+				UserID:           userID,
+				Type:             domain.UpdateEventReadHistoryInbox,
+				Pts:              readPts,
+				PtsCount:         1,
+				Date:             date,
+				Peer:             anchor.peer,
+				MaxID:            anchor.boxID,
+				StillUnreadCount: 0,
+			}
+			if err := appendUserUpdateEvent(ctx, db, q, userID, readEvent); err != nil {
+				return res, fmt.Errorf("append history clear read event: %w", err)
+			}
+			if err := q.AdvanceDialogReadInboxFloor(ctx, sqlcgen.AdvanceDialogReadInboxFloorParams{
+				UserID:         userID,
+				PeerType:       string(anchor.peer.Type),
+				PeerID:         anchor.peer.ID,
+				ReadInboxMaxID: int32(anchor.boxID),
+			}); err != nil {
+				return res, fmt.Errorf("advance history clear read inbox: %w", err)
+			}
+			if err := enqueueDispatch(ctx, q, sqlcgen.EnqueueDispatchParams{
+				TargetUserID:     userID,
+				Pts:              int32(readPts),
+				EventType:        string(domain.UpdateEventReadHistoryInbox),
+				ExcludeAuthKeyID: authKeyIDToInt64(dispatchAuthKeyID),
+				ExcludeSessionID: dispatchSessionID,
+			}); err != nil {
+				return res, fmt.Errorf("enqueue history clear read dispatch: %w", err)
+			}
+			editEvent := domain.UpdateEvent{
+				UserID:   userID,
+				Type:     domain.UpdateEventEditMessage,
+				Pts:      editPts,
+				PtsCount: 1,
+				Date:     date,
+				Message:  msg,
+			}
+			if err := appendUserUpdateEvent(ctx, db, q, userID, editEvent); err != nil {
+				return res, fmt.Errorf("append history clear edit event: %w", err)
+			}
+			if err := enqueueDispatch(ctx, q, sqlcgen.EnqueueDispatchParams{
+				TargetUserID:     userID,
+				Pts:              int32(editPts),
+				EventType:        string(domain.UpdateEventEditMessage),
+				ExcludeAuthKeyID: authKeyIDToInt64(dispatchAuthKeyID),
+				ExcludeSessionID: dispatchSessionID,
+			}); err != nil {
+				return res, fmt.Errorf("enqueue history clear edit dispatch: %w", err)
+			}
+			item.Events = append(item.Events, readEvent, editEvent)
+			cursor = editPts
+		}
+		if cursor != pts {
+			return res, fmt.Errorf("delete history pts cursor %d does not reach reserved pts %d", cursor, pts)
+		}
+		res.Deleted = append(res.Deleted, item)
 	}
 	return res, nil
+}
+
+func materializeHistoryClearAnchorTx(ctx context.Context, db sqlcgen.DBTX, anchor historyClearAnchor, pts int) (domain.Message, error) {
+	msg := domain.NewHistoryClearMessage(anchor.userID, anchor.peer, anchor.boxID, anchor.uid, anchor.messageDate, pts)
+	mediaJSON, err := encodeMessageMedia(msg.Media)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("encode history clear media: %w", err)
+	}
+	tag, err := db.Exec(ctx, `
+UPDATE message_boxes
+SET from_user_id = $3,
+    ttl_period = 0,
+    expires_at = 0,
+    edit_date = 0,
+    hide_edited = false,
+    outgoing = true,
+    body = '',
+    entities = '[]'::jsonb,
+    silent = false,
+    noforwards = false,
+    reply_to_msg_id = 0,
+    reply_to_peer_type = '',
+    reply_to_peer_id = 0,
+    reply_to_top_id = 0,
+    reply_to_story_id = 0,
+    quote_text = '',
+    quote_entities = '[]'::jsonb,
+    quote_offset = 0,
+    fwd_from_peer_type = '',
+    fwd_from_peer_id = 0,
+    fwd_from_name = '',
+    fwd_date = 0,
+    fwd_saved_from_peer_type = '',
+    fwd_saved_from_peer_id = 0,
+    fwd_saved_from_msg_id = 0,
+    saved_peer_type = '',
+    saved_peer_id = 0,
+    pts = $4,
+    media = $5::jsonb,
+    media_unread = false,
+    reaction_unread = false,
+    pinned = false,
+    via_bot_id = 0,
+    grouped_id = 0,
+    effect = 0,
+    reply_markup = '{}'::jsonb,
+    rich_message = '{}'::jsonb
+WHERE owner_user_id = $1
+  AND box_id = $2
+  AND NOT deleted`, anchor.userID, int32(anchor.boxID), anchor.userID, int32(pts), mediaJSON)
+	if err != nil {
+		return domain.Message{}, fmt.Errorf("materialize history clear anchor: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.Message{}, fmt.Errorf("materialize history clear anchor: box %d disappeared", anchor.boxID)
+	}
+	if _, err := db.Exec(ctx, `DELETE FROM message_box_media WHERE owner_user_id = $1 AND box_id = $2`, anchor.userID, int32(anchor.boxID)); err != nil {
+		return domain.Message{}, fmt.Errorf("delete history clear media index: %w", err)
+	}
+	if _, err := db.Exec(ctx, `DELETE FROM saved_message_reaction_tags WHERE user_id = $1 AND message_box_id = $2`, anchor.userID, int32(anchor.boxID)); err != nil {
+		return domain.Message{}, fmt.Errorf("delete history clear saved tags: %w", err)
+	}
+	return msg, nil
 }
 
 func maxDeletedMessageID(ids map[int]struct{}) int {
@@ -278,23 +490,13 @@ func maxDeletedMessageID(ids map[int]struct{}) int {
 	return maxID
 }
 
-func rebuildDialogAfterMessageDelete(ctx context.Context, q *sqlcgen.Queries, userID int64, peer domain.Peer, preserveEmpty bool) error {
+func rebuildDialogAfterMessageDelete(ctx context.Context, q *sqlcgen.Queries, userID int64, peer domain.Peer) error {
 	top, err := q.TopVisibleMessageBoxByPeer(ctx, sqlcgen.TopVisibleMessageBoxByPeerParams{
 		OwnerUserID: userID,
 		PeerType:    string(peer.Type),
 		PeerID:      peer.ID,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		if preserveEmpty {
-			if err := q.ClearDialogAfterHistoryDelete(ctx, sqlcgen.ClearDialogAfterHistoryDeleteParams{
-				UserID:   userID,
-				PeerType: string(peer.Type),
-				PeerID:   peer.ID,
-			}); err != nil {
-				return fmt.Errorf("clear empty dialog after history delete: %w", err)
-			}
-			return nil
-		}
 		if err := q.DeleteDialogByPeer(ctx, sqlcgen.DeleteDialogByPeerParams{
 			UserID:   userID,
 			PeerType: string(peer.Type),

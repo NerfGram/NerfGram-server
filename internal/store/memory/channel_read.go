@@ -252,13 +252,22 @@ func (s *ChannelStore) ReadChannelMentions(_ context.Context, req domain.ReadCha
 func (s *ChannelStore) ReadChannelHistory(_ context.Context, req domain.ReadChannelHistoryRequest) (domain.ReadChannelHistoryResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	channel, err := s.channelForMemberLocked(req.UserID, req.ChannelID)
+	channel, _, readOnly, err := s.channelForViewerLocked(req.UserID, req.ChannelID)
 	if err != nil {
 		return domain.ReadChannelHistoryResult{}, err
 	}
 	maxID := req.MaxID
 	if maxID <= 0 || maxID > channel.TopMessageID {
 		maxID = channel.TopMessageID
+	}
+	if readOnly {
+		return domain.ReadChannelHistoryResult{
+			ChannelID: req.ChannelID,
+			MaxID:     maxID,
+			ReadOnly:  true,
+			Pts:       channel.Pts,
+			Forum:     channel.Forum,
+		}, nil
 	}
 	member := s.members[req.ChannelID][req.UserID]
 	previous := member.ReadInboxMaxID

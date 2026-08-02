@@ -24,9 +24,17 @@ func (s *ChannelStore) ListChannelHistory(_ context.Context, viewerUserID int64,
 	// 静态过滤（不含 offset 锚点的方向条件），结果保持 id 降序。
 	query := strings.ToLower(strings.TrimSpace(filter.Query))
 	matched := make([]domain.ChannelMessage, 0, len(items))
-	monoforumUserView := channel.Monoforum && !isChannelAdmin(member)
+	monoforumUserView := channel.Monoforum && !member.CanManageDirectMessages()
+	anchorID := 0
+	if filter.IncludeHistoryClearAnchor &&
+		member.HistoryClearAnchorID > 0 &&
+		member.HistoryClearAnchorID == member.AvailableMinID {
+		anchorID = member.HistoryClearAnchorID
+	}
+	anchorSeen := false
 	for _, msg := range items {
-		if msg.Deleted {
+		isAnchor := anchorID > 0 && msg.ID == anchorID
+		if msg.Deleted && !isAnchor {
 			continue
 		}
 		if channel.Monoforum {
@@ -37,8 +45,17 @@ func (s *ChannelStore) ListChannelHistory(_ context.Context, viewerUserID int64,
 				continue
 			}
 		}
-		if msg.ID <= member.AvailableMinID {
+		if msg.ID < member.AvailableMinID || (msg.ID == member.AvailableMinID && !isAnchor) {
 			continue
+		}
+		if isAnchor {
+			msg = domain.ProjectChannelHistoryClearMessage(
+				msg,
+				filter.ChannelID,
+				member.HistoryClearAnchorID,
+				member.HistoryClearAnchorDate,
+			)
+			anchorSeen = true
 		}
 		if filter.PinnedOnly && !msg.Pinned {
 			continue
@@ -65,6 +82,38 @@ func (s *ChannelStore) ListChannelHistory(_ context.Context, viewerUserID int64,
 			continue
 		}
 		matched = append(matched, msg)
+	}
+	if anchorID > 0 && !anchorSeen {
+		msg := domain.ProjectChannelHistoryClearMessage(
+			domain.ChannelMessage{},
+			filter.ChannelID,
+			member.HistoryClearAnchorID,
+			member.HistoryClearAnchorDate,
+		)
+		if (filter.MinDate <= 0 || msg.Date > filter.MinDate) &&
+			(filter.MaxDate <= 0 || msg.Date < filter.MaxDate) &&
+			(filter.MaxID <= 0 || msg.ID <= filter.MaxID) &&
+			(filter.MinID <= 0 || msg.ID > filter.MinID) &&
+			!filter.PinnedOnly &&
+			!filter.MusicOnly &&
+			query == "" &&
+			filter.SenderUserID == 0 {
+			matched = append(matched, msg)
+		}
+	}
+	extraChannels := []domain.Channel(nil)
+	if channel.Monoforum && channel.LinkedMonoforumID != 0 {
+		if parent, ok := s.channels[channel.LinkedMonoforumID]; ok && !parent.Deleted {
+			extraChannels = append(extraChannels, cloneChannel(parent))
+		}
+	}
+	if filter.CountOnly {
+		return domain.ChannelHistory{
+			Channel:  channel,
+			Self:     member,
+			Channels: extraChannels,
+			Count:    len(matched),
+		}, nil
 	}
 	// add_offset 决定加载方向（对齐 postgres ListChannelHistory）：
 	//   >= 0           backward：锚点更旧方向（不含锚点），先跳过 add_offset 条
@@ -160,14 +209,12 @@ func (s *ChannelStore) ListChannelHistory(_ context.Context, viewerUserID int64,
 	if hasMoreOlder {
 		count = len(out) + 1
 	}
+	if filter.NeedTotalCount {
+		count = len(matched)
+	}
 	s.populateChannelMessageRepliesLocked(viewerUserID, filter.ChannelID, out)
 	s.populateChannelMessageReactionsLocked(viewerUserID, channel, out)
-	extraChannels := []domain.Channel(nil)
-	if channel.Monoforum && channel.LinkedMonoforumID != 0 {
-		if parent, ok := s.channels[channel.LinkedMonoforumID]; ok && !parent.Deleted {
-			extraChannels = append(extraChannels, cloneChannel(parent))
-		}
-	}
+	projectMemoryChannelHistoryClearMessages(channel.ID, member, out)
 	return domain.ChannelHistory{
 		Channel:  channel,
 		Self:     member,
@@ -213,7 +260,7 @@ func (s *ChannelStore) SearchJoinedMessages(_ context.Context, viewerUserID int6
 		}
 		member, ok := s.members[channelID][viewerUserID]
 		joined := ok && member.Status == domain.ChannelMemberActive && !member.BannedRights.ViewMessages
-		publicPreview := req.AllowPublicPreview && publicPreviewableChannel(channel) &&
+		publicPreview := req.AllowPublicPreview && s.publicPreviewableChannelLocked(channel) &&
 			(!ok || member.Status != domain.ChannelMemberKicked && !member.BannedRights.ViewMessages)
 		if !joined && !publicPreview {
 			continue
@@ -307,15 +354,60 @@ func (s *ChannelStore) GetChannelMessages(_ context.Context, viewerUserID, chann
 		if _, ok := wanted[msg.ID]; !ok {
 			continue
 		}
+		if msg.ID == member.HistoryClearAnchorID &&
+			member.HistoryClearAnchorID == member.AvailableMinID {
+			messages = append(messages, domain.ProjectChannelHistoryClearMessage(
+				msg,
+				channelID,
+				member.HistoryClearAnchorID,
+				member.HistoryClearAnchorDate,
+			))
+			delete(wanted, msg.ID)
+			continue
+		}
 		if msg.Deleted || msg.ID <= member.AvailableMinID {
 			continue
 		}
+		if !channelMessageVisibleToViewerLocked(channel, member, viewerUserID, msg) {
+			continue
+		}
 		messages = append(messages, cloneChannelMessage(msg))
+		delete(wanted, msg.ID)
+	}
+	if member.HistoryClearAnchorID > 0 &&
+		member.HistoryClearAnchorID == member.AvailableMinID {
+		if _, ok := wanted[member.HistoryClearAnchorID]; ok {
+			messages = append(messages, domain.ProjectChannelHistoryClearMessage(
+				domain.ChannelMessage{},
+				channelID,
+				member.HistoryClearAnchorID,
+				member.HistoryClearAnchorDate,
+			))
+		}
 	}
 	sort.Slice(messages, func(i, j int) bool { return messages[i].ID > messages[j].ID })
 	s.populateChannelMessageRepliesLocked(viewerUserID, channelID, messages)
 	s.populateChannelMessageReactionsLocked(viewerUserID, channel, messages)
+	projectMemoryChannelHistoryClearMessages(channelID, member, messages)
 	return domain.ChannelHistory{Channel: channel, Self: member, Messages: messages, Count: len(messages)}, nil
+}
+
+func projectMemoryChannelHistoryClearMessages(channelID int64, member domain.ChannelMember, messages []domain.ChannelMessage) {
+	if member.HistoryClearAnchorID <= 0 ||
+		member.HistoryClearAnchorID != member.AvailableMinID {
+		return
+	}
+	for i := range messages {
+		if messages[i].ID != member.HistoryClearAnchorID {
+			continue
+		}
+		messages[i] = domain.ProjectChannelHistoryClearMessage(
+			messages[i],
+			channelID,
+			member.HistoryClearAnchorID,
+			member.HistoryClearAnchorDate,
+		)
+	}
 }
 
 func (s *ChannelStore) ListStoryMessageForwards(_ context.Context, req domain.StoryMessageForwardListRequest) (domain.StoryMessageForwardList, error) {
@@ -620,7 +712,38 @@ func (s *ChannelStore) visibleTopMessageIDForMemberLocked(channel domain.Channel
 			return msg.ID
 		}
 	}
+	if member.HistoryClearAnchorID > 0 &&
+		member.HistoryClearAnchorID == member.AvailableMinID {
+		return member.HistoryClearAnchorID
+	}
 	return 0
+}
+
+func (s *ChannelStore) channelMessageForMemberLocked(userID, channelID int64, messageID int) (domain.ChannelMessage, bool) {
+	member, ok := s.members[channelID][userID]
+	if !ok {
+		msg, found := s.findMessageLocked(channelID, messageID)
+		if !found || msg.Deleted {
+			return domain.ChannelMessage{}, false
+		}
+		return cloneChannelMessage(msg), true
+	}
+	if member.HistoryClearAnchorID > 0 &&
+		member.HistoryClearAnchorID == member.AvailableMinID &&
+		messageID == member.HistoryClearAnchorID {
+		source, _ := s.findMessageLocked(channelID, messageID)
+		return domain.ProjectChannelHistoryClearMessage(
+			source,
+			channelID,
+			member.HistoryClearAnchorID,
+			member.HistoryClearAnchorDate,
+		), true
+	}
+	msg, ok := s.findMessageLocked(channelID, messageID)
+	if !ok || msg.Deleted || msg.ID <= member.AvailableMinID {
+		return domain.ChannelMessage{}, false
+	}
+	return cloneChannelMessage(msg), true
 }
 
 func (s *ChannelStore) topicHasVisibleMessagesLocked(channelID int64, topicID int) bool {

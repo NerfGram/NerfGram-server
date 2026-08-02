@@ -35,42 +35,6 @@ func (q *Queries) AdvanceDialogReadInboxFloor(ctx context.Context, arg AdvanceDi
 	return err
 }
 
-const clearDialogAfterHistoryDelete = `-- name: ClearDialogAfterHistoryDelete :exec
-UPDATE dialogs d
-SET
-  top_message_id = 0,
-  top_message_date = 0,
-  read_inbox_max_id = GREATEST(d.read_inbox_max_id, d.top_message_id),
-  read_outbox_max_id = GREATEST(d.read_outbox_max_id, d.top_message_id),
-  unread_count = 0,
-  unread_mark = false,
-  unread_mentions_count = 0,
-  unread_reactions_count = (
-    SELECT COUNT(*)::int
-    FROM message_boxes m2
-    WHERE m2.owner_user_id = d.user_id
-      AND m2.peer_type = d.peer_type
-      AND m2.peer_id = d.peer_id
-      AND NOT m2.deleted
-      AND m2.reaction_unread
-  ),
-  updated_at = now()
-WHERE d.user_id = $1::bigint
-  AND d.peer_type = $2::text
-  AND d.peer_id = $3::bigint
-`
-
-type ClearDialogAfterHistoryDeleteParams struct {
-	UserID   int64
-	PeerType string
-	PeerID   int64
-}
-
-func (q *Queries) ClearDialogAfterHistoryDelete(ctx context.Context, arg ClearDialogAfterHistoryDeleteParams) error {
-	_, err := q.db.Exec(ctx, clearDialogAfterHistoryDelete, arg.UserID, arg.PeerType, arg.PeerID)
-	return err
-}
-
 const clearDialogDrafts = `-- name: ClearDialogDrafts :many
 WITH doomed AS (
   SELECT d.user_id, d.peer_type, d.peer_id, d.top_message_id

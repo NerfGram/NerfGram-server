@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/iamxvbaba/td/tg"
-	"go.uber.org/zap"
 
 	appphone "telesrv/internal/app/phone"
 	"telesrv/internal/domain"
@@ -136,10 +135,9 @@ func (r *Router) onPhoneReceivedCall(ctx context.Context, peer tg.InputPhoneCall
 	if transitioned {
 		// ⚠ P1-2：receiveDate 推送必须在 P1 就位。主叫只有收到带 receive_date 的
 		// phoneCallWaiting 才会把 20s receive 定时器换成 90s ring 定时器。
-		// ⚠ 只推给【发起呼叫的那台设备】(CallerDevice)，绝不广播到主叫账号的所有会话：
-		// 该账号可能同时登录在被叫手机上(多账号同机)，广播会让手机上的呼叫方副本收到
-		// phoneCallWaiting 并覆写来电的 g_a_hash，导致被叫一接就断。
-		// See memory: call-ga-hash-multiaccount-clobber。
+		// 这条主叫视角更新只属于 requestCall 的来源设备；账号级广播会在 DrKLO
+		// 多账号同机时按相同 call_id 覆盖被叫的 pending phoneCallRequested，丢失
+		// g_a_hash 并在接听时触发 Ga hash mismatch。
 		r.pushPhoneCallToDevice(ctx, call.AdminID, call.CallerDevice, call, "phone call ringing")
 	}
 	return true, nil
@@ -225,15 +223,6 @@ func (r *Router) onPhoneDiscardCall(ctx context.Context, req *tg.PhoneDiscardCal
 		} else if !found || !call.Conference() || !call.Active() {
 			return nil, groupCallInvalidErr()
 		}
-	}
-	// 诊断：记录被叫/主叫挂断的 reason 与时机（相对 confirm）。用于定位「接听即断」类问题——
-	// hangup 通常是用户主动挂断或客户端 tgcalls 失败；disconnect/missed 是媒体/振铃超时。
-	if r.log != nil {
-		r.log.Info("phone discardCall",
-			zap.Int64("user_id", userID),
-			zap.Int64("call_id", req.Peer.ID),
-			zap.String("reason", string(reason)),
-		)
 	}
 	call, already, err := r.deps.Phone.DiscardCallWithSlug(ctx, userID, req.Peer.ID, req.Peer.AccessHash, reason, reasonSlug, req.Duration)
 	if err != nil {

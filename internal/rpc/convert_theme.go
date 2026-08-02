@@ -1,28 +1,55 @@
 package rpc
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"fmt"
+	"hash/fnv"
 	"sort"
 
+	"github.com/iamxvbaba/td/bin"
 	"github.com/iamxvbaba/td/tg"
 
 	"telesrv/internal/domain"
 )
 
-// themesListHash 计算一组主题的稳定哈希(服务端权威,客户端原样回传)。对 id 升序折叠,
-// 与返回顺序无关;主题集合变化(用户新建/安装/卸载)即变,驱动客户端重取。
-func themesListHash(themes []tg.Theme) int64 {
-	ids := make([]int64, 0, len(themes))
-	for _, t := range themes {
-		ids = append(ids, t.ID)
+// themesListHash 计算一组主题完整 wire 内容的稳定哈希。编码后排序使返回顺序不影响
+// 哈希；标题、document、settings 或颜色等任一可见内容变化都会驱动客户端重取。
+func themesListHash(themes []tg.Theme) (int64, error) {
+	encoded := make([][]byte, 0, len(themes))
+	for i := range themes {
+		theme := themes[i]
+		if settings, ok := theme.GetSettings(); ok {
+			copied := append([]tg.ThemeSettings(nil), settings...)
+			for j := range copied {
+				if colors, ok := copied[j].GetMessageColors(); ok {
+					copied[j].SetMessageColors(append([]int(nil), colors...))
+				}
+			}
+			theme.SetSettings(copied)
+		}
+		var b bin.Buffer
+		if err := theme.Encode(&b); err != nil {
+			return 0, fmt.Errorf("encode theme %d for hash: %w", theme.ID, err)
+		}
+		encoded = append(encoded, b.Copy())
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	var h uint64 = 0xcbf29ce484222325 // FNV-1a 64 offset basis
-	for _, id := range ids {
-		h ^= uint64(id)
-		h *= 0x100000001b3
+	sort.Slice(encoded, func(i, j int) bool {
+		return bytes.Compare(encoded[i], encoded[j]) < 0
+	})
+	h := fnv.New64a()
+	var size [8]byte
+	for _, body := range encoded {
+		binary.LittleEndian.PutUint64(size[:], uint64(len(body)))
+		_, _ = h.Write(size[:])
+		_, _ = h.Write(body)
 	}
-	return int64(h & 0x7fffffffffffffff)
+	value := int64(h.Sum64() & 0x7fffffffffffffff)
+	if value == 0 {
+		value = 1
+	}
+	return value, nil
 }
 
 // themeRefFromInput 把 tg.InputThemeClass(inputTheme / inputThemeSlug)转成 domain.ThemeRef。

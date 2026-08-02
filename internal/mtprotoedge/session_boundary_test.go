@@ -156,7 +156,7 @@ func TestContainerRPCAdmissionFailureIsAtomic(t *testing.T) {
 		if err := rpcErr.Decode(&bin.Buffer{Buf: result.Result}); err != nil {
 			t.Fatalf("decode capacity rpc_error: %v", err)
 		}
-		if rpcErr.ErrorCode != 420 || rpcErr.ErrorMessage != "FLOOD_WAIT_1" {
+		if rpcErr.ErrorCode != rpcWorkerBusyErrorCode || rpcErr.ErrorMessage != rpcWorkerBusyErrorMessage {
 			t.Fatalf("capacity rpc_error = %+v", rpcErr)
 		}
 		delete(requestIDs, result.RequestMessageID)

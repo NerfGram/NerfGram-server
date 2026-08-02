@@ -27,8 +27,8 @@ type rpcResultSubscriberBudget struct {
 	global        rpcResultFlightLimit
 	authLimit     int64
 	sessionLimit  int64
-	authShards    [rpcResultBudgetShards]rpcResultSubscriberBudgetShard[[8]byte]
-	sessionShards [rpcResultBudgetShards]rpcResultSubscriberBudgetShard[rpcResultSessionBudgetKey]
+	authShards    [rpcExecutionBudgetShards]rpcResultSubscriberBudgetShard[[8]byte]
+	sessionShards [rpcExecutionBudgetShards]rpcResultSubscriberBudgetShard[rpcExecutionSessionBudgetKey]
 }
 
 func newRPCResultSubscriberBudget(
@@ -43,25 +43,25 @@ func newRPCResultSubscriberBudget(
 	b.global.max = int64(globalLimit)
 	for i := range b.authShards {
 		b.authShards[i].usage = make(map[[8]byte]int64)
-		b.sessionShards[i].usage = make(map[rpcResultSessionBudgetKey]int64)
+		b.sessionShards[i].usage = make(map[rpcExecutionSessionBudgetKey]int64)
 	}
 	return b
 }
 
-func (b *rpcResultSubscriberBudget) reserve(key rpcResultCacheKey, slots int) bool {
+func (b *rpcResultSubscriberBudget) reserve(key rpcExecutionKey, slots int) bool {
 	if b == nil || slots <= 0 {
 		return false
 	}
 	authShard := b.authShard(key.authKeyID)
-	sessionKey := rpcResultSessionBudgetKey{authKeyID: key.authKeyID, sessionID: key.sessionID}
+	sessionKey := rpcExecutionSessionBudgetKey{authKeyID: key.authKeyID, sessionID: key.sessionID}
 	sessionShard := b.sessionShard(sessionKey)
 	delta := int64(slots)
 	authShard.mu.Lock()
 	sessionShard.mu.Lock()
 	authUsed := authShard.usage[key.authKeyID]
 	sessionUsed := sessionShard.usage[sessionKey]
-	if !withinRPCResultBudget(authUsed, delta, b.authLimit) ||
-		!withinRPCResultBudget(sessionUsed, delta, b.sessionLimit) ||
+	if !withinRPCExecutionBudget(authUsed, delta, b.authLimit) ||
+		!withinRPCExecutionBudget(sessionUsed, delta, b.sessionLimit) ||
 		!b.global.reserveN(delta) {
 		sessionShard.mu.Unlock()
 		authShard.mu.Unlock()
@@ -74,12 +74,12 @@ func (b *rpcResultSubscriberBudget) reserve(key rpcResultCacheKey, slots int) bo
 	return true
 }
 
-func (b *rpcResultSubscriberBudget) release(key rpcResultCacheKey, slots int) {
+func (b *rpcResultSubscriberBudget) release(key rpcExecutionKey, slots int) {
 	if b == nil || slots <= 0 {
 		panic("mtproto rpc result subscriber release must be positive")
 	}
 	authShard := b.authShard(key.authKeyID)
-	sessionKey := rpcResultSessionBudgetKey{authKeyID: key.authKeyID, sessionID: key.sessionID}
+	sessionKey := rpcExecutionSessionBudgetKey{authKeyID: key.authKeyID, sessionID: key.sessionID}
 	sessionShard := b.sessionShard(sessionKey)
 	delta := int64(slots)
 	authShard.mu.Lock()
@@ -123,7 +123,7 @@ func (b *rpcResultSubscriberBudget) sessionSnapshot(authKeyID [8]byte, sessionID
 	if b == nil {
 		return 0
 	}
-	key := rpcResultSessionBudgetKey{authKeyID: authKeyID, sessionID: sessionID}
+	key := rpcExecutionSessionBudgetKey{authKeyID: authKeyID, sessionID: sessionID}
 	shard := b.sessionShard(key)
 	shard.mu.Lock()
 	used := shard.usage[key]
@@ -134,16 +134,16 @@ func (b *rpcResultSubscriberBudget) sessionSnapshot(authKeyID [8]byte, sessionID
 func (b *rpcResultSubscriberBudget) authShard(
 	authKeyID [8]byte,
 ) *rpcResultSubscriberBudgetShard[[8]byte] {
-	index := maphash.Bytes(b.seed, authKeyID[:]) & (rpcResultBudgetShards - 1)
+	index := maphash.Bytes(b.seed, authKeyID[:]) & (rpcExecutionBudgetShards - 1)
 	return &b.authShards[index]
 }
 
 func (b *rpcResultSubscriberBudget) sessionShard(
-	key rpcResultSessionBudgetKey,
-) *rpcResultSubscriberBudgetShard[rpcResultSessionBudgetKey] {
+	key rpcExecutionSessionBudgetKey,
+) *rpcResultSubscriberBudgetShard[rpcExecutionSessionBudgetKey] {
 	var raw [16]byte
 	copy(raw[:8], key.authKeyID[:])
 	binary.LittleEndian.PutUint64(raw[8:], uint64(key.sessionID))
-	index := maphash.Bytes(b.seed, raw[:]) & (rpcResultBudgetShards - 1)
+	index := maphash.Bytes(b.seed, raw[:]) & (rpcExecutionBudgetShards - 1)
 	return &b.sessionShards[index]
 }

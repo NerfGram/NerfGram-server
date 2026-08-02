@@ -27,6 +27,7 @@ var (
 	ErrLoginCodeDeliveryCommitAmbiguous = errors.New("login code delivery commit ambiguous")
 	ErrReplyMessageIDInvalid            = errors.New("reply message id invalid")
 	ErrChatForwardsRestricted           = errors.New("chat forwards restricted")
+	ErrNoForwardsRequestExpired         = errors.New("no forwards request expired")
 	// ErrPinnedSavedDialogsTooMuch 映射 PINNED_TOO_MUCH：收藏夹子会话置顶
 	// 数量达到 MaxPinnedSavedDialogs 上限。
 	ErrPinnedSavedDialogsTooMuch = errors.New("pinned saved dialogs too much")

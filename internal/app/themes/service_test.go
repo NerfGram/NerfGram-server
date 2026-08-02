@@ -35,14 +35,14 @@ func TestServiceCreateAutoSlugAndCreatorGuard(t *testing.T) {
 	}
 
 	// 非创建者不能改。
-	if _, err := svc.Update(ctx, 2002, domain.ThemeRef{ID: a.ID}, domain.ThemeUpdate{Title: strptr("hacked")}); !errors.Is(err, domain.ErrThemeInvalid) {
+	if _, err := svc.Update(ctx, 2002, domain.ThemeRef{ID: a.ID, AccessHash: a.AccessHash}, domain.ThemeUpdate{Title: strptr("hacked")}); !errors.Is(err, domain.ErrThemeInvalid) {
 		t.Fatalf("non-creator update err = %v, want ErrThemeInvalid", err)
 	}
 
 	// 创建者可改 title + document。
 	newTitle := "A2"
 	newDoc := int64(99)
-	updated, err := svc.Update(ctx, owner, domain.ThemeRef{ID: a.ID}, domain.ThemeUpdate{Title: &newTitle, DocumentID: &newDoc})
+	updated, err := svc.Update(ctx, owner, domain.ThemeRef{ID: a.ID, AccessHash: a.AccessHash}, domain.ThemeUpdate{Title: &newTitle, DocumentID: &newDoc})
 	if err != nil {
 		t.Fatalf("creator update: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestServiceCreateAutoSlugAndCreatorGuard(t *testing.T) {
 	}
 
 	// install 计数 + 列表。
-	if err := svc.Install(ctx, owner, domain.ThemeRef{ID: a.ID}, true); err != nil {
+	if err := svc.Install(ctx, owner, domain.ThemeRef{ID: a.ID, AccessHash: a.AccessHash}, true); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 	got, ok, _ := svc.Get(ctx, domain.ThemeRef{Slug: a.Slug})
@@ -66,6 +66,20 @@ func TestServiceCreateAutoSlugAndCreatorGuard(t *testing.T) {
 	// 未知引用 → ErrThemeInvalid。
 	if err := svc.Install(ctx, owner, domain.ThemeRef{Slug: "nope"}, false); !errors.Is(err, domain.ErrThemeInvalid) {
 		t.Fatalf("install unknown err = %v, want ErrThemeInvalid", err)
+	}
+
+	forged := domain.ThemeRef{ID: a.ID, AccessHash: a.AccessHash + 1}
+	if _, ok, err := svc.Get(ctx, forged); err != nil || ok {
+		t.Fatalf("get forged access hash = ok %v err %v, want false/nil", ok, err)
+	}
+	if err := svc.Save(ctx, owner, forged); !errors.Is(err, domain.ErrThemeInvalid) {
+		t.Fatalf("save forged access hash err = %v, want ErrThemeInvalid", err)
+	}
+	if err := svc.Install(ctx, owner, forged, true); !errors.Is(err, domain.ErrThemeInvalid) {
+		t.Fatalf("install forged access hash err = %v, want ErrThemeInvalid", err)
+	}
+	if _, err := svc.Update(ctx, owner, forged, domain.ThemeUpdate{Title: strptr("forged")}); !errors.Is(err, domain.ErrThemeNotFound) {
+		t.Fatalf("update forged access hash err = %v, want ErrThemeNotFound", err)
 	}
 }
 

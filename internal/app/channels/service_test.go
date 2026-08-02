@@ -2904,7 +2904,10 @@ func TestListSendAsChannelsFiltersPostMessageRights(t *testing.T) {
 
 func TestPublicChannelSearchAndResolveUsername(t *testing.T) {
 	ctx := context.Background()
-	service := NewService(memory.NewChannelStore())
+	channelStore := memory.NewChannelStore()
+	registry := memory.NewCollectibleUsernameStore()
+	channelStore.AttachUsernameRegistry(registry)
+	service := NewService(channelStore)
 	created, err := service.CreateMegagroupFromCreateChat(ctx, 1001, domain.CreateChannelRequest{
 		Title:         "CU Public Lab",
 		MemberUserIDs: []int64{1002},
@@ -2944,6 +2947,53 @@ func TestPublicChannelSearchAndResolveUsername(t *testing.T) {
 	resolved, found, err := service.ResolvePublicUsername(ctx, 1003, "@CU_PUBLIC_LAB")
 	if err != nil || !found || resolved.ID != public.ID {
 		t.Fatalf("ResolvePublicUsername = %+v found %v err %v, want public channel", resolved, found, err)
+	}
+	peer := domain.Peer{Type: domain.PeerTypeChannel, ID: public.ID}
+	if _, created, err := registry.MintCollectibleUsername(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "nfc4",
+		Owner:    peer,
+		Currency: domain.CollectibleCurrencyStars,
+		Amount:   1,
+		Actor:    "test",
+	}); err != nil || !created {
+		t.Fatalf("mint channel collectible: created=%v err=%v", created, err)
+	}
+	resolved, found, err = service.ResolvePublicUsername(ctx, 1003, "@NFC4")
+	if err != nil || !found || resolved.ID != public.ID {
+		t.Fatalf("ResolvePublicUsername collectible = %+v found %v err %v, want public channel", resolved, found, err)
+	}
+	collectibleSearch, err := service.SearchPublicChannels(ctx, 1003, "nfc", 10)
+	if err != nil || len(collectibleSearch.Results) != 1 || collectibleSearch.Results[0].ID != public.ID {
+		t.Fatalf("collectible channel search = %+v err=%v, want public channel", collectibleSearch, err)
+	}
+	if _, err := service.UpdateUsername(ctx, 1001, domain.UpdateChannelUsernameRequest{
+		ChannelID: public.ID,
+		Username:  "",
+	}); err != nil {
+		t.Fatalf("clear editable username: %v", err)
+	}
+	resolved, found, err = service.ResolvePublicUsername(ctx, 1003, "nfc4")
+	if err != nil || !found || resolved.ID != public.ID {
+		t.Fatalf("NFT-only ResolvePublicUsername = %+v found=%v err=%v", resolved, found, err)
+	}
+	if view, err := service.GetChannel(ctx, 1003, public.ID); err != nil || view.Channel.ID != public.ID {
+		t.Fatalf("NFT-only public preview = %+v err=%v", view, err)
+	}
+	if _, err := service.UpdateUsername(ctx, 1001, domain.UpdateChannelUsernameRequest{
+		ChannelID: public.ID,
+		Username:  "cu_public_lab",
+	}); err != nil {
+		t.Fatalf("restore editable username: %v", err)
+	}
+	if changed, err := registry.SetUsernameActive(ctx, peer, "nfc4", false); err != nil || !changed {
+		t.Fatalf("deactivate channel collectible: changed=%v err=%v", changed, err)
+	}
+	if _, found, err := service.ResolvePublicUsername(ctx, 1003, "nfc4"); err != nil || found {
+		t.Fatalf("inactive collectible resolve found=%v err=%v, want hidden", found, err)
+	}
+	hiddenSearch, err := service.SearchPublicChannels(ctx, 1003, "nfc4", 10)
+	if err != nil || len(hiddenSearch.Results) != 0 {
+		t.Fatalf("inactive collectible search = %+v err=%v, want empty", hiddenSearch, err)
 	}
 }
 
@@ -3014,11 +3064,36 @@ func TestPublicChannelPreviewAllowsNonMemberHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("non-member GetDifference public preview: %v", err)
 	}
-	if !diff.Final || diff.Pts != sent.Event.Pts || len(diff.Events) != 0 || len(diff.NewMessages) != 0 || len(diff.OtherUpdates) != 0 {
-		t.Fatalf("preview diff = %+v, want empty public preview difference at current pts", diff)
+	if !diff.Final || diff.Pts != sent.Event.Pts || len(diff.Events) != 1 || len(diff.NewMessages) != 1 || len(diff.OtherUpdates) != 0 {
+		t.Fatalf("preview diff = %+v, want one public preview message at current pts", diff)
+	}
+	if diff.NewMessages[0].ID != sent.Message.ID || diff.NewMessages[0].Body != sent.Message.Body {
+		t.Fatalf("preview diff message = %+v, want sent public post %+v", diff.NewMessages[0], sent.Message)
 	}
 	if diff.Dialog.UnreadCount != 0 || diff.Dialog.ReadInboxMaxID < sent.Message.ID {
 		t.Fatalf("preview diff dialog = %+v, want read-only public preview dialog", diff.Dialog)
+	}
+	audience, err := service.FilterMessageAudienceIDs(ctx, public.ID, []int64{viewerID, ownerID, viewerID})
+	if err != nil || len(audience) != 2 {
+		t.Fatalf("public message audience = %v err %v, want owner and preview viewer", audience, err)
+	}
+	if _, err := service.JoinChannel(ctx, viewerID, public.ID, 21); err != nil {
+		t.Fatalf("JoinChannel public preview viewer: %v", err)
+	}
+	if _, err := service.LeaveChannel(ctx, viewerID, public.ID, 22); err != nil {
+		t.Fatalf("LeaveChannel public preview viewer: %v", err)
+	}
+	filtered, err := service.GetDifference(ctx, viewerID, domain.ChannelDifferenceRequest{
+		ChannelID: public.ID,
+		Pts:       sent.Event.Pts,
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("preview difference across participant events: %v", err)
+	}
+	if !filtered.Final || filtered.Pts != sent.Event.Pts || len(filtered.Events) != 0 ||
+		len(filtered.NewMessages) != 0 || len(filtered.OtherUpdates) != 0 {
+		t.Fatalf("difference after transient participant changes = %+v, want unchanged PTS", filtered)
 	}
 
 	private, err := service.CreateChannel(ctx, ownerID, domain.CreateChannelRequest{
@@ -3046,6 +3121,9 @@ func TestPublicChannelPreviewAllowsNonMemberHistory(t *testing.T) {
 	}
 	if _, err := service.GetDifference(ctx, viewerID, domain.ChannelDifferenceRequest{ChannelID: public.ID, Pts: created.Event.Pts, Limit: 10}); !errors.Is(err, domain.ErrChannelUserBanned) {
 		t.Fatalf("banned public preview GetDifference err = %v, want ErrChannelUserBanned", err)
+	}
+	if audience, err := service.FilterMessageAudienceIDs(ctx, public.ID, []int64{viewerID}); err != nil || len(audience) != 0 {
+		t.Fatalf("banned public message audience = %v err %v, want empty", audience, err)
 	}
 }
 

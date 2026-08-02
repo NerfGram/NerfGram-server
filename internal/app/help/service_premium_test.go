@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"telesrv/internal/domain"
 )
 
 // TestAppConfigPremiumKeys 断言 premium / Stars 相关 key 完整下发且 hash 已递增：
@@ -26,6 +28,9 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 	if err := json.Unmarshal(cfg.JSON, &decoded); err != nil {
 		t.Fatalf("app config json invalid: %v", err)
 	}
+	if period, ok := decoded["no_forwards_request_expire_period"].(float64); !ok || int(period) != domain.PrivateNoForwardsRequestExpirePeriod {
+		t.Fatalf("no_forwards_request_expire_period = %v, want %d", decoded["no_forwards_request_expire_period"], domain.PrivateNoForwardsRequestExpirePeriod)
+	}
 	if blocked, ok := decoded["premium_purchase_blocked"].(bool); !ok || blocked {
 		t.Fatalf("premium_purchase_blocked = %v, want false (star gift 送礼入口耦合此 flag)", decoded["premium_purchase_blocked"])
 	}
@@ -37,6 +42,13 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 	if blocked, ok := decoded["stargifts_blocked"].(bool); !ok || blocked {
 		t.Fatalf("stargifts_blocked = %v, want false (DrKLO GiftSheet 据此隐藏礼物网格)", decoded["stargifts_blocked"])
 	}
+	if available, ok := decoded["giveaway_gifts_purchase_available"].(bool); !ok || !available {
+		t.Fatalf("giveaway_gifts_purchase_available = %v, want true", decoded["giveaway_gifts_purchase_available"])
+	}
+	directCurrencies, ok := decoded["premium_playmarket_direct_currency_list"].([]any)
+	if !ok || len(directCurrencies) == 0 || !containsJSONCurrency(directCurrencies, "USD") {
+		t.Fatalf("premium_playmarket_direct_currency_list = %#v, want non-empty list containing USD", decoded["premium_playmarket_direct_currency_list"])
+	}
 	if posting, ok := decoded["rich_message_posting"].(string); !ok || posting != "enabled" {
 		t.Fatalf("rich_message_posting = %v, want enabled (TDesktop 富文本编辑入口默认打开)", decoded["rich_message_posting"])
 	}
@@ -45,38 +57,44 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 		t.Fatalf("fragment_prefixes = %#v, want [\"888\"]", decoded["fragment_prefixes"])
 	}
 	wantNumbers := map[string]float64{
-		"reactions_user_max_default":          1,
-		"reactions_user_max_premium":          3,
-		"boosts_channel_level_max":            100,
-		"about_length_limit_default":          70,
-		"about_length_limit_premium":          140,
-		"dialogs_pinned_limit_default":        5,
-		"dialogs_pinned_limit_premium":        10,
-		"dialogs_folder_pinned_limit_default": 100,
-		"dialogs_folder_pinned_limit_premium": 200,
-		"saved_dialogs_pinned_limit_default":  5,
-		"saved_dialogs_pinned_limit_premium":  100,
-		"caption_length_limit_default":        1024,
-		"caption_length_limit_premium":        4096,
-		"channels_limit_default":              500,
-		"channels_limit_premium":              1000,
-		"dialog_filters_limit_default":        10,
-		"dialog_filters_limit_premium":        20,
-		"chatlist_update_period":              3600,
-		"chatlist_invites_limit_default":      3,
-		"chatlist_invites_limit_premium":      20,
-		"chatlists_joined_limit_default":      2,
-		"chatlists_joined_limit_premium":      20,
-		"upload_max_fileparts_default":        4000,
-		"upload_max_fileparts_premium":        8000,
-		"aicompose_tone_examples_num":         3,
-		"aicompose_tone_title_length_max":     12,
-		"aicompose_tone_prompt_length_max":    1024,
-		"aicompose_tone_saved_limit_default":  5,
-		"aicompose_tone_saved_limit_premium":  20,
-		"stories_stealth_future_period":       1500,
-		"stories_stealth_past_period":         300,
-		"stories_stealth_cooldown_period":     10800,
+		"giveaway_boosts_per_premium":               4,
+		"giveaway_countries_max":                    10,
+		"giveaway_add_peers_max":                    10,
+		"giveaway_period_max":                       604800,
+		"reactions_user_max_default":                1,
+		"reactions_user_max_premium":                3,
+		"boosts_channel_level_max":                  100,
+		"stargifts_pinned_to_top_limit":             6,
+		"about_length_limit_default":                70,
+		"about_length_limit_premium":                140,
+		"bot_verification_description_length_limit": 70,
+		"dialogs_pinned_limit_default":              5,
+		"dialogs_pinned_limit_premium":              10,
+		"dialogs_folder_pinned_limit_default":       100,
+		"dialogs_folder_pinned_limit_premium":       200,
+		"saved_dialogs_pinned_limit_default":        5,
+		"saved_dialogs_pinned_limit_premium":        100,
+		"caption_length_limit_default":              1024,
+		"caption_length_limit_premium":              4096,
+		"channels_limit_default":                    500,
+		"channels_limit_premium":                    1000,
+		"dialog_filters_limit_default":              10,
+		"dialog_filters_limit_premium":              20,
+		"chatlist_update_period":                    3600,
+		"chatlist_invites_limit_default":            3,
+		"chatlist_invites_limit_premium":            20,
+		"chatlists_joined_limit_default":            2,
+		"chatlists_joined_limit_premium":            20,
+		"upload_max_fileparts_default":              4000,
+		"upload_max_fileparts_premium":              8000,
+		"aicompose_tone_examples_num":               3,
+		"aicompose_tone_title_length_max":           12,
+		"aicompose_tone_prompt_length_max":          1024,
+		"aicompose_tone_saved_limit_default":        5,
+		"aicompose_tone_saved_limit_premium":        20,
+		"stories_stealth_future_period":             1500,
+		"stories_stealth_past_period":               300,
+		"stories_stealth_cooldown_period":           10800,
 	}
 	for key, want := range wantNumbers {
 		got, ok := decoded[key].(float64)
@@ -90,6 +108,15 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 			t.Errorf("appConfig 不应包含 %q", forbidden)
 		}
 	}
+}
+
+func containsJSONCurrency(values []any, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAppConfigOmitsMapboxTokenByDefault(t *testing.T) {

@@ -12,6 +12,18 @@ import (
 )
 
 func (s *ChannelStore) SendChannelMessage(ctx context.Context, req domain.SendChannelMessageRequest) (domain.SendChannelMessageResult, error) {
+	return s.sendChannelMessageWithHooks(ctx, req, channelSendTxHooks{})
+}
+
+type channelSendTxHooks struct {
+	before func(context.Context, pgx.Tx, *domain.SendChannelMessageRequest) error
+	after  func(context.Context, pgx.Tx, domain.SendChannelMessageResult) error
+}
+
+// sendChannelMessageWithHooks lets a tightly coupled domain command join the
+// channel message/event/PTS transaction. It is deliberately package-private:
+// ordinary callers must use SendChannelMessage and may not inject SQL work.
+func (s *ChannelStore) sendChannelMessageWithHooks(ctx context.Context, req domain.SendChannelMessageRequest, hooks channelSendTxHooks) (domain.SendChannelMessageResult, error) {
 	if req.UserID == 0 || req.ChannelID == 0 || (strings.TrimSpace(req.Message) == "" && req.Action == nil && req.Media.IsZero() && req.RichMessage.IsZero()) {
 		return domain.SendChannelMessageResult{}, domain.ErrChannelInvalid
 	}
@@ -27,7 +39,7 @@ func (s *ChannelStore) SendChannelMessage(ctx context.Context, req domain.SendCh
 	}
 	var lastErr error
 	for attempt := 0; attempt < retryableChannelTxAttempts; attempt++ {
-		res, err := s.sendChannelMessageOnce(ctx, req, requestFingerprint)
+		res, err := s.sendChannelMessageOnce(ctx, req, requestFingerprint, hooks)
 		if err == nil || !isRetryablePostgresTxError(err) || ctx.Err() != nil {
 			return res, err
 		}
@@ -36,7 +48,7 @@ func (s *ChannelStore) SendChannelMessage(ctx context.Context, req domain.SendCh
 	return domain.SendChannelMessageResult{}, lastErr
 }
 
-func (s *ChannelStore) sendChannelMessageOnce(ctx context.Context, req domain.SendChannelMessageRequest, requestFingerprint []byte) (domain.SendChannelMessageResult, error) {
+func (s *ChannelStore) sendChannelMessageOnce(ctx context.Context, req domain.SendChannelMessageRequest, requestFingerprint []byte, hooks channelSendTxHooks) (domain.SendChannelMessageResult, error) {
 	if req.RandomID != 0 && !req.IdempotencyPreflighted {
 		if dup, found, err := s.LookupChannelSendReplay(ctx, domain.ChannelSendReplayRequest{
 			ChannelID:              req.ChannelID,
@@ -125,6 +137,11 @@ func (s *ChannelStore) sendChannelMessageOnce(ctx context.Context, req domain.Se
 		p := *req.SendAs
 		sendAs = &p
 	}
+	if hooks.before != nil {
+		if err := hooks.before(ctx, tx, &req); err != nil {
+			return domain.SendChannelMessageResult{}, err
+		}
+	}
 	msgID, err := s.msgIDs.NextChannelMessageID(ctx, req.ChannelID)
 	if err != nil {
 		return domain.SendChannelMessageResult{}, fmt.Errorf("allocate channel message id: %w", err)
@@ -135,7 +152,7 @@ func (s *ChannelStore) sendChannelMessageOnce(ctx context.Context, req domain.Se
 	}
 	var discussion *domain.SendChannelDiscussionResult
 	var discussionRef *domain.ChannelDiscussionRef
-	if channel.Broadcast && channel.LinkedChatID != 0 {
+	if channel.Broadcast && channel.LinkedChatID != 0 && req.Action == nil {
 		linked, err := getChannelByID(ctx, tx, channel.LinkedChatID)
 		if err == nil && !linked.Deleted && linked.Megagroup {
 			discussionMsgID, err := s.msgIDs.NextChannelMessageID(ctx, linked.ID)
@@ -330,6 +347,16 @@ WHERE channel_id = $1 AND user_id = $2 AND unread_mark`, req.ChannelID, req.User
 			return domain.SendChannelMessageResult{}, err
 		}
 	}
+	txResult := domain.SendChannelMessageResult{
+		Channel: channel, Message: msg, Event: event, Discussion: discussion,
+		MentionUserIDs:      append([]int64(nil), req.MentionUserIDs...),
+		SkipDeliveryUserIDs: append([]int64(nil), req.SkipDeliveryUserIDs...),
+	}
+	if hooks.after != nil {
+		if err := hooks.after(ctx, tx, txResult); err != nil {
+			return domain.SendChannelMessageResult{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.SendChannelMessageResult{}, fmt.Errorf("commit send channel: %w", err)
 	}
@@ -342,7 +369,8 @@ WHERE channel_id = $1 AND user_id = $2 AND unread_mark`, req.ChannelID, req.User
 			discussion.Recipients, _ = s.ListActiveChannelMemberIDs(ctx, req.UserID, discussion.Channel.ID, 0)
 		}
 	}
-	return domain.SendChannelMessageResult{Channel: channel, Message: msg, Event: event, Recipients: recipients, Discussion: discussion, MentionUserIDs: append([]int64(nil), req.MentionUserIDs...), SkipDeliveryUserIDs: append([]int64(nil), req.SkipDeliveryUserIDs...)}, nil
+	txResult.Recipients = recipients
+	return txResult, nil
 }
 
 func channelDeliverySkipSet(ids []int64) map[int64]struct{} {

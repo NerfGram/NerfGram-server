@@ -51,7 +51,7 @@ func TestLoginEmailEndToEnd(t *testing.T) {
 		dc        = 2
 		phone     = "+8613800138777"
 		wantPhone = "8613800138777"
-		code      = "12345"
+		devCode   = "12345"
 		email     = "owner@example.com"
 		wantMask  = "o***r@example.com"
 	)
@@ -79,9 +79,10 @@ func TestLoginEmailEndToEnd(t *testing.T) {
 	accountService := account.NewService(passwordStore,
 		account.WithUsers(userStore),
 		account.WithLoginEmailVerification(codeStore, emailSender, 5*time.Minute, 5, 6))
-	authService := auth.NewService(userStore, authzStore, codeStore, authKeyStore, memory.NewTempAuthKeyBindingStore(authKeyStore), code,
+	authService := auth.NewService(userStore, authzStore, codeStore, authKeyStore, memory.NewTempAuthKeyBindingStore(authKeyStore), devCode,
 		auth.WithLoginMessages(messageStore, dialogStore),
 		auth.WithLoginCodeDelivery(memory.NewLoginCodeDeliveryStore(messageStore, updateEventStore)),
+		auth.WithPhoneCodeDelivery(emailSender, 5),
 		auth.WithPasswords(passwordStore),
 		auth.WithLoginEmail(auth.LoginEmailOptions{
 			Enabled:    true,
@@ -135,7 +136,7 @@ func TestLoginEmailEndToEnd(t *testing.T) {
 			return err
 		}
 		hash := sent.(*tg.AuthSentCode).PhoneCodeHash
-		if _, err := raw.AuthSignIn(ctx, &tg.AuthSignInRequest{PhoneNumber: phone, PhoneCodeHash: hash, PhoneCode: code}); err != nil {
+		if _, err := raw.AuthSignIn(ctx, &tg.AuthSignInRequest{PhoneNumber: phone, PhoneCodeHash: hash, PhoneCode: emailSender.code}); err != nil {
 			return err
 		}
 		if _, err := raw.AuthSignUp(ctx, &tg.AuthSignUpRequest{PhoneNumber: phone, PhoneCodeHash: hash, FirstName: "Owner"}); err != nil {
@@ -234,11 +235,15 @@ func TestLoginEmailEndToEnd(t *testing.T) {
 			return err
 		}
 		sentCode := sent.(*tg.AuthSentCode)
-		if _, ok := sentCode.Type.(*tg.AuthSentCodeTypeEmailCode); !ok {
+		emailType, ok := sentCode.Type.(*tg.AuthSentCodeTypeEmailCode)
+		if !ok {
 			return fmt.Errorf("pre-reset sendCode type = %T, want email code", sentCode.Type)
 		}
+		if _, ok := emailType.GetResetAvailablePeriod(); !ok {
+			return fmt.Errorf("pre-reset email code omitted reset_available_period with real SMS sender")
+		}
 
-		// 重置登录邮箱：返回一个新的手机验证码 sentCode（sentCodeTypeApp）。
+		// 重置登录邮箱：真实 SMS sender 签发随机手机验证码并返回 sentCodeTypeSms。
 		resetRes, err := raw.AuthResetLoginEmail(ctx, &tg.AuthResetLoginEmailRequest{PhoneNumber: phone, PhoneCodeHash: sentCode.PhoneCodeHash})
 		if err != nil {
 			return err
@@ -247,12 +252,12 @@ func TestLoginEmailEndToEnd(t *testing.T) {
 		if !ok {
 			return fmt.Errorf("resetLoginEmail result = %T, want *tg.AuthSentCode", resetRes)
 		}
-		if _, ok := resetSent.Type.(*tg.AuthSentCodeTypeApp); !ok {
-			return fmt.Errorf("resetLoginEmail sentCode type = %T, want *tg.AuthSentCodeTypeApp (back to phone)", resetSent.Type)
+		if _, ok := resetSent.Type.(*tg.AuthSentCodeTypeSMS); !ok {
+			return fmt.Errorf("resetLoginEmail sentCode type = %T, want *tg.AuthSentCodeTypeSMS (real phone fallback)", resetSent.Type)
 		}
 
-		// 用手机验证码完成登录。
-		signInRes, err := raw.AuthSignIn(ctx, &tg.AuthSignInRequest{PhoneNumber: phone, PhoneCodeHash: resetSent.PhoneCodeHash, PhoneCode: code})
+		// 用 sender 捕获的动态手机验证码完成登录，禁止回退固定 development code。
+		signInRes, err := raw.AuthSignIn(ctx, &tg.AuthSignInRequest{PhoneNumber: phone, PhoneCodeHash: resetSent.PhoneCodeHash, PhoneCode: emailSender.code})
 		if err != nil {
 			return err
 		}

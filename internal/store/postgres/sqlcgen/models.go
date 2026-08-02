@@ -53,8 +53,6 @@ type AccountPassword struct {
 	SrpBSecret              []byte
 	SrpB                    []byte
 	RecoveryEmail           string
-	RecoveryCode            string
-	RecoveryCodeExpiresAt   pgtype.Timestamptz
 	LoginEmail              string
 	PasswordChangedAt       pgtype.Timestamptz
 }
@@ -2283,7 +2281,8 @@ type User struct {
 	EmojiStatusCollectibleID      *int64
 	EmojiStatusCollectible        []byte
 	LinkedCommunityID             int64
-	SignupEmail                   string
+	Scam                          bool
+	Fake                          bool
 }
 
 type UserBusinessProfile struct {

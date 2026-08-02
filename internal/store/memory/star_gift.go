@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"math/rand/v2"
 	"sort"
 	"strings"
 	"sync"
@@ -251,6 +252,20 @@ func (s *StarGiftStore) ActiveCollectibleRevision(_ context.Context, giftID int6
 	defer s.mu.Unlock()
 	revision, ok := s.collectibles[giftID]
 	return cloneCollectibleRevision(revision), ok, nil
+}
+
+func (s *StarGiftStore) ActiveCollectibleProjection(_ context.Context, giftID int64, samplePerKind int) (domain.StarGiftCollectibleRevision, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revision, ok := s.collectibles[giftID]
+	if !ok {
+		return domain.StarGiftCollectibleRevision{}, false, nil
+	}
+	projection := cloneCollectibleRevision(revision)
+	projection.Models = projectCollectibleAttributes(projection.Models, domain.StarGiftCollectibleModel, samplePerKind)
+	projection.Patterns = projectCollectibleAttributes(projection.Patterns, domain.StarGiftCollectiblePattern, samplePerKind)
+	projection.Backdrops = projectCollectibleAttributes(projection.Backdrops, domain.StarGiftCollectibleBackdrop, samplePerKind)
+	return projection, true, nil
 }
 
 func (s *StarGiftStore) CollectibleAvailability(_ context.Context, giftIDs []int64) (map[int64]domain.StarGiftCollectibleAvailability, error) {
@@ -506,6 +521,10 @@ func (s *StarGiftStore) GetByRef(_ context.Context, ref domain.SavedStarGiftRef)
 	return domain.SavedStarGift{}, false, nil
 }
 
+func (s *StarGiftStore) ResolveUserMessageRef(_ context.Context, _ int64, _ int) (domain.SavedStarGiftRef, bool, error) {
+	return domain.SavedStarGiftRef{}, false, nil
+}
+
 func (s *StarGiftStore) CountByOwner(_ context.Context, owner domain.Peer) (int, error) {
 	if !validStarGiftOwner(owner) {
 		return 0, nil
@@ -530,6 +549,15 @@ func (s *StarGiftStore) SetUnsaved(_ context.Context, ref domain.SavedStarGiftRe
 	for i := range s.gifts {
 		if s.savedStarGiftMatchesRef(s.gifts[i], ref) && s.gifts[i].LifecycleStatus.Live() {
 			s.gifts[i].Unsaved = unsaved
+			if unsaved && s.gifts[i].PinnedOrder > 0 {
+				removedOrder := s.gifts[i].PinnedOrder
+				s.gifts[i].PinnedOrder = 0
+				for j := range s.gifts {
+					if s.gifts[j].Owner == ref.Owner && s.gifts[j].PinnedOrder > removedOrder {
+						s.gifts[j].PinnedOrder--
+					}
+				}
+			}
 			return true, nil
 		}
 	}
@@ -701,9 +729,15 @@ func (s *StarGiftStore) ReorderCollections(_ context.Context, owner domain.Peer,
 func (s *StarGiftStore) SetPinned(_ context.Context, owner domain.Peer, savedGiftIDs []int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(savedGiftIDs) > domain.MaxPinnedStarGifts {
+		return domain.ErrStarGiftCollectibleInvalid
+	}
 	ids, err := s.validCollectionGiftIDsLocked(owner, savedGiftIDs)
 	if err != nil {
 		return err
+	}
+	if len(ids) != len(savedGiftIDs) {
+		return domain.ErrStarGiftCollectibleInvalid
 	}
 	order := make(map[int64]int, len(ids))
 	for i, id := range ids {
@@ -712,6 +746,9 @@ func (s *StarGiftStore) SetPinned(_ context.Context, owner domain.Peer, savedGif
 	for i := range s.gifts {
 		if s.gifts[i].Owner == owner {
 			s.gifts[i].PinnedOrder = order[s.gifts[i].ID]
+			if s.gifts[i].PinnedOrder > 0 {
+				s.gifts[i].Unsaved = false
+			}
 		}
 	}
 	return nil
@@ -824,6 +861,34 @@ func cloneCollectibleRevision(in domain.StarGiftCollectibleRevision) domain.Star
 	out.Models = clone(in.Models)
 	out.Patterns = clone(in.Patterns)
 	out.Backdrops = clone(in.Backdrops)
+	return out
+}
+
+func projectCollectibleAttributes(in []domain.StarGiftCollectibleAttribute, kind domain.StarGiftCollectibleAttributeKind, samplePerKind int) []domain.StarGiftCollectibleAttribute {
+	out := in
+	if samplePerKind > 0 {
+		out = make([]domain.StarGiftCollectibleAttribute, 0, len(in))
+		for _, attribute := range in {
+			if attribute.RarityKind != domain.StarGiftRarityPermille || attribute.RarityPermille <= 0 ||
+				(kind == domain.StarGiftCollectibleModel && attribute.Crafted) {
+				continue
+			}
+			out = append(out, attribute)
+		}
+		for i := 0; i < len(out) && i < samplePerKind; i++ {
+			j := i + rand.IntN(len(out)-i)
+			out[i], out[j] = out[j], out[i]
+		}
+		if len(out) > samplePerKind {
+			out = out[:samplePerKind]
+		}
+	}
+	for i := range out {
+		if out[i].Animation != nil {
+			out[i].Animation.JSON = nil
+			out[i].Animation.TGS = nil
+		}
+	}
 	return out
 }
 

@@ -41,7 +41,7 @@ const (
 	// It never dispatches business code a second time.
 	inboundItemRewrappedRPC
 	// inboundItemReplayRPC is a request first observed by this physical Conn whose
-	// terminal result already exists in the cross-connection cache. It is distinct
+	// terminal result already exists in the cross-connection execution ledger. It is distinct
 	// from inboundItemDuplicate: a duplicate already present in this Conn's seen
 	// table must only be ACKed. The original owner/result is already using the same
 	// reliable TCP stream, so replaying it once per retransmit wave amplifies a
@@ -92,6 +92,11 @@ type inboundPlan struct {
 	ackIDs     []int64
 	logicalMin int64
 	releases   []func()
+	// gzipExpandedBytes is the non-refundable per-frame decompression work
+	// already performed by outer and exact-layer nested gzip envelopes. Memory
+	// reservations are released when their buffers die, but this cumulative
+	// counter prevents sibling RPCs from recycling the same CPU budget.
+	gzipExpandedBytes int
 
 	rpcReservation *inboundRPCBatchReservation
 	rpcTasks       []inboundRPC
@@ -314,6 +319,7 @@ func (s *Server) preflightInbound(cs *connState, msgID int64, seqNo int32, body 
 		plan.close()
 		return nil, err
 	}
+	plan.gzipExpandedBytes = budget.expanded
 	plan.staged = overlay.staged
 	if plan.logicalMin == 0 {
 		plan.close()
@@ -448,7 +454,7 @@ func (s *Server) walkInbound(
 		return &dispatchBadMsgError{msgID: msgID, seqNo: seqNo, code: code}
 	}
 
-	content := clientMessageNeedsAck(typeID)
+	content := clientMessageIsContentRelated(typeID, seqNo)
 	if record, seen := overlay.seenRecord(msgID); seen {
 		if record.seqNo != seqNo || record.content != content {
 			return &dispatchBadMsgError{msgID: msgID, seqNo: seqNo, code: badMsgContainer}
@@ -726,8 +732,8 @@ func preflightInboundItem(msgID int64, seqNo int32, typeID uint32, content bool,
 
 // prepareInboundRPCBatch performs the whole container's count/byte admission
 // before copying or scheduling any API RPC. Capacity exhaustion is converted
-// into one consistent terminal FLOOD_WAIT result per uncached RPC; no business
-// handler from the batch is allowed to start in that case.
+// into one consistent local 500 WORKER_BUSY_TOO_LONG_RETRY result per new
+// RPC; no business handler from the batch is allowed to start in that case.
 func (s *Server) prepareInboundRPCBatch(ctx context.Context, c *Conn, plan *inboundPlan) error {
 	if s.layerRPC != nil {
 		return s.prepareInboundLayerRPCBatch(ctx, c, plan)
@@ -778,6 +784,13 @@ func (s *Server) prepareInboundRPCBatch(ctx context.Context, c *Conn, plan *inbo
 					s.rpcRewrap.commit(candidate)
 					item.kind = inboundItemReplayRPC
 					item.payload = claim.encoded
+				case rpcResultAcquireAcknowledged:
+					// The client already ACKed the correlated rpc_result. Retire the
+					// stale rewrap candidate and keep this duplicate ACK-only; neither
+					// the old body nor the business handler may run again.
+					s.rpcRewrap.commit(candidate)
+					item.kind = inboundItemDuplicate
+					item.payload = nil
 				case rpcResultAcquirePending:
 					s.rpcRewrap.commit(candidate)
 					item.kind = inboundItemRewrappedRPC
@@ -833,7 +846,7 @@ func (s *Server) prepareInboundRPCBatch(ctx context.Context, c *Conn, plan *inbo
 		}
 		switch claim.state {
 		case rpcResultAcquireCompleted:
-			s.log.Info("RPC duplicate replay from session cache",
+			s.log.Info("RPC duplicate replay from logical-session outbox",
 				zap.String("method", method),
 				zap.Int64("msg_id", item.msgID),
 				zap.String("auth_key_id", c.authKeyHex),
@@ -841,6 +854,9 @@ func (s *Server) prepareInboundRPCBatch(ctx context.Context, c *Conn, plan *inbo
 			)
 			item.kind = inboundItemReplayRPC
 			item.payload = claim.encoded
+		case rpcResultAcquireAcknowledged:
+			item.kind = inboundItemDuplicate
+			item.payload = nil
 		case rpcResultAcquirePending:
 			// A malformed/replayed container may repeat the same msg_id after this
 			// very plan installed its owner. More generally, any request already in
@@ -927,14 +943,14 @@ func (s *Server) executeInboundPlan(ctx context.Context, cs *connState, c *Conn,
 		case inboundItemServiceDuplicate:
 			// Classify from the originally committed connState record, never from the
 			// retransmitted body. This prevents same-id payload replacement. Only an
-			// already cached answer is eligible for resend (rpc_drop_answer today);
+			// already retained answer is eligible for resend (rpc_drop_answer today);
 			// other best-effort service traffic uses a later fresh request.
 			if err := s.replayRPCResultByRequest(ctx, c, item.msgID); err != nil {
 				return err
 			}
 		case inboundItemReplayRPC:
 			if encoded, _ := item.payload.(*encodedOutboundMessage); encoded != nil {
-				if err := s.sendCachedRPCResultWithHook(ctx, c, encoded, item.replayAfterSuccessfulDelivery); err != nil {
+				if err := s.sendReplayedRPCResultWithHook(ctx, c, encoded, item.replayAfterSuccessfulDelivery); err != nil {
 					return err
 				}
 			} else if err := s.replayRPCResultByRequest(ctx, c, item.msgID); err != nil {
@@ -1020,6 +1036,10 @@ func (s *Server) executeInboundPlan(ctx context.Context, cs *connState, c *Conn,
 			}); err != nil {
 				return err
 			}
+			// The key cannot reconnect to ACK or replay any old answer. Release every
+			// logical outbox and receipt only after the terminal OK is physically on
+			// the wire; retaining them for the offline TTL would be pure leakage.
+			s.conns.ForgetLogicalSessionsForRawAuthKey(c.authKeyID)
 			c.beginTerminalShutdown()
 			c.closeTransport()
 			return nil
@@ -1031,10 +1051,7 @@ func (s *Server) executeInboundPlan(ctx context.Context, cs *connState, c *Conn,
 			if owner, _ := item.payload.(*rpcResultOwnerLease); owner != nil {
 				owner.CompleteExecution(false)
 			}
-			if err := s.sendResult(ctx, c, item.msgID, &mt.RPCError{
-				ErrorCode:    420,
-				ErrorMessage: "FLOOD_WAIT_1",
-			}); err != nil {
+			if err := s.sendResult(ctx, c, item.msgID, rpcWorkerBusyError()); err != nil {
 				return err
 			}
 		case inboundItemRPCAdmissionError:

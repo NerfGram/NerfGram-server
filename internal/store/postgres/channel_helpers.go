@@ -31,7 +31,10 @@ func (s *ChannelStore) SaveChannelDefaultSendAs(ctx context.Context, req domain.
 	}
 	topMessageID := channel.TopMessageID
 	if topMessageID <= member.AvailableMinID {
-		topMessageID = 0
+		topMessageID = member.HistoryClearAnchorID
+		if topMessageID != member.AvailableMinID {
+			topMessageID = 0
+		}
 	}
 	if _, err := s.db.Exec(ctx, `
 INSERT INTO channel_dialogs (
@@ -150,11 +153,28 @@ func (s *ChannelStore) SearchPublicChannels(ctx context.Context, viewerUserID in
 	queryPrefix := escapeLike(queryLower) + "%"
 	queryLike := "%" + escapeLike(queryLower) + "%"
 	rows, err := s.db.Query(ctx, `
+WITH username_matches AS (
+  SELECT
+    peer_id,
+    MIN(CASE
+      WHEN username_lower = $2 THEN 0
+      ELSE 1
+    END) AS rank
+  FROM peer_usernames
+  WHERE peer_type = 'channel'
+    AND active
+    AND collectible_id IS NOT NULL
+    AND (
+      username_lower = $2
+      OR username_lower LIKE $3 ESCAPE '\'
+    )
+  GROUP BY peer_id
+)
 SELECT `+channelColumns+`
 FROM channels c
+LEFT JOIN username_matches um ON um.peer_id = c.id
 WHERE NOT c.deleted
   AND (c.broadcast OR c.megagroup)
-  AND COALESCE(c.username, '') <> ''
   AND NOT EXISTS (
     SELECT 1
     FROM channel_members m
@@ -163,15 +183,16 @@ WHERE NOT c.deleted
       AND m.status = 'active'
   )
   AND (
-    lower(c.username) = $2
+    um.peer_id IS NOT NULL
+    OR lower(c.username) = $2
     OR lower(c.username) LIKE $3 ESCAPE '\'
     OR lower(c.title) LIKE $3 ESCAPE '\'
     OR lower(c.username) LIKE $4 ESCAPE '\'
     OR lower(c.title) LIKE $4 ESCAPE '\'
   )
 ORDER BY CASE
-    WHEN lower(c.username) = $2 THEN 0
-    WHEN lower(c.username) LIKE $3 ESCAPE '\' THEN 1
+    WHEN um.rank = 0 OR lower(c.username) = $2 THEN 0
+    WHEN um.rank = 1 OR lower(c.username) LIKE $3 ESCAPE '\' THEN 1
     WHEN lower(c.username) LIKE $4 ESCAPE '\' THEN 2
     WHEN lower(c.title) LIKE $3 ESCAPE '\' THEN 3
     ELSE 4
@@ -310,7 +331,8 @@ WITH visible_channels AS (
     WHERE mono.monoforum AND NOT mono.deleted
       AND (EXISTS (
             SELECT 1 FROM channel_members admin
-            WHERE admin.channel_id = parent.id AND admin.user_id = $1 AND admin.status = 'active' AND admin.role IN ('creator', 'admin')
+            WHERE admin.channel_id = parent.id AND admin.user_id = $1 AND admin.status = 'active'
+              AND (admin.role = 'creator' OR (admin.role = 'admin' AND COALESCE((admin.admin_rights->>'ManageDirectMessages')::boolean, false)))
           ) OR EXISTS (
             SELECT 1 FROM channel_messages message
             WHERE message.channel_id = mono.id AND message.saved_peer_type = 'user' AND message.saved_peer_id = $1 AND NOT message.deleted
@@ -355,7 +377,8 @@ WITH visible_channels AS (
     WHERE mono.monoforum AND NOT mono.deleted
       AND (EXISTS (
             SELECT 1 FROM channel_members admin
-            WHERE admin.channel_id = parent.id AND admin.user_id = $1 AND admin.status = 'active' AND admin.role IN ('creator', 'admin')
+            WHERE admin.channel_id = parent.id AND admin.user_id = $1 AND admin.status = 'active'
+              AND (admin.role = 'creator' OR (admin.role = 'admin' AND COALESCE((admin.admin_rights->>'ManageDirectMessages')::boolean, false)))
           ) OR EXISTS (
             SELECT 1 FROM channel_messages message
             WHERE message.channel_id = mono.id AND message.saved_peer_type = 'user' AND message.saved_peer_id = $1 AND NOT message.deleted
@@ -373,15 +396,59 @@ LIMIT $4`, userID, sinceDate, afterChannelID, limit)
 		return nil, fmt.Errorf("list dirty active channels for user: %w", err)
 	}
 	defer rows.Close()
-	out := make([]domain.DirtyChannel, 0, limit)
+	byChannelID := make(map[int64]domain.DirtyChannel, limit*2)
 	for rows.Next() {
 		var item domain.DirtyChannel
 		if err := rows.Scan(&item.ChannelID, &item.Pts); err != nil {
 			return nil, err
 		}
+		item.ChannelUpdatesDirty = true
+		byChannelID[item.ChannelID] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	clearRows, err := s.db.Query(ctx, `
+SELECT i.channel_id, c.pts, i.available_min_id, i.history_clear_updated_at
+FROM user_channel_member_index i
+JOIN channels c ON c.id = i.channel_id AND NOT c.deleted
+WHERE i.user_id = $1
+  AND i.status = 'active'
+  AND NOT i.deleted
+  AND i.channel_id > $3
+  AND i.history_clear_anchor_id > 0
+  AND i.history_clear_anchor_id = i.available_min_id
+  AND i.history_clear_updated_at >= $2
+ORDER BY i.channel_id ASC
+LIMIT $4`, userID, sinceDate, afterChannelID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list owner-local channel history clears for user: %w", err)
+	}
+	defer clearRows.Close()
+	for clearRows.Next() {
+		var item domain.DirtyChannel
+		if err := clearRows.Scan(&item.ChannelID, &item.Pts, &item.AvailableMinID, &item.HistoryClearDate); err != nil {
+			return nil, err
+		}
+		if existing, ok := byChannelID[item.ChannelID]; ok {
+			item.ChannelUpdatesDirty = existing.ChannelUpdatesDirty
+		}
+		byChannelID[item.ChannelID] = item
+	}
+	if err := clearRows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]domain.DirtyChannel, 0, len(byChannelID))
+	for _, item := range byChannelID {
 		out = append(out, item)
 	}
-	return out, rows.Err()
+	sort.Slice(out, func(i, j int) bool { return out[i].ChannelID < out[j].ChannelID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 type rowScanner interface {
@@ -419,7 +486,12 @@ func (s *ChannelStore) getChannelForViewer(ctx context.Context, db sqlcgen.DBTX,
 			return ch, syntheticMonoforumUserMember(ch, viewerUserID), true, nil
 		}
 	}
-	if !publicPreviewableChannel(ch) {
+	publicUsernameIDs, err := activeCollectibleUsernamePeerIDs(ctx, db, peerUsernameTypeChannel, []int64{ch.ID})
+	if err != nil {
+		return domain.Channel{}, domain.ChannelMember{}, false, err
+	}
+	_, hasActiveUsername := publicUsernameIDs[ch.ID]
+	if !publicPreviewableChannel(ch, hasActiveUsername) {
 		return domain.Channel{}, domain.ChannelMember{}, false, domain.ErrChannelPrivate
 	}
 	member, err = s.getPublicPreviewMember(ctx, db, viewerUserID, ch)
@@ -427,6 +499,19 @@ func (s *ChannelStore) getChannelForViewer(ctx context.Context, db sqlcgen.DBTX,
 		return domain.Channel{}, domain.ChannelMember{}, false, err
 	}
 	return ch, member, true, nil
+}
+
+// channelMessageVisibleToViewer applies the message-level half of synthetic monoforum access.
+// Subscribers do not have channel_members rows and may only address saved_peer=self; a synthetic
+// manager view may address every subscriber sub-dialog.
+func channelMessageVisibleToViewer(channel domain.Channel, member domain.ChannelMember, viewerUserID int64, msg domain.ChannelMessage) bool {
+	if !channel.Monoforum {
+		return true
+	}
+	if member.CanManageDirectMessages() {
+		return true
+	}
+	return msg.SavedPeer == (domain.Peer{Type: domain.PeerTypeUser, ID: viewerUserID})
 }
 
 func getChannelByID(ctx context.Context, db sqlcgen.DBTX, channelID int64) (domain.Channel, error) {
