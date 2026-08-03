@@ -7,11 +7,11 @@ import (
 )
 
 const (
-	DefaultPublicBaseURL = "https://telesrv.net"
-	DefaultWebBaseURL    = "https://web.telesrv.net"
-	DefaultAppScheme     = "telesrv"
-	DefaultAppName       = "telesrv"
-	DefaultDownloadURL   = "https://owpengram.org"
+	DefaultPublicBaseURL = "https://nerfgram.space"
+	DefaultWebBaseURL    = "https://nerfgram.space"
+	DefaultAppScheme     = "nerfgram"
+	DefaultAppName       = "nerfgram"
+	DefaultDownloadURL   = "https://nerfgram.space"
 )
 const MaxChatlistSlugBytes = 128
 
