@@ -169,11 +169,16 @@ type Config struct {
 	// 达到上限后验证码立即失效，用户必须重发。
 	AuthCodeMaxAttempts int
 	// AuthCodePhoneRateLimit / AuthCodeAuthKeyRateLimit 对未授权验证码签发按规范化手机号摘要
-	// 与连接实际 raw auth_key 分别限流。两个维度共用 AuthCodeRateWindow；<=0 关闭对应维度。
+	// 与连接实际 raw auth_key 分别限流。AuthCodeGlobalRateLimit 是进程级 sendCode 总预算。
+	// 两个 per-dimension 预算与 global 共用 AuthCodeRateWindow；<=0 关闭对应维度。
 	// 手机号只以 SHA-256 摘要进入限流 key，禁止把原文写入 Redis key 或日志。
 	AuthCodePhoneRateLimit   int
 	AuthCodeAuthKeyRateLimit int
+	AuthCodeGlobalRateLimit  int
 	AuthCodeRateWindow       time.Duration
+	// SignUpRateLimit 限制 auth.signUp 全服创建速率；<=0 关闭。
+	SignUpRateLimit  int
+	SignUpRateWindow time.Duration
 	// LoginEmailEnable 启用手机号登录流程中的邮箱验证码投递。
 	LoginEmailEnable bool
 	// LoginEmailRequireSetup 为 true 时，没有登录邮箱的账号/新手机号会要求先设置邮箱。
@@ -624,7 +629,7 @@ func Load() (Config, error) {
 		DefaultCountryCode:                countryCode,
 		StrictDCCheck:                     envBoolOr("TELESRV_STRICT_DC_CHECK", false),
 		MTProtoMaxConnections:             envIntOr("TELESRV_MTPROTO_MAX_CONNECTIONS", 200000),
-		MTProtoMaxConnectionsPerIP:        envIntOr("TELESRV_MTPROTO_MAX_CONNECTIONS_PER_IP", 4096),
+		MTProtoMaxConnectionsPerIP:        envIntOr("TELESRV_MTPROTO_MAX_CONNECTIONS_PER_IP", 64),
 		MTProtoMaxConcurrentHandshakes:    envIntOr("TELESRV_MTPROTO_MAX_CONCURRENT_HANDSHAKES", 256),
 		MTProtoRPCMaxInflight:             envIntOr("TELESRV_MTPROTO_RPC_MAX_INFLIGHT", 32),
 		MTProtoRPCQueueSize:               envIntOr("TELESRV_MTPROTO_RPC_QUEUE_SIZE", 64),
@@ -688,9 +693,12 @@ func Load() (Config, error) {
 		AuthCodeTTL:                   envDurationOr("TELESRV_AUTH_CODE_TTL", 5*time.Minute),
 		PhoneCodeLength:               envIntOr("TELESRV_PHONE_CODE_LENGTH", 5),
 		AuthCodeMaxAttempts:           envIntOr("TELESRV_AUTH_CODE_MAX_ATTEMPTS", 5),
-		AuthCodePhoneRateLimit:        envIntOr("TELESRV_AUTH_CODE_PHONE_RATE_LIMIT", 5),
-		AuthCodeAuthKeyRateLimit:      envIntOr("TELESRV_AUTH_CODE_AUTH_KEY_RATE_LIMIT", 20),
-		AuthCodeRateWindow:            envDurationOr("TELESRV_AUTH_CODE_RATE_WINDOW", 10*time.Minute),
+		AuthCodePhoneRateLimit:        envIntOr("TELESRV_AUTH_CODE_PHONE_RATE_LIMIT", 3),
+		AuthCodeAuthKeyRateLimit:      envIntOr("TELESRV_AUTH_CODE_AUTH_KEY_RATE_LIMIT", 3),
+		AuthCodeGlobalRateLimit:       envIntOr("TELESRV_AUTH_CODE_GLOBAL_RATE_LIMIT", 30),
+		AuthCodeRateWindow:            envDurationOr("TELESRV_AUTH_CODE_RATE_WINDOW", time.Minute),
+		SignUpRateLimit:               envIntOr("TELESRV_SIGNUP_RATE_LIMIT", 10),
+		SignUpRateWindow:              envDurationOr("TELESRV_SIGNUP_RATE_WINDOW", time.Minute),
 		LoginEmailEnable:              envBoolOr("TELESRV_LOGIN_EMAIL_ENABLE", false),
 		LoginEmailRequireSetup:        envBoolOr("TELESRV_LOGIN_EMAIL_REQUIRE_SETUP", false),
 		LoginEmailCodeLength:          envIntOr("TELESRV_LOGIN_EMAIL_CODE_LENGTH", 6),

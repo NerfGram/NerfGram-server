@@ -14,7 +14,6 @@ import (
 const starsTestBotHelp = `FromGram Stars test bot
 
 Commands:
-/grant [amount] — credit Stars to your balance (default 100)
 /paidlink <channel_id> <amount> — export a monthly Stars invite for a channel you admin
 
 Then open the link on another account (or in an incognito session) to join and charge Stars.
@@ -24,19 +23,13 @@ type inviteExporter interface {
 	ExportInvite(ctx context.Context, userID int64, req domain.ExportChannelInviteRequest) (domain.ExportChannelInviteResult, error)
 }
 
-type starsLedger interface {
-	GetBalance(ctx context.Context, userID int64) (domain.StarsBalance, error)
-	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
-}
-
 // SetStarsTestDeps wires paid-invite helpers used by @StarsTestBot.
-// Call after channels + stars services exist (breaks construction order cycles).
-func (s *Service) SetStarsTestDeps(invites inviteExporter, stars starsLedger) {
+// Call after channels service exists (breaks construction order cycles).
+func (s *Service) SetStarsTestDeps(invites inviteExporter) {
 	if s == nil {
 		return
 	}
 	s.inviteExporter = invites
-	s.starsLedger = stars
 }
 
 func (s *Service) respondAsStarsTestBot(userID int64, body string) {
@@ -54,32 +47,11 @@ func (s *Service) handleStarsTestBot(ctx context.Context, userID int64, body str
 	switch cmd {
 	case "", "/start", "/help":
 		return botReply{Text: starsTestBotHelp}
-	case "/grant":
-		return s.starsTestGrant(ctx, userID, args)
 	case "/paidlink":
 		return s.starsTestPaidLink(ctx, userID, args)
 	default:
 		return botReply{Text: "Unknown command. Send /help."}
 	}
-}
-
-func (s *Service) starsTestGrant(ctx context.Context, userID int64, args string) botReply {
-	if s.starsLedger == nil {
-		return botReply{Text: "Stars ledger is not configured."}
-	}
-	amount := int64(100)
-	if args != "" {
-		parsed, err := strconv.ParseInt(args, 10, 64)
-		if err != nil || parsed <= 0 {
-			return botReply{Text: "Usage: /grant [amount]"}
-		}
-		amount = parsed
-	}
-	bal, err := s.starsLedger.Credit(ctx, userID, amount, domain.StarsReasonAdjust, domain.Peer{}, "StarsTestBot grant", "")
-	if err != nil {
-		return botReply{Text: "Could not credit Stars: " + err.Error()}
-	}
-	return botReply{Text: fmt.Sprintf("Credited %d Stars. Balance: %d.", amount, bal.Balance)}
 }
 
 func (s *Service) starsTestPaidLink(ctx context.Context, userID int64, args string) botReply {

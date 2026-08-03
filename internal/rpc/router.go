@@ -64,7 +64,11 @@ type Config struct {
 	// the second budget is keyed by the physical connection's raw auth_key_id.
 	AuthCodePhoneRateLimit   int
 	AuthCodeAuthKeyRateLimit int
+	AuthCodeGlobalRateLimit  int
 	AuthCodeRateWindow       time.Duration
+	// SignUpRateLimit caps auth.signUp server-wide; <=0 disables.
+	SignUpRateLimit  int
+	SignUpRateWindow time.Duration
 	// CatchupRateLimit/CatchupRateWindow 限制 difference 类 catch-up RPC（getChannelDifference /
 	// getPeerDialogs）的每用户频率（设计 Phase 2 / §10.3）：nudge 被消费后客户端会触发这两类
 	// catch-up，放开大群 nudge 全速前需 FLOOD_WAIT 兜底防风暴打爆 PG。两类各自独立计数、共用同一

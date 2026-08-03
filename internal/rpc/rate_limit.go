@@ -17,7 +17,10 @@ const sendRateLimitKeyPrefix = "messages:send:"
 const (
 	authCodePhoneRateLimitKeyPrefix   = "auth:code:phone-sha256:"
 	authCodeAuthKeyRateLimitKeyPrefix = "auth:code:raw-auth-key:"
-	defaultAuthCodeRateWindow         = 10 * time.Minute
+	authCodeGlobalRateLimitKey        = "auth:code:global"
+	signUpGlobalRateLimitKey          = "auth:signup:global"
+	defaultAuthCodeRateWindow         = time.Minute
+	defaultSignUpRateWindow           = time.Minute
 )
 
 const (
@@ -91,6 +94,9 @@ func (r *Router) checkAuthCodeRateLimit(ctx context.Context, phone string) error
 	if r.deps.Limiter == nil {
 		return nil
 	}
+	if err := r.checkAuthCodeGlobalRateLimit(ctx); err != nil {
+		return err
+	}
 	normalizedPhone := domain.NormalizePhone(phone)
 	if !domain.ValidPhone(normalizedPhone) {
 		return phoneNumberInvalidErr()
@@ -132,5 +138,51 @@ func (r *Router) checkAuthCodeRateLimitKey(ctx context.Context, key string, limi
 	r.log.Debug("auth code issuance rate limited",
 		zap.String("dimension", dimension),
 		zap.Int("retry_after", retryAfter))
+	return floodWaitErr(retryAfter)
+}
+
+func (r *Router) checkAuthCodeGlobalRateLimit(ctx context.Context) error {
+	if r.deps.Limiter == nil {
+		return nil
+	}
+	limit := r.cfg.AuthCodeGlobalRateLimit
+	if limit <= 0 {
+		return nil
+	}
+	window := r.cfg.AuthCodeRateWindow
+	if window <= 0 {
+		window = defaultAuthCodeRateWindow
+	}
+	return r.checkAuthCodeRateLimitKey(ctx, authCodeGlobalRateLimitKey, limit, window, "global")
+}
+
+// checkSignUpRateLimit caps account creation server-wide. Bot farms rotate phones
+// and auth keys to bypass per-dimension sendCode budgets; this is the backstop.
+func (r *Router) checkSignUpRateLimit(ctx context.Context) error {
+	if r.deps.Limiter == nil {
+		return nil
+	}
+	limit := r.cfg.SignUpRateLimit
+	if limit <= 0 {
+		return nil
+	}
+	window := r.cfg.SignUpRateWindow
+	if window <= 0 {
+		window = defaultSignUpRateWindow
+	}
+	allowed, retryAfter, err := r.deps.Limiter.AllowN(ctx, signUpGlobalRateLimitKey, 1, limit, window)
+	if err != nil {
+		return internalErr()
+	}
+	if allowed {
+		return nil
+	}
+	if retryAfter <= 0 {
+		retryAfter = 1
+	}
+	r.log.Info("auth sign-up rate limited",
+		zap.Int("retry_after", retryAfter),
+		zap.Int("limit", limit),
+		zap.Duration("window", window))
 	return floodWaitErr(retryAfter)
 }

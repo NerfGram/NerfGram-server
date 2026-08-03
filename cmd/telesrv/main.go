@@ -1052,7 +1052,7 @@ func run(logger *zap.Logger) error {
 		channelapp.WithReadModelVersions(readModelVersionStore),
 		channelapp.WithSendPermissionChecker(adminService),
 	)
-	botsService.SetStarsTestDeps(channelsService, starsService)
+	botsService.SetStarsTestDeps(channelsService)
 	communitiesService := communitiesapp.NewService(communityStore)
 	ephemeralService := ephemeralapp.NewService(ephemeralStore, channelsService, usersService, botsService)
 	storiesService := storiesapp.NewService(storyStore, storiesapp.WithChannelStoryAccess(channelsService))
@@ -1200,7 +1200,10 @@ func run(logger *zap.Logger) error {
 		SendRateWindow:           cfg.SendRateWindow,
 		AuthCodePhoneRateLimit:   cfg.AuthCodePhoneRateLimit,
 		AuthCodeAuthKeyRateLimit: cfg.AuthCodeAuthKeyRateLimit,
+		AuthCodeGlobalRateLimit:  cfg.AuthCodeGlobalRateLimit,
 		AuthCodeRateWindow:       cfg.AuthCodeRateWindow,
+		SignUpRateLimit:          cfg.SignUpRateLimit,
+		SignUpRateWindow:         cfg.SignUpRateWindow,
 		CatchupRateLimit:         cfg.CatchupRateLimit,
 		CatchupRateWindow:        cfg.CatchupRateWindow,
 		ChannelNudgeMaxTargets:   cfg.ChannelNudgeMaxTargets,

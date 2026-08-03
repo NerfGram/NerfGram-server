@@ -112,7 +112,6 @@ type Service struct {
 	verifierTargets       verifierBotTargets
 	telegramLogin         *telegramloginapp.Service
 	inviteExporter        inviteExporter
-	starsLedger           starsLedger
 	hooks                 RouterHooks
 	textDrafts            TextDraftPusher
 	userCache             store.UserCache

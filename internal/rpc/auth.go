@@ -951,6 +951,9 @@ func (r *Router) onAuthImportBotAuthorization(ctx context.Context, req *tg.AuthI
 
 // onAuthSignUp 处理 auth.signUp：创建用户并绑定授权。
 func (r *Router) onAuthSignUp(ctx context.Context, req *tg.AuthSignUpRequest) (tg.AuthAuthorizationClass, error) {
+	if err := r.checkSignUpRateLimit(ctx); err != nil {
+		return nil, err
+	}
 	u, loginMessage, err := r.deps.Auth.SignUp(ctx, r.authzFromCtx(ctx), req.PhoneNumber, req.PhoneCodeHash, req.FirstName, req.LastName)
 	if err != nil {
 		return nil, signInErr(err)

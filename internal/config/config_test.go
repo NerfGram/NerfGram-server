@@ -335,10 +335,12 @@ func TestLoadLoginEmailDefaultsDisabled(t *testing.T) {
 	}
 	if cfg.AuthCodeTTL != 5*time.Minute || cfg.AuthCodeMaxAttempts != 5 || cfg.LoginEmailCodeLength != 6 ||
 		cfg.PhoneCodeLength != 5 || cfg.PhoneCodeDeliveryProvider != "development" || cfg.EmailCodeDeliveryProvider != "smtp" ||
-		cfg.AuthCodePhoneRateLimit != 5 || cfg.AuthCodeAuthKeyRateLimit != 20 || cfg.AuthCodeRateWindow != 10*time.Minute {
-		t.Fatalf("auth/login email defaults = ttl=%v attempts=%d length=%d phone_limit=%d key_limit=%d window=%v",
+		cfg.AuthCodePhoneRateLimit != 3 || cfg.AuthCodeAuthKeyRateLimit != 3 || cfg.AuthCodeGlobalRateLimit != 30 ||
+		cfg.AuthCodeRateWindow != time.Minute || cfg.SignUpRateLimit != 10 || cfg.SignUpRateWindow != time.Minute {
+		t.Fatalf("auth/login email defaults = ttl=%v attempts=%d length=%d phone_limit=%d key_limit=%d global_limit=%d window=%v signup_limit=%d signup_window=%v",
 			cfg.AuthCodeTTL, cfg.AuthCodeMaxAttempts, cfg.LoginEmailCodeLength,
-			cfg.AuthCodePhoneRateLimit, cfg.AuthCodeAuthKeyRateLimit, cfg.AuthCodeRateWindow)
+			cfg.AuthCodePhoneRateLimit, cfg.AuthCodeAuthKeyRateLimit, cfg.AuthCodeGlobalRateLimit, cfg.AuthCodeRateWindow,
+			cfg.SignUpRateLimit, cfg.SignUpRateWindow)
 	}
 }
 
