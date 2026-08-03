@@ -64,15 +64,25 @@ func replacePeerUsernameTx(ctx context.Context, tx pgx.Tx, peerType string, peer
 			return domain.ErrUsernameOccupied
 		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM peer_usernames WHERE peer_type = $1 AND peer_id = $2`, peerType, peerID); err != nil {
-		return fmt.Errorf("delete peer username: %w", err)
+	if peerType == peerUsernameTypeUser {
+		if _, err := tx.Exec(ctx, `
+DELETE FROM peer_usernames 
+WHERE peer_type = $1 AND peer_id = $2 
+  AND username_lower NOT IN (SELECT LOWER(username) FROM public.collectible_usernames WHERE owner_user_id = $2)`, peerType, peerID); err != nil {
+			return fmt.Errorf("delete peer username: %w", err)
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `DELETE FROM peer_usernames WHERE peer_type = $1 AND peer_id = $2`, peerType, peerID); err != nil {
+			return fmt.Errorf("delete peer username: %w", err)
+		}
 	}
 	if usernameLower == "" {
 		return nil
 	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO peer_usernames (username_lower, peer_type, peer_id)
-VALUES ($1, $2, $3)`, usernameLower, peerType, peerID); err != nil {
+VALUES ($1, $2, $3)
+ON CONFLICT (username_lower) DO NOTHING`, usernameLower, peerType, peerID); err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrUsernameOccupied
 		}

@@ -61,6 +61,9 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 	registerRPC[*tg.AccountToggleUsernameRequest](d, tlprofile.SemanticMethodAccountToggleUsername, func(ctx context.Context, layerRequest *tg.AccountToggleUsernameRequest) (any, error) {
 		return r.onAccountToggleUsername(ctx, layerRequest)
 	})
+	registerRPC[*tg.AccountReorderUsernamesRequest](d, tlprofile.SemanticMethodAccountReorderUsernames, func(ctx context.Context, layerRequest *tg.AccountReorderUsernamesRequest) (any, error) {
+		return r.onAccountReorderUsernames(ctx, layerRequest)
+	})
 	registerRPC[*tg.AccountUpdateBirthdayRequest](d, tlprofile.SemanticMethodAccountUpdateBirthday, func(ctx context.Context, layerRequest *tg.AccountUpdateBirthdayRequest) (any, error) {
 		return r.onAccountUpdateBirthday(ctx, layerRequest)
 	})
@@ -1566,6 +1569,50 @@ func (r *Router) onAccountToggleUsername(ctx context.Context, req *tg.AccountTog
 	if r.deps.Users != nil {
 		if u, err := r.deps.Users.Self(ctx, userID); err == nil {
 			r.pushUsernameUpdate(ctx, u)
+		}
+	}
+	return true, nil
+}
+
+// onAccountReorderUsernames updates the preferred ordering and active state of a user's usernames.
+// The first username in req.Order becomes the active username shown on the user's profile.
+func (r *Router) onAccountReorderUsernames(ctx context.Context, req *tg.AccountReorderUsernamesRequest) (bool, error) {
+	userID, _, err := r.currentUserID(ctx)
+	if err != nil {
+		return false, internalErr()
+	}
+	if len(req.Order) == 0 {
+		return false, usernameNotModifiedErr()
+	}
+	if r.deps.CollectibleUsernames == nil {
+		return false, usernameInvalidErr()
+	}
+	first := strings.TrimSpace(strings.TrimPrefix(req.Order[0], "@"))
+	if r.deps.Users == nil {
+		return false, internalErr()
+	}
+	u, err := r.deps.Users.Self(ctx, userID)
+	if err != nil {
+		return false, internalErr()
+	}
+	if strings.EqualFold(u.Username, first) {
+		if u.CollectibleUsernameActive && u.CollectibleUsername != "" {
+			if err := r.deps.CollectibleUsernames.SetActive(ctx, u.CollectibleUsername, userID, false); err != nil {
+				return false, err
+			}
+		}
+	} else {
+		if err := r.deps.CollectibleUsernames.SetActive(ctx, first, userID, true); err != nil {
+			if errors.Is(err, domain.ErrCollectibleUsernameNotFound) {
+				return false, usernameInvalidErr()
+			}
+			return false, err
+		}
+	}
+	r.invalidateRPCProjectionForUser(userID)
+	if r.deps.Users != nil {
+		if updatedUser, err := r.deps.Users.Self(ctx, userID); err == nil {
+			r.pushUsernameUpdate(ctx, updatedUser)
 		}
 	}
 	return true, nil

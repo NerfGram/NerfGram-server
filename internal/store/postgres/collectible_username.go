@@ -72,7 +72,7 @@ func (s *CollectibleUsernameStore) ByOwners(ctx context.Context, ownerUserIDs []
 	if len(ownerUserIDs) == 0 {
 		return nil, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT `+collectibleUsernameColumns+` FROM public.collectible_usernames WHERE owner_user_id = ANY($1)`, ownerUserIDs)
+	rows, err := s.db.Query(ctx, `SELECT `+collectibleUsernameColumns+` FROM public.collectible_usernames WHERE owner_user_id = ANY($1) ORDER BY active DESC, purchase_date DESC`, ownerUserIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +84,9 @@ func (s *CollectibleUsernameStore) ByOwners(ctx context.Context, ownerUserIDs []
 			return nil, err
 		}
 		if cu.OwnerUserID != 0 {
-			out[cu.OwnerUserID] = cu
+			if _, exists := out[cu.OwnerUserID]; !exists {
+				out[cu.OwnerUserID] = cu
+			}
 		}
 	}
 	return out, rows.Err()
@@ -110,16 +112,17 @@ func (s *CollectibleUsernameStore) Issue(ctx context.Context, cu domain.Collecti
 	}
 	var out domain.CollectibleUsername
 	err := withTx(ctx, s.db, "issue collectible username", func(tx pgx.Tx) error {
-		_, found, err := getPeerUsernameOwner(ctx, tx, normalized, true)
+		owner, found, err := getPeerUsernameOwner(ctx, tx, normalized, true)
 		if err != nil {
 			return err
 		}
-		if found {
+		if found && !owner.matches(peerUsernameTypeUser, cu.OwnerUserID) {
 			return domain.ErrUsernameOccupied
 		}
 		if _, err := tx.Exec(ctx, `
 INSERT INTO peer_usernames (username_lower, peer_type, peer_id)
-VALUES ($1, $2, $3)`, normalized, peerUsernameTypeUser, cu.OwnerUserID); err != nil {
+VALUES ($1, $2, $3)
+ON CONFLICT (username_lower) DO NOTHING`, normalized, peerUsernameTypeUser, cu.OwnerUserID); err != nil {
 			if isUniqueViolation(err) {
 				return domain.ErrUsernameOccupied
 			}
