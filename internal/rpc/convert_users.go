@@ -222,22 +222,21 @@ func tgUserStatus(status domain.UserStatus) tg.UserStatusClass {
 func tgUsernames(username, collectibleUsername string, collectibleActive bool) []tg.Username {
 	var out []tg.Username
 	if username != "" {
-		out = append(out, tg.Username{Editable: true, Active: !collectibleActive || collectibleUsername == "", Username: username})
+		out = append(out, tg.Username{Editable: true, Active: true, Username: username})
 	}
 	if collectibleUsername != "" {
-		out = append(out, tg.Username{Editable: false, Active: collectibleActive, Username: collectibleUsername})
+		out = append(out, tg.Username{Editable: false, Active: true, Collectible: true, Username: collectibleUsername})
 	}
 	return out
 }
 
 // tgActiveUsername returns whichever username should populate the top-level
-// (legacy, pre-multi-username) Username field: the collectible one if it's
-// the active one, otherwise the account's editable username.
+// (legacy, pre-multi-username) Username field: primary username if set, else collectible.
 func tgActiveUsername(username, collectibleUsername string, collectibleActive bool) string {
-	if collectibleActive && collectibleUsername != "" {
-		return collectibleUsername
+	if username != "" {
+		return username
 	}
-	return username
+	return collectibleUsername
 }
 
 func tgContacts(list domain.ContactList) tg.ContactsContactsClass {
