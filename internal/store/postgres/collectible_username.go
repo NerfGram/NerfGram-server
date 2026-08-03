@@ -122,22 +122,27 @@ func (s *CollectibleUsernameStore) Issue(ctx context.Context, cu domain.Collecti
 		if _, err := tx.Exec(ctx, `
 INSERT INTO peer_usernames (username_lower, peer_type, peer_id)
 VALUES ($1, $2, $3)
-ON CONFLICT (username_lower) DO NOTHING`, normalized, peerUsernameTypeUser, cu.OwnerUserID); err != nil {
-			if isUniqueViolation(err) {
-				return domain.ErrUsernameOccupied
-			}
+ON CONFLICT (username_lower) DO UPDATE SET peer_type = EXCLUDED.peer_type, peer_id = EXCLUDED.peer_id`, normalized, peerUsernameTypeUser, cu.OwnerUserID); err != nil {
 			return err
 		}
 		row := tx.QueryRow(ctx, `
 INSERT INTO public.collectible_usernames (username, owner_user_id, active, purchase_date, currency, amount, crypto_currency, crypto_amount, url, created_by, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+ON CONFLICT (username) DO UPDATE SET
+  owner_user_id = EXCLUDED.owner_user_id,
+  active = EXCLUDED.active,
+  purchase_date = EXCLUDED.purchase_date,
+  currency = EXCLUDED.currency,
+  amount = EXCLUDED.amount,
+  crypto_currency = EXCLUDED.crypto_currency,
+  crypto_amount = EXCLUDED.crypto_amount,
+  url = EXCLUDED.url,
+  created_by = EXCLUDED.created_by,
+  updated_at = now()
 RETURNING `+collectibleUsernameColumns,
 			normalized, cu.OwnerUserID, cu.Active, cu.PurchaseDate, cu.Currency, cu.Amount, cu.CryptoCurrency, cu.CryptoAmount, cu.URL, createdBy)
 		result, err := scanCollectibleUsername(row)
 		if err != nil {
-			if isUniqueViolation(err) {
-				return domain.ErrUsernameOccupied
-			}
 			return err
 		}
 		out = result
