@@ -201,6 +201,18 @@ func (s *CollectibleUsernameStore) MintCollectibleUsername(ctx context.Context, 
 		// the asset itself is decided by the live rows only: 0152 narrowed
 		// uniqueness to status <> 'burned', so a retired name can be issued again
 		// while its burned rows stay as provenance.
+		// Additionally, ensure no live user currently has the same username
+		// (case-insensitive) to avoid creating a collectible whose plain username
+		// is already in use by someone.
+		var existingUserID int64
+		if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE lower(username) = $1 LIMIT 1`, usernameLower).Scan(&existingUserID); err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("check existing user by username: %w", err)
+			}
+		} else {
+			// an existing live user's username prevents minting this collectible
+			return domain.ErrUsernameOccupied
+		}
 		if _, found, err := getPeerUsernameOwner(ctx, tx, usernameLower, true); err != nil {
 			return err
 		} else if found {

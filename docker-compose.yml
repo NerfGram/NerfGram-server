@@ -81,7 +81,11 @@ services:
       TELESRV_ADMIN_API_TOKEN: "changeme_admin_api_token"
       TELESRV_ADMIN_UI_PASSWORD: "changeme_ui_password"
     volumes:
-      - ./data:/app/data
+      - appdata:/app/data
+      # keep stickers, gifts and emojis on the host (excluded from the volume backups)
+      - ./data/official-gifts:/app/data/official-gifts
+      - ./data/sticker-seed:/app/data/sticker-seed
+      - ./data/emojis:/app/data/emojis
     ports:
       - "2398:2398"
       - "2599:2599"
@@ -116,7 +120,10 @@ services:
       TELESRV_POSTGRES_DSN: "postgres://telesrv:telesrv@postgres:5432/telesrv?sslmode=disable"
       TELESRV_REDIS_ADDR: "redis:6379"
     volumes:
-      - ./data:/app/data
+      - appdata:/app/data
+      - ./data/official-gifts:/app/data/official-gifts
+      - ./data/sticker-seed:/app/data/sticker-seed
+      - ./data/emojis:/app/data/emojis
     ports:
       - "2600:2600"
     restart: unless-stopped
@@ -124,4 +131,5 @@ services:
 volumes:
   pgdata:
   redisdata:
+  appdata:
 
