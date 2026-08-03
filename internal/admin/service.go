@@ -252,6 +252,7 @@ type GiftsService interface {
 	CreateCollectibleRevision(ctx context.Context, write domain.StarGiftCollectibleWrite) (domain.StarGiftCollectibleRevision, error)
 	CollectiblePreview(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error)
 	CollectibleAnimationJSON(ctx context.Context, giftID int64, kind domain.StarGiftCollectibleAttributeKind, attributeID int64) ([]byte, bool, error)
+	OfficialGiftImportIndex(ctx context.Context) (map[int64]domain.OfficialGiftImportState, error)
 }
 
 type OfficialGiftsSource interface {

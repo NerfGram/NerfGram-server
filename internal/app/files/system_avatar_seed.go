@@ -2,19 +2,16 @@ package files
 
 import (
 	"context"
-	_ "embed"
 	"fmt"
+	"os"
 	"time"
 
 	"telesrv/internal/domain"
 )
 
-//go:embed seedassets/fromgram_system_avatar.png
-var officialSystemAvatarPNG []byte
-
 // SeedOfficialSystemAvatar idempotently seeds the built-in official system
-// account's (777000) profile photo from the bundled brand logo, writing it
-// under the fixed domain.OfficialSystemUserPhotoID so the photo/blob layer
+// account's (777000) profile photo from the configured brand logo path, writing
+// it under the fixed domain.OfficialSystemUserPhotoID so the photo/blob layer
 // and the pure domain.OfficialSystemUser() struct literal stay in sync
 // across restarts. It also registers the photo as the account's *current*
 // profile photo (the profile_photos association) — without this, list
@@ -23,8 +20,16 @@ var officialSystemAvatarPNG []byte
 // finds nothing, and the client wipes the avatar it just showed.
 // Returns true if it actually wrote a new photo.
 func (s *Service) SeedOfficialSystemAvatar(ctx context.Context) (bool, error) {
+	path := s.systemAvatarPath
+	if path == "" {
+		path = "downloads/FromGram.png"
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read system avatar %q: %w", path, err)
+	}
 	photoID := domain.OfficialSystemUserPhotoID
-	sizes, err := s.putAvatarStaticSizes(ctx, photoID, officialSystemAvatarPNG, photoSizeSpecsForAvatar(officialSystemAvatarPNG))
+	sizes, err := s.putAvatarStaticSizes(ctx, photoID, raw, photoSizeSpecsForAvatar(raw))
 	if err != nil {
 		return false, err
 	}

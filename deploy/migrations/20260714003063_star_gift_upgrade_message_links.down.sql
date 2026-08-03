@@ -1,5 +1,2 @@
--- Projection repair events are durable account history and are intentionally
--- not erased on rollback. Only remove the replay receipt column.
-ALTER TABLE public.star_gift_upgrade_commands
-    DROP CONSTRAINT IF EXISTS star_gift_upgrade_command_source_edit_pts_check,
-    DROP COLUMN IF EXISTS source_edit_pts;
+-- Reverted by renumbered migration 0106_star_gift_upgrade_message_links.
+SELECT 1;

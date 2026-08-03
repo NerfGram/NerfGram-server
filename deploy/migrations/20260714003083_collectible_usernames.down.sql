@@ -1,1 +1,2 @@
-DROP TABLE IF EXISTS public.collectible_usernames;
+-- Superseded by 0151_collectible_usernames.
+SELECT 1;

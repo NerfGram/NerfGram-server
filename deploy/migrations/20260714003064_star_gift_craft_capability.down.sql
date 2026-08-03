@@ -1,4 +1,2 @@
--- This migration repairs invalid persisted capabilities and intentionally does
--- not restore them on downgrade: advertising Craft without an official crafted
--- model would reintroduce a user-visible operation that can never succeed.
+-- Reverted by renumbered migration 0097_star_gift_craft_capability.
 SELECT 1;

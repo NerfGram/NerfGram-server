@@ -155,6 +155,13 @@ func (s *Service) GiftRevisionByID(ctx context.Context, revisionID int64) (domai
 	return s.store.CatalogRevision(ctx, revisionID)
 }
 
+func (s *Service) OfficialGiftImportIndex(ctx context.Context) (map[int64]domain.OfficialGiftImportState, error) {
+	if s == nil || s.store == nil {
+		return map[int64]domain.OfficialGiftImportState{}, nil
+	}
+	return s.store.OfficialGiftImportIndex(ctx)
+}
+
 // InvalidateStarGiftCatalog implements the shared PostgreSQL read-model listener boundary.
 func (s *Service) InvalidateStarGiftCatalog() {
 	if s == nil {

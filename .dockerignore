@@ -17,11 +17,15 @@ build
 vendor
 /*.tar
 
-# Runtime data — mounted as a volume, must not bust the build context cache.
-data
-
-# Local BuildKit export (docker compose cache_to); not part of the image context.
-.docker-build-cache
+# Mutable runtime data — not baked into images.
+data/*
+!data/official-gifts/
+!data/official-gifts/**
+data/official-gifts/thumbs/
+data/official-gifts/thumbs/**
+backups
+downloads/*
+!downloads/FromGram.png
 
 # Docs and local tooling (not compiled into telesrv images).
 docs

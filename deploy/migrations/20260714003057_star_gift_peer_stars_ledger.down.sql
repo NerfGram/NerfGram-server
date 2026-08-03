@@ -1,3 +1,2 @@
-DROP TABLE IF EXISTS public.star_gift_conversions;
-DROP TABLE IF EXISTS public.channel_stars_transactions;
-DROP TABLE IF EXISTS public.channel_stars_balances;
+-- Reverted by renumbered migration 0100_star_gift_peer_stars_ledger.
+SELECT 1;

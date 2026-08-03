@@ -1,6 +1,9 @@
 -- Durable suggested-post approval/payment/publication state.  The row is the
 -- idempotency key for a monoforum suggestion; message/update rows remain the
 -- client-visible source of truth and are written in the same transaction.
+ALTER TABLE channel_messages
+    ADD COLUMN IF NOT EXISTS suggested_post jsonb NOT NULL DEFAULT '{}'::jsonb;
+
 CREATE TABLE public.suggested_post_approvals (
     monoforum_id bigint NOT NULL,
     suggestion_message_id integer NOT NULL,

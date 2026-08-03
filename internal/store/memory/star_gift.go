@@ -80,6 +80,10 @@ func (s *StarGiftStore) Catalog(_ context.Context) ([]domain.StarGift, error) {
 	return out, nil
 }
 
+func (s *StarGiftStore) OfficialGiftImportIndex(context.Context) (map[int64]domain.OfficialGiftImportState, error) {
+	return map[int64]domain.OfficialGiftImportState{}, nil
+}
+
 func (s *StarGiftStore) CatalogGift(_ context.Context, giftID int64) (domain.StarGift, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -717,6 +717,7 @@ func run(logger *zap.Logger) error {
 	)
 	filesService := filesapp.NewService(mediaStore, blobBackend, cfg.DC,
 		filesapp.WithLogger(logger),
+		filesapp.WithSystemAvatarPath(cfg.SystemAvatarPath),
 		filesapp.WithUploadPartQuota(domain.UploadPartQuota{
 			MaxBytes: cfg.UploadInFlightMaxBytes,
 			MaxParts: cfg.UploadInFlightMaxParts,
@@ -781,6 +782,11 @@ func run(logger *zap.Logger) error {
 		logger.Warn("默认 emoji status 系统集合成失败", zap.Error(err))
 	} else if created {
 		logger.Info("默认 emoji status 系统集已合成", zap.Int("documents", count))
+	}
+	if seeded, err := filesService.SeedOfficialSystemAvatar(ctx); err != nil {
+		logger.Warn("官方系统账号头像种子导入失败", zap.String("path", cfg.SystemAvatarPath), zap.Error(err))
+	} else if seeded {
+		logger.Info("官方系统账号头像种子导入完成", zap.String("path", cfg.SystemAvatarPath))
 	}
 	langPackStore := postgres.NewLangPackStore(pool)
 	passwordStore := postgres.NewPasswordStore(pool)
@@ -1314,6 +1320,25 @@ func run(logger *zap.Logger) error {
 		Verification:           verificationService,
 		BotVerification:        botVerificationService,
 	})
+	go func() {
+		stats, err := adminService.BootstrapOfficialStarGifts(ctx)
+		if err != nil {
+			logger.Warn("官方 star gift 自动导入未完成",
+				zap.Int("imported_regular", stats.ImportedRegular),
+				zap.Int("imported_collectible", stats.ImportedCollectible),
+				zap.Int("skipped_present", stats.SkippedPresent),
+				zap.Int("failed", stats.Failed),
+				zap.Error(err))
+			return
+		}
+		if stats.ImportedRegular > 0 || stats.ImportedCollectible > 0 {
+			logger.Info("官方 star gift 自动导入完成",
+				zap.Int("imported_regular", stats.ImportedRegular),
+				zap.Int("imported_collectible", stats.ImportedCollectible),
+				zap.Int("skipped_present", stats.SkippedPresent),
+				zap.Int("skipped_excluded", stats.SkippedExcluded))
+		}
+	}()
 	// The RPC edge owns the tg.* projection cache and the standard non-PTS
 	// updateUser/updateChannel refresh, so committed registry mutations are
 	// visible to online viewers immediately.

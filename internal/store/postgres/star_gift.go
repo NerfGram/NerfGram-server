@@ -64,6 +64,37 @@ ORDER BY c.sort_order, c.gift_id`)
 	return out, nil
 }
 
+func (s *StarGiftStore) OfficialGiftImportIndex(ctx context.Context) (map[int64]domain.OfficialGiftImportState, error) {
+	rows, err := s.db.Query(ctx, `
+SELECT r.official_gift_id, (c.collectible_revision_id IS NOT NULL)
+FROM star_gift_catalog c
+JOIN star_gift_catalog_revisions r ON r.id = c.active_revision_id
+WHERE r.official_gift_id IS NOT NULL`)
+	if err != nil {
+		return nil, fmt.Errorf("list imported official star gifts: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[int64]domain.OfficialGiftImportState)
+	for rows.Next() {
+		var officialID int64
+		var hasCollectible bool
+		if err := rows.Scan(&officialID, &hasCollectible); err != nil {
+			return nil, fmt.Errorf("scan imported official star gift: %w", err)
+		}
+		if officialID <= 0 {
+			continue
+		}
+		out[officialID] = domain.OfficialGiftImportState{
+			Imported:       true,
+			HasCollectible: hasCollectible,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate imported official star gifts: %w", err)
+	}
+	return out, nil
+}
+
 func (s *StarGiftStore) CatalogGift(ctx context.Context, giftID int64) (domain.StarGift, bool, error) {
 	if giftID <= 0 {
 		return domain.StarGift{}, false, nil

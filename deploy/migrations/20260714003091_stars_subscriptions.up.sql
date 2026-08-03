@@ -72,11 +72,16 @@ ON CONFLICT (bot_user_id) DO UPDATE SET
     commands = EXCLUDED.commands,
     updated_at = now();
 
-INSERT INTO public.peer_usernames (username_lower, peer_type, peer_id, updated_at)
-VALUES ('starstestbot', 'user', 1250000008, now())
+INSERT INTO public.peer_usernames (
+    username_lower, username, peer_type, peer_id, active, editable, sort_order, updated_at
+)
+VALUES ('starstestbot', 'StarsTestBot', 'user', 1250000008, true, true, 0, now())
 ON CONFLICT (username_lower) DO UPDATE SET
+    username = EXCLUDED.username,
     peer_type = EXCLUDED.peer_type,
     peer_id = EXCLUDED.peer_id,
+    active = EXCLUDED.active,
+    editable = EXCLUDED.editable,
     updated_at = now();
 
 INSERT INTO public.read_model_versions (model, owner_user_id, peer_type, peer_id, version, updated_at, hash)

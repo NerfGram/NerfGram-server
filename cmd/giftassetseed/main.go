@@ -1,5 +1,5 @@
-// Command giftassetseed downloads star-gift TGS assets from the TelegramGiftsAssests
-// GitHub CDN and patches data/official-gifts for FluxGram imports.
+// Command giftassetseed is a local maintenance tool for refreshing data/official-gifts
+// from a checkout or CDN. Production images read the committed repo snapshot instead.
 package main
 
 import (

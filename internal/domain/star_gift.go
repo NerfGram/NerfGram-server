@@ -14,6 +14,13 @@ import (
 // 持久化在 star_gift_catalog(_revisions)；peer 收到的礼物实例落 peer_star_gifts。
 // 与 Stars 账本配合：发礼 Debit、转换回 Stars 时 Credit。
 
+// OfficialGiftImportState records whether a Telegram official gift ID is already
+// present in the local catalog and whether its collectible pool was published.
+type OfficialGiftImportState struct {
+	Imported       bool
+	HasCollectible bool
+}
+
 // StarGift 是一个可购买礼物目录项。RevisionID 标识不可变的标题/价格/动画快照。
 type StarGift struct {
 	ID            int64

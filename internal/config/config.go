@@ -227,6 +227,8 @@ type Config struct {
 	LangPackSeedDir string
 	// OfficialGiftsDir 是 cmd/giftfetch 生成的只读官方礼物快照目录。
 	OfficialGiftsDir string
+	// SystemAvatarPath 是 777000 服务通知账号头像 PNG 路径。
+	SystemAvatarPath string
 	// StarGiftTONStartingGrant 是 telesrv 内部 TON 账本首次访问时授予的 nanoton。
 	// 该账本只用于自建服务端礼物链路，不连接任何外部区块链。
 	StarGiftTONStartingGrant int64
@@ -717,6 +719,7 @@ func Load() (Config, error) {
 		SMTPTimeout:                   envDurationOr("TELESRV_SMTP_TIMEOUT", 10*time.Second),
 		LangPackSeedDir:               envOr("TELESRV_LANGPACK_SEED_DIR", "data/langpack"),
 		OfficialGiftsDir:              envOr("TELESRV_OFFICIAL_GIFTS_DIR", "data/official-gifts"),
+		SystemAvatarPath:              envOr("TELESRV_SYSTEM_AVATAR_PATH", "downloads/FromGram.png"),
 		StarGiftTONStartingGrant:      envInt64Or("TELESRV_STARGIFT_TON_STARTING_GRANT", 10_000_000_000),
 		BlobDir:                       envOr("TELESRV_BLOB_DIR", "data/blobs"),
 		StickerSeedDir:                envOr("TELESRV_STICKER_SEED_DIR", "data/sticker-seed"),

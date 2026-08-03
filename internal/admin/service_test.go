@@ -1318,6 +1318,9 @@ func (*fakeGiftsService) CollectiblePreview(context.Context, int64) (domain.Star
 func (*fakeGiftsService) CollectibleAnimationJSON(context.Context, int64, domain.StarGiftCollectibleAttributeKind, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7"}`), true, nil
 }
+func (*fakeGiftsService) OfficialGiftImportIndex(context.Context) (map[int64]domain.OfficialGiftImportState, error) {
+	return map[int64]domain.OfficialGiftImportState{}, nil
+}
 
 func (f *fakeChannelNotifier) NotifyChannelChanged(_ context.Context, ch domain.Channel) error {
 	f.channels = append(f.channels, ch.ID)

@@ -1,9 +1,7 @@
 name: telesrv
 
-# BuildKit is required for Dockerfile cache mounts (apk/go). Set in .env:
-#   DOCKER_BUILDKIT=1
-#   COMPOSE_DOCKER_CLI_BUILD=1
-# Persistent local BuildKit cache (cache_to/cache_from) lives under .docker-build-cache/.
+# One-command setup: docker compose up --build
+# Star gifts / NFT assets are baked into the telesrv image from data/official-gifts/.
 
 services:
   postgres:
@@ -58,10 +56,6 @@ services:
       target: telesrv
       args:
         GO_VERSION: "1.26"
-      cache_from:
-        - type=local,src=.docker-build-cache/telesrv
-      cache_to:
-        - type=local,dest=.docker-build-cache/telesrv,mode=max
     container_name: telesrv-server
     image: telesrv-server:local
     depends_on:
@@ -75,6 +69,9 @@ services:
       TELESRV_POSTGRES_DSN: "postgres://telesrv:telesrv@postgres:5432/telesrv?sslmode=disable"
       TELESRV_REDIS_ADDR: "redis:6379"
       TELESRV_BLOB_DIR: "/app/data/blobs"
+      TELESRV_OFFICIAL_GIFTS_DIR: "/app/official-gifts"
+      TELESRV_STICKER_SEED_DIR: "/app/data/sticker-seed"
+      TELESRV_SYSTEM_AVATAR_PATH: "/app/downloads/FromGram.png"
       TELESRV_ADMIN_UI_ADDR: "0.0.0.0:2600"
       TELESRV_ADMIN_API_ADDR: "0.0.0.0:2599"
       # Set these in your .env or override via environment for security
@@ -82,10 +79,6 @@ services:
       TELESRV_ADMIN_UI_PASSWORD: "changeme_ui_password"
     volumes:
       - appdata:/app/data
-      # keep stickers, gifts and emojis on the host (excluded from the volume backups)
-      - ./data/official-gifts:/app/data/official-gifts
-      - ./data/sticker-seed:/app/data/sticker-seed
-      - ./data/emojis:/app/data/emojis
     ports:
       - "2398:2398"
       - "2599:2599"
@@ -98,10 +91,6 @@ services:
       target: admin
       args:
         GO_VERSION: "1.26"
-      cache_from:
-        - type=local,src=.docker-build-cache/telesrv-admin
-      cache_to:
-        - type=local,dest=.docker-build-cache/telesrv-admin,mode=max
     container_name: telesrv-admin
     image: telesrv-admin:local
     depends_on:
@@ -121,9 +110,6 @@ services:
       TELESRV_REDIS_ADDR: "redis:6379"
     volumes:
       - appdata:/app/data
-      - ./data/official-gifts:/app/data/official-gifts
-      - ./data/sticker-seed:/app/data/sticker-seed
-      - ./data/emojis:/app/data/emojis
     ports:
       - "2600:2600"
     restart: unless-stopped
@@ -132,4 +118,3 @@ volumes:
   pgdata:
   redisdata:
   appdata:
-

@@ -1,5 +1,5 @@
 ALTER TABLE channel_messages
-    ADD COLUMN suggested_post jsonb NOT NULL DEFAULT '{}'::jsonb;
+    ADD COLUMN IF NOT EXISTS suggested_post jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 -- A monoforum is a virtual per-saved-peer container, never an ordinary joined megagroup.
 DELETE FROM channel_dialogs d

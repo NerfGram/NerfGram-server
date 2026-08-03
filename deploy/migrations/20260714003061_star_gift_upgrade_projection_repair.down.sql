@@ -1,3 +1,2 @@
--- The up migration emits user-visible durable update facts. Rewinding pts or
--- deleting events that may already have been delivered would create a hole in
--- updates.getDifference, so rollback intentionally preserves those facts.
+-- Reverted by renumbered migration 0104_star_gift_upgrade_projection_repair.
+SELECT 1;

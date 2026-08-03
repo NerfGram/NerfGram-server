@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,6 +80,7 @@ type Service struct {
 	premiumPromoMu    sync.RWMutex
 	premiumPromo      domain.PremiumPromoCatalog
 	premiumPromoReady bool
+	systemAvatarPath  string
 }
 
 // Option 配置 files 服务的可选能力。
@@ -113,6 +115,13 @@ func WithGIFTranscoder(transcoder GIFTranscoder) Option {
 func WithUploadPartQuota(quota domain.UploadPartQuota) Option {
 	return func(s *Service) {
 		s.uploadQuota = quota
+	}
+}
+
+// WithSystemAvatarPath sets the PNG used to seed the 777000 service account avatar.
+func WithSystemAvatarPath(path string) Option {
+	return func(s *Service) {
+		s.systemAvatarPath = strings.TrimSpace(path)
 	}
 }
 

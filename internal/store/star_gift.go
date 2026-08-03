@@ -10,6 +10,8 @@ import (
 type StarGiftStore interface {
 	// Catalog 返回启用的当前目录快照，按 sort_order/gift_id 排序。
 	Catalog(ctx context.Context) ([]domain.StarGift, error)
+	// OfficialGiftImportIndex maps Telegram official gift IDs to local import state.
+	OfficialGiftImportIndex(ctx context.Context) (map[int64]domain.OfficialGiftImportState, error)
 	// CatalogGift 只返回当前启用版本，供新购买校验。
 	CatalogGift(ctx context.Context, giftID int64) (domain.StarGift, bool, error)
 	// CatalogRevision 返回不可变历史版本，供已领取礼物投影。

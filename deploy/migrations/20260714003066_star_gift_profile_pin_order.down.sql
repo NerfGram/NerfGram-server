@@ -1,2 +1,2 @@
-DROP INDEX IF EXISTS public.peer_star_gifts_owner_profile_order_idx;
-DROP INDEX IF EXISTS public.peer_star_gifts_owner_pinned_order_uniq;
+-- Reverted by renumbered migration 0108_star_gift_profile_pin_order.
+SELECT 1;

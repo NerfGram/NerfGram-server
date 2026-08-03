@@ -1,1 +1,2 @@
-DROP TABLE IF EXISTS public.ephemeral_abuse_reports;
+-- Reverted by renumbered migration 0098_ephemeral_abuse_reports.
+SELECT 1;

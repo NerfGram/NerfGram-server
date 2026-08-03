@@ -1,0 +1,1 @@
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0apply_firewall.ps1"

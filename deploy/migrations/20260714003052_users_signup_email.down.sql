@@ -1,2 +1,2 @@
-DROP INDEX IF EXISTS users_signup_email_lower_unique_idx;
-ALTER TABLE public.users DROP COLUMN signup_email;
+-- Reverted by renumbered migration 0093_users_signup_email.
+SELECT 1;

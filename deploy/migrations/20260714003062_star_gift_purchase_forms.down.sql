@@ -1,1 +1,2 @@
-DROP TABLE IF EXISTS public.star_gift_purchase_forms;
+-- Reverted by renumbered migration 0105_star_gift_purchase_forms.
+SELECT 1;
