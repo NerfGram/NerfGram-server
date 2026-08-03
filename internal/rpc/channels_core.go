@@ -144,10 +144,8 @@ func (r *Router) onChannelsGetFullChannel(ctx context.Context, input tg.InputCha
 					view.State.NotifySettings = &copy
 				}
 			}
-<<<<<<< HEAD
 			out := &tg.MessagesChatFull{
 				FullChat: r.enrichCommunityFull(ctx, view),
->>>>>>> upstream/main
 				Chats:    tgCommunityHydratedChats(userID, view),
 				Users:    tgUsers(view.Users),
 			}
