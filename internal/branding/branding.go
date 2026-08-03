@@ -12,17 +12,17 @@ import (
 )
 
 const (
-	ProductName      = "OwpenGram"
-	ProductUsername  = "owpengram"
-	DesktopAppName   = "OwpenGram Desktop"
-	AndroidAppName   = "OwpenGram Android"
-	IOSAppName       = "OwpenGram iOS"
-	MacOSAppName     = "OwpenGram macOS"
-	WebAAppName      = "OwpenGram Web A"
-	WebKAppName      = "OwpenGram Web K"
-	PremiumName      = "OwpenGram Premium"
-	StarsName        = "OwpenGram Stars"
-	DefaultPublicURL = "https://owpengram.org"
+	ProductName      = "NerfGram"
+	ProductUsername  = "nerfgram"
+	DesktopAppName   = "NerfGram Desktop"
+	AndroidAppName   = "NerfGram Android"
+	IOSAppName       = "NerfGram iOS"
+	MacOSAppName     = "NerfGram macOS"
+	WebAAppName      = "NerfGram Web A"
+	WebKAppName      = "NerfGram Web K"
+	PremiumName      = "NerfGram Premium"
+	StarsName        = "NerfGram Stars"
+	DefaultPublicURL = "https://nerfgram.space"
 )
 
 // ClientAppName returns the branded display name for a stored client platform.
