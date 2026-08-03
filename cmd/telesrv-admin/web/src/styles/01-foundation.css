@@ -1,24 +1,24 @@
 :root {
-  color-scheme: light;
-  --bg: #f3f5f7;
-  --panel: #ffffff;
-  --panel-subtle: #f8fafb;
-  --panel-strong: #eef2f5;
-  --line: #d9e1e8;
-  --line-strong: #c2ccd6;
-  --text: #101828;
-  --muted: #667085;
-  --muted-2: #98a2b3;
-  --brand: #176d61;
-  --brand-2: #245b9d;
-  --good: #167447;
-  --warn: #a15c07;
-  --danger: #b42318;
-  --sidebar: #11161d;
-  --sidebar-soft: #1b222b;
-  --sidebar-line: #2c3541;
-  --focus: rgba(23, 109, 97, 0.16);
-  --shadow: 0 18px 52px rgba(16, 24, 40, 0.14);
+  color-scheme: dark;
+  --bg: #090d16;
+  --panel: #111827;
+  --panel-subtle: #162032;
+  --panel-strong: #1e293b;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.16);
+  --text: #f8fafc;
+  --muted: #94a3b8;
+  --muted-2: #64748b;
+  --brand: #24a1de;
+  --brand-2: #00f2fe;
+  --good: #10b981;
+  --warn: #f59e0b;
+  --danger: #ef4444;
+  --sidebar: #05080e;
+  --sidebar-soft: #0f172a;
+  --sidebar-line: rgba(255, 255, 255, 0.07);
+  --focus: rgba(36, 161, 222, 0.3);
+  --shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
 }
 
 * {
@@ -238,9 +238,9 @@ a {
   justify-content: space-between;
   gap: 18px;
   padding: 12px 24px;
-  background: rgba(255, 255, 255, 0.94);
+  background: rgba(17, 24, 39, 0.85);
   border-bottom: 1px solid var(--line);
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(16px);
 }
 
 .topbar h1 {
@@ -297,11 +297,12 @@ a {
   display: inline-flex;
   min-height: 30px;
   align-items: center;
-  padding: 0 10px;
-  color: #344054;
+  padding: 0 12px;
+  color: var(--text);
   background: var(--panel-subtle);
   border: 1px solid var(--line);
   border-radius: 999px;
+  font-weight: 600;
 }
 
 .content {

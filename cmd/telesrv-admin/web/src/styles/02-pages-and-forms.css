@@ -70,16 +70,19 @@
 
 .status-item.good,
 .metric.good {
-  border-color: #afd8bf;
+  border-color: rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.08);
 }
 
 .status-item.warn,
 .metric.warn {
-  border-color: #e7c77e;
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.08);
 }
 
 .metric.danger {
-  border-color: #efb4ad;
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.08);
 }
 
 .command-grid {
