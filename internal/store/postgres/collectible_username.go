@@ -119,6 +119,11 @@ func (s *CollectibleUsernameStore) Issue(ctx context.Context, cu domain.Collecti
 		if found && !owner.matches(peerUsernameTypeUser, cu.OwnerUserID) {
 			return domain.ErrUsernameOccupied
 		}
+		if cu.Active {
+			if _, err := tx.Exec(ctx, `UPDATE public.collectible_usernames SET active = false, updated_at = now() WHERE owner_user_id = $1 AND username != $2 AND active`, cu.OwnerUserID, normalized); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx, `
 INSERT INTO peer_usernames (username_lower, peer_type, peer_id)
 VALUES ($1, $2, $3)
