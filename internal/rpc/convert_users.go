@@ -225,7 +225,7 @@ func tgUsernames(username, collectibleUsername string, collectibleActive bool) [
 		out = append(out, tg.Username{Editable: true, Active: true, Username: username})
 	}
 	if collectibleUsername != "" {
-		out = append(out, tg.Username{Editable: false, Active: true, Collectible: true, Username: collectibleUsername})
+		out = append(out, tg.Username{Editable: false, Active: true, Username: collectibleUsername})
 	}
 	return out
 }
