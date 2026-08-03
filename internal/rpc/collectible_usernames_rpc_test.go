@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/iamxvbaba/td/clock"
 	"github.com/iamxvbaba/td/tg"
 	"github.com/iamxvbaba/td/tgerr"
+	"github.com/iamxvbaba/td/tlprofile"
 	"go.uber.org/zap/zaptest"
 
 	appchannels "telesrv/internal/app/channels"
@@ -231,6 +233,101 @@ func usernameStrings(list []tg.Username) []string {
 	return out
 }
 
+type tgUsernamePeer interface {
+	SetFlags()
+	GetUsername() (string, bool)
+	GetUsernames() ([]tg.Username, bool)
+}
+
+func assertVectorOnlyUsernames(t *testing.T, stage string, peer tgUsernamePeer, want []string) []tg.Username {
+	t.Helper()
+	peer.SetFlags()
+	if scalar, set := peer.GetUsername(); set || scalar != "" {
+		t.Fatalf("%s scalar username = %q (set %v), want absent when usernames vector is present", stage, scalar, set)
+	}
+	vector, set := peer.GetUsernames()
+	if !set || !reflect.DeepEqual(usernameStrings(vector), want) {
+		t.Fatalf("%s usernames = %v (set %v), want %v", stage, usernameStrings(vector), set, want)
+	}
+	return vector
+}
+
+func assertScalarOnlyUsername(t *testing.T, stage string, peer tgUsernamePeer, want string) {
+	t.Helper()
+	peer.SetFlags()
+	if vector, set := peer.GetUsernames(); set || len(vector) != 0 {
+		t.Fatalf("%s usernames = %+v (set %v), want vector absent", stage, vector, set)
+	}
+	if scalar, set := peer.GetUsername(); !set || scalar != want {
+		t.Fatalf("%s scalar username = %q (set %v), want %q", stage, scalar, set, want)
+	}
+}
+
+func assertUsernameUpdateEnvelope(t *testing.T, stage string, updates *tg.Updates, want []string) {
+	t.Helper()
+	assertValue := func(valueStage string, value *tg.Updates) {
+		t.Helper()
+		if value == nil || len(value.Updates) != 1 || len(value.Users) != 1 {
+			t.Fatalf("%s envelope = %+v, want one update and one user", valueStage, value)
+		}
+		update, ok := value.Updates[0].(*tg.UpdateUserName)
+		if !ok {
+			t.Fatalf("%s update = %T, want *tg.UpdateUserName", valueStage, value.Updates[0])
+		}
+		if got := usernameStrings(update.Usernames); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s update usernames = %v, want %v", valueStage, got, want)
+		}
+		user, ok := value.Users[0].(*tg.User)
+		if !ok {
+			t.Fatalf("%s companion user = %T, want *tg.User", valueStage, value.Users[0])
+		}
+		assertVectorOnlyUsernames(t, valueStage+" companion", user, want)
+	}
+	assertValue(stage, updates)
+	for _, profile := range []tlprofile.Profile{
+		tlprofile.Profile225,
+		tlprofile.Profile226,
+		tlprofile.Profile227,
+		tlprofile.Profile228,
+	} {
+		profileStage := fmt.Sprintf("%s Layer %d", stage, profile)
+		var wire bin.Buffer
+		if err := tlprofile.EncodeObject(profile, updates, &wire); err != nil {
+			t.Fatalf("encode %s: %v", profileStage, err)
+		}
+		decoded, err := tlprofile.DecodeObject(profile, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
+		if err != nil {
+			t.Fatalf("decode %s: %v", profileStage, err)
+		}
+		decodedUpdates, ok := decoded.(*tg.Updates)
+		if !ok {
+			t.Fatalf("decoded %s = %T, want *tg.Updates", profileStage, decoded)
+		}
+		assertValue(profileStage, decodedUpdates)
+	}
+}
+
+func TestApplyUsernamesFromRegistryKeepsEditableOnlyPeersScalarOnly(t *testing.T) {
+	user := &tg.User{ID: 11}
+	user.SetUsername("editable_user")
+	channel := &tg.Channel{ID: 22}
+	channel.SetUsername("editable_channel")
+	applyUsernamesFromRegistry(
+		[]tg.UserClass{user},
+		[]tg.ChatClass{channel},
+		map[domain.Peer][]domain.Username{
+			{Type: domain.PeerTypeUser, ID: user.ID}: {
+				{Username: "editable_user", Editable: true, Active: true},
+			},
+			{Type: domain.PeerTypeChannel, ID: channel.ID}: {
+				{Username: "editable_channel", Editable: true, Active: true},
+			},
+		},
+	)
+	assertScalarOnlyUsername(t, "editable-only user", user, "editable_user")
+	assertScalarOnlyUsername(t, "editable-only channel", channel, "editable_channel")
+}
+
 func TestUsersGetUsersProjectsCollectibleUsernamesInOneBatch(t *testing.T) {
 	registry := newFakeUsernameRegistry()
 	f := newUsernameProjectionFixture(t, registry)
@@ -255,16 +352,7 @@ func TestUsersGetUsersProjectsCollectibleUsernamesInOneBatch(t *testing.T) {
 		t.Fatalf("users = %d, want 2", len(out))
 	}
 	self := out[0].(*tg.User)
-	if scalar, ok := self.GetUsername(); !ok || scalar != "nft4" {
-		t.Fatalf("self scalar username = %q (set %v), want primary collectible nft4", scalar, ok)
-	}
-	vector, ok := self.GetUsernames()
-	if !ok {
-		t.Fatalf("self usernames unset, want registry vector")
-	}
-	if got := usernameStrings(vector); len(got) != 2 || got[0] != "nft4" || got[1] != "owner_slot" {
-		t.Fatalf("self usernames = %v, want [nft4 owner_slot]", got)
-	}
+	vector := assertVectorOnlyUsernames(t, "self", self, []string{"nft4", "owner_slot"})
 	if vector[0].Editable || !vector[0].Active {
 		t.Fatalf("primary collectible flags = %+v, want non-editable+active", vector[0])
 	}
@@ -272,13 +360,7 @@ func TestUsersGetUsersProjectsCollectibleUsernamesInOneBatch(t *testing.T) {
 		t.Fatalf("editable slot flags = %+v, want editable+active", vector[1])
 	}
 	friend := out[1].(*tg.User)
-	if scalar, ok := friend.GetUsername(); !ok || scalar != "friend_slot" {
-		t.Fatalf("friend scalar username = %q (set %v), want friend_slot", scalar, ok)
-	}
-	friendVector, _ := friend.GetUsernames()
-	if got := usernameStrings(friendVector); len(got) != 2 || got[1] != "gem4" {
-		t.Fatalf("friend usernames = %v, want [friend_slot gem4]", got)
-	}
+	friendVector := assertVectorOnlyUsernames(t, "friend", friend, []string{"friend_slot", "gem4"})
 	if friendVector[1].Active {
 		t.Fatalf("inactive collectible projected active: %+v", friendVector[1])
 	}
@@ -286,6 +368,262 @@ func TestUsersGetUsersProjectsCollectibleUsernamesInOneBatch(t *testing.T) {
 	if registry.batchCalls != 1 || registry.peerCalls != 0 {
 		t.Fatalf("registry reads = batch %d / peer %d, want batch 1 / peer 0", registry.batchCalls, registry.peerCalls)
 	}
+}
+
+func TestResolveUsernamePreservesCompleteUsernamesThroughLayers225To228(t *testing.T) {
+	registry := newFakeUsernameRegistry()
+	f := newUsernameProjectionFixture(t, registry)
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: f.owner.ID}] = []domain.Username{
+		{Username: "owner_slot", Editable: true, Active: true, SortOrder: 0},
+		{Username: "owner_collectible_b", Active: true, SortOrder: 1, CollectibleID: 22},
+		{Username: "owner_collectible_a", Active: true, SortOrder: 2, CollectibleID: 21},
+	}
+
+	resolved, err := f.router.onContactsResolveUsername(
+		WithUserID(context.Background(), f.friend.ID),
+		&tg.ContactsResolveUsernameRequest{Username: "@owner_slot"},
+	)
+	if err != nil {
+		t.Fatalf("resolve username: %v", err)
+	}
+	assertResolvedUsernames := func(stage string, value *tg.ContactsResolvedPeer) {
+		t.Helper()
+		if value == nil || len(value.Users) != 1 {
+			t.Fatalf("%s resolved users = %+v, want one user", stage, value)
+		}
+		user, ok := value.Users[0].(*tg.User)
+		if !ok {
+			t.Fatalf("%s resolved user = %T, want *tg.User", stage, value.Users[0])
+		}
+		want := []string{"owner_slot", "owner_collectible_b", "owner_collectible_a"}
+		assertVectorOnlyUsernames(t, stage, user, want)
+	}
+	assertResolvedUsernames("canonical", resolved)
+
+	for _, profile := range []tlprofile.Profile{
+		tlprofile.Profile225,
+		tlprofile.Profile226,
+		tlprofile.Profile227,
+		tlprofile.Profile228,
+	} {
+		stage := fmt.Sprintf("Layer %d", profile)
+		var wire bin.Buffer
+		if err := tlprofile.EncodeObject(profile, resolved, &wire); err != nil {
+			t.Fatalf("encode %s resolved peer: %v", stage, err)
+		}
+		decoded, err := tlprofile.DecodeObject(profile, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
+		if err != nil {
+			t.Fatalf("decode %s resolved peer: %v", stage, err)
+		}
+		decodedResolved, ok := decoded.(*tg.ContactsResolvedPeer)
+		if !ok {
+			t.Fatalf("decoded %s object = %T, want *tg.ContactsResolvedPeer", stage, decoded)
+		}
+		assertResolvedUsernames(stage, decodedResolved)
+
+		requestBody := encodeExactLayerRPC(t, profile, &tg.ContactsResolveUsernameRequest{Username: "@owner_slot"})
+		admitted, err := f.router.AdmitLayer(profile, &requestBody, tlprofile.Limits{})
+		if err != nil {
+			t.Fatalf("admit %s contacts.resolveUsername: %v", stage, err)
+		}
+		result, method, err := f.router.DispatchAdmitted(
+			WithUserID(context.Background(), f.friend.ID),
+			[8]byte{1},
+			1,
+			1,
+			1,
+			admitted,
+		)
+		if err != nil || method != "contacts.resolveUsername" {
+			t.Fatalf("dispatch %s method=%q err=%v", stage, method, err)
+		}
+		var resultWire bin.Buffer
+		if err := result.Encode(&resultWire); err != nil {
+			t.Fatalf("encode %s method result: %v", stage, err)
+		}
+		decodedResult, err := tlprofile.DecodeObject(profile, &bin.Buffer{Buf: resultWire.Copy()}, tlprofile.Limits{})
+		if err != nil {
+			t.Fatalf("decode %s method result: %v", stage, err)
+		}
+		methodResolved, ok := decodedResult.(*tg.ContactsResolvedPeer)
+		if !ok {
+			t.Fatalf("decoded %s method result = %T, want *tg.ContactsResolvedPeer", stage, decodedResult)
+		}
+		assertResolvedUsernames(stage+" method result", methodResolved)
+	}
+}
+
+func TestAuthLoginTokenSuccessProjectsCompleteSelfUsernames(t *testing.T) {
+	registry := newFakeUsernameRegistry()
+	f := newUsernameProjectionFixture(t, registry)
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: f.owner.ID}] = []domain.Username{
+		{Username: "owner_slot", Editable: true, Active: true, SortOrder: 0},
+		{Username: "owner_collectible_b", Active: true, SortOrder: 1, CollectibleID: 22},
+		{Username: "owner_collectible_a", Active: true, SortOrder: 2, CollectibleID: 21},
+	}
+
+	result, err := f.router.authLoginTokenSuccess(context.Background(), domain.Authorization{UserID: f.owner.ID})
+	if err != nil {
+		t.Fatalf("auth login token success: %v", err)
+	}
+	success, ok := result.(*tg.AuthLoginTokenSuccess)
+	if !ok {
+		t.Fatalf("auth login token result = %T, want *tg.AuthLoginTokenSuccess", result)
+	}
+	authorization, ok := success.Authorization.(*tg.AuthAuthorization)
+	if !ok {
+		t.Fatalf("authorization = %T, want *tg.AuthAuthorization", success.Authorization)
+	}
+	self, ok := authorization.User.(*tg.User)
+	if !ok {
+		t.Fatalf("authorization user = %T, want *tg.User", authorization.User)
+	}
+	want := []string{"owner_slot", "owner_collectible_b", "owner_collectible_a"}
+	assertVectorOnlyUsernames(t, "authorization", self, want)
+
+	for _, profile := range []tlprofile.Profile{
+		tlprofile.Profile225,
+		tlprofile.Profile226,
+		tlprofile.Profile227,
+		tlprofile.Profile228,
+	} {
+		stage := fmt.Sprintf("Layer %d authorization", profile)
+		var wire bin.Buffer
+		if err := tlprofile.EncodeObject(profile, success, &wire); err != nil {
+			t.Fatalf("encode %s: %v", stage, err)
+		}
+		decoded, err := tlprofile.DecodeObject(profile, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
+		if err != nil {
+			t.Fatalf("decode %s: %v", stage, err)
+		}
+		decodedSuccess, ok := decoded.(*tg.AuthLoginTokenSuccess)
+		if !ok {
+			t.Fatalf("decoded %s = %T", stage, decoded)
+		}
+		decodedAuthorization := decodedSuccess.Authorization.(*tg.AuthAuthorization)
+		decodedSelf := decodedAuthorization.User.(*tg.User)
+		assertVectorOnlyUsernames(t, stage, decodedSelf, want)
+	}
+	if registry.peerCalls != 1 || registry.batchCalls != 0 {
+		t.Fatalf("authorization username reads = peer:%d batch:%d, want 1/0",
+			registry.peerCalls, registry.batchCalls)
+	}
+}
+
+func TestAccountProfileMutationResponsesKeepVectorOnlyUsernames(t *testing.T) {
+	registry := newFakeUsernameRegistry()
+	f := newUsernameProjectionFixture(t, registry)
+	sessions := &captureSessions{}
+	f.router.deps.Sessions = sessions
+	peer := domain.Peer{Type: domain.PeerTypeUser, ID: f.owner.ID}
+	registry.byPeer[peer] = []domain.Username{
+		{Username: "owner_slot", Editable: true, Active: true, SortOrder: 0},
+		{Username: "owner_collectible", Active: true, SortOrder: 1, CollectibleID: 21},
+	}
+	ctx := WithUserID(context.Background(), f.owner.ID)
+	profile := &tg.AccountUpdateProfileRequest{}
+	profile.SetFirstName("Updated")
+
+	updated, err := f.router.onAccountUpdateProfile(ctx, profile)
+	if err != nil {
+		t.Fatalf("account.updateProfile: %v", err)
+	}
+	self, ok := updated.(*tg.User)
+	if !ok {
+		t.Fatalf("account.updateProfile user = %T, want *tg.User", updated)
+	}
+	assertVectorOnlyUsernames(t, "account.updateProfile", self, []string{"owner_slot", "owner_collectible"})
+	profileEnvelope := sessions.lastUserPush().(*tg.Updates)
+	pushed := profileEnvelope.Users[0].(*tg.User)
+	if pushed == self {
+		t.Fatal("account.updateProfile reused one mutable tg.User for RPC result and push")
+	}
+	assertUsernameUpdateEnvelope(t, "account.updateProfile push", profileEnvelope, []string{"owner_slot", "owner_collectible"})
+	if registry.peerCalls != 1 || registry.batchCalls != 0 {
+		t.Fatalf("account.updateProfile username reads = peer:%d batch:%d, want 1/0", registry.peerCalls, registry.batchCalls)
+	}
+
+	registry.byPeer[peer] = []domain.Username{
+		{Username: "renamed_slot", Editable: true, Active: true, SortOrder: 0},
+		{Username: "owner_collectible", Active: true, SortOrder: 1, CollectibleID: 21},
+	}
+	updated, err = f.router.onAccountUpdateUsername(ctx, "renamed_slot")
+	if err != nil {
+		t.Fatalf("account.updateUsername: %v", err)
+	}
+	self, ok = updated.(*tg.User)
+	if !ok {
+		t.Fatalf("account.updateUsername user = %T, want *tg.User", updated)
+	}
+	assertVectorOnlyUsernames(t, "account.updateUsername", self, []string{"renamed_slot", "owner_collectible"})
+	usernameEnvelope := sessions.lastUserPush().(*tg.Updates)
+	pushed = usernameEnvelope.Users[0].(*tg.User)
+	if pushed == self {
+		t.Fatal("account.updateUsername reused one mutable tg.User for RPC result and push")
+	}
+	assertUsernameUpdateEnvelope(t, "account.updateUsername push", usernameEnvelope, []string{"renamed_slot", "owner_collectible"})
+	if registry.peerCalls != 2 || registry.batchCalls != 0 {
+		t.Fatalf("profile mutation username reads = peer:%d batch:%d, want 2/0", registry.peerCalls, registry.batchCalls)
+	}
+}
+
+func TestPremiumStatusProjectionSkipsOfflineUsernameRead(t *testing.T) {
+	const userID = int64(1000000888)
+	registry := newFakeUsernameRegistry()
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: userID}] = []domain.Username{
+		{Username: "premium_slot", Editable: true, Active: true, SortOrder: 0},
+		{Username: "premium_collectible", Active: true, SortOrder: 1, CollectibleID: 88},
+	}
+	sessions := &captureSessions{}
+	r := New(Config{}, Deps{Sessions: sessions, Usernames: registry}, zaptest.NewLogger(t), clock.System)
+	u := domain.User{ID: userID, FirstName: "Premium", Username: "premium_slot"}
+
+	r.pushPremiumStatusUpdate(context.Background(), u)
+	if registry.peerCalls != 0 || sessions.lastUserPush() != nil {
+		t.Fatalf("offline premium push = registry reads:%d message:%T, want no work", registry.peerCalls, sessions.lastUserPush())
+	}
+
+	sessions.onlineUserIDs = []int64{userID}
+	r.pushPremiumStatusUpdate(context.Background(), u)
+	if registry.peerCalls != 1 {
+		t.Fatalf("online premium username reads = %d, want 1", registry.peerCalls)
+	}
+	updates, ok := sessions.lastUserPush().(*tg.Updates)
+	if !ok || len(updates.Users) != 1 {
+		t.Fatalf("online premium push = %T %+v", sessions.lastUserPush(), sessions.lastUserPush())
+	}
+	assertVectorOnlyUsernames(t, "premium status update", updates.Users[0].(*tg.User), []string{"premium_slot", "premium_collectible"})
+}
+
+func TestPremiumStatusProjectionBatchesOnlineUsers(t *testing.T) {
+	registry := newFakeUsernameRegistry()
+	users := []domain.User{
+		{ID: 101, FirstName: "One", Username: "one_slot"},
+		{ID: 102, FirstName: "Two", Username: "two_slot"},
+		{ID: 103, FirstName: "Offline", Username: "offline_slot"},
+	}
+	for _, u := range users {
+		registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: u.ID}] = []domain.Username{
+			{Username: u.Username, Editable: true, Active: true, SortOrder: 0},
+			{Username: u.Username + "_collectible", Active: true, SortOrder: 1, CollectibleID: u.ID},
+		}
+	}
+	sessions := &captureSessions{onlineUserIDs: []int64{101, 102}}
+	r := New(Config{}, Deps{Sessions: sessions, Usernames: registry}, zaptest.NewLogger(t), clock.System)
+
+	r.pushPremiumStatusUpdates(context.Background(), []domain.User{users[0], users[1], users[0], users[2]})
+
+	if registry.batchCalls != 1 || registry.peerCalls != 0 {
+		t.Fatalf("premium batch username reads = batch:%d peer:%d, want 1/0", registry.batchCalls, registry.peerCalls)
+	}
+	if got, want := sessions.pushedUserIDs(), []int64{101, 102}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("premium batch pushed users = %v, want %v", got, want)
+	}
+	updates, ok := sessions.lastUserPush().(*tg.Updates)
+	if !ok || len(updates.Users) != 1 {
+		t.Fatalf("premium batch last push = %T %+v", sessions.lastUserPush(), sessions.lastUserPush())
+	}
+	assertVectorOnlyUsernames(t, "premium batch last user", updates.Users[0].(*tg.User), []string{"two_slot", "two_slot_collectible"})
 }
 
 func TestMessageEchoProjectsCompleteUsernamesInOneBatch(t *testing.T) {
@@ -317,10 +655,7 @@ func TestMessageEchoProjectsCompleteUsernamesInOneBatch(t *testing.T) {
 		if !ok {
 			t.Fatalf("message echo user = %T, want *tg.User", item)
 		}
-		vector, set := user.GetUsernames()
-		if !set || !reflect.DeepEqual(usernameStrings(vector), want[user.ID]) {
-			t.Fatalf("user %d usernames = %v (set %v), want %v", user.ID, usernameStrings(vector), set, want[user.ID])
-		}
+		assertVectorOnlyUsernames(t, fmt.Sprintf("message echo user %d", user.ID), user, want[user.ID])
 	}
 	if registry.batchCalls != 1 || registry.peerCalls != 0 {
 		t.Fatalf("registry reads = batch %d / peer %d, want one batch read for the response", registry.batchCalls, registry.peerCalls)
@@ -368,10 +703,7 @@ func TestChannelMessageUpdatesProjectCompleteUsernames(t *testing.T) {
 		t.Fatalf("channel updates users = %+v, want one sender", updates)
 	}
 	user := updates.Users[0].(*tg.User)
-	vector, set := user.GetUsernames()
-	if !set || !reflect.DeepEqual(usernameStrings(vector), []string{"channel_sender", "channel_collectible"}) {
-		t.Fatalf("channel sender usernames = %v (set %v), want complete vector", usernameStrings(vector), set)
-	}
+	assertVectorOnlyUsernames(t, "channel sender", user, []string{"channel_sender", "channel_collectible"})
 	if registry.peerCalls != 0 || registry.batchCalls != 1 {
 		t.Fatalf("registry reads = peer %d / batch %d, want one batched user+channel read", registry.peerCalls, registry.batchCalls)
 	}
@@ -413,10 +745,7 @@ func TestChannelDifferenceProjectsCompleteUsernames(t *testing.T) {
 		t.Fatalf("channel difference = %T %+v, want one user", out, out)
 	}
 	user := diff.Users[0].(*tg.User)
-	vector, set := user.GetUsernames()
-	if !set || !reflect.DeepEqual(usernameStrings(vector), []string{"difference_sender", "difference_collectible"}) {
-		t.Fatalf("channel difference usernames = %v (set %v), want complete vector", usernameStrings(vector), set)
-	}
+	assertVectorOnlyUsernames(t, "channel difference sender", user, []string{"difference_sender", "difference_collectible"})
 	if registry.batchCalls != 1 || registry.peerCalls != 0 {
 		t.Fatalf("registry reads = batch %d / peer %d, want one batched user+channel read", registry.batchCalls, registry.peerCalls)
 	}
@@ -432,14 +761,7 @@ func TestUsersGetUsersDegradesWithoutRegistry(t *testing.T) {
 	}
 	self := out[0].(*tg.User)
 	// Without a collectible registry the official legacy shape is scalar-only.
-	self.SetFlags()
-	vector, ok := self.GetUsernames()
-	if ok || len(vector) != 0 {
-		t.Fatalf("usernames = %+v (set %v), want vector absent", vector, ok)
-	}
-	if scalar, ok := self.GetUsername(); !ok || scalar != "owner_slot" {
-		t.Fatalf("scalar username = %q (set %v), want owner_slot", scalar, ok)
-	}
+	assertScalarOnlyUsername(t, "self without registry", self, "owner_slot")
 }
 
 func TestUsersGetUsersDegradesWhenRegistryFails(t *testing.T) {
@@ -460,14 +782,7 @@ func TestUsersGetUsersDegradesWhenRegistryFails(t *testing.T) {
 	}
 	for i, want := range []string{"owner_slot", "friend_slot"} {
 		user := out[i].(*tg.User)
-		user.SetFlags()
-		vector, ok := user.GetUsernames()
-		if ok || len(vector) != 0 {
-			t.Fatalf("users[%d] usernames = %+v, want vector absent", i, vector)
-		}
-		if scalar, ok := user.GetUsername(); !ok || scalar != want {
-			t.Fatalf("users[%d] scalar username = %q (set %v), want %q", i, scalar, ok, want)
-		}
+		assertScalarOnlyUsername(t, fmt.Sprintf("users[%d] with failed registry", i), user, want)
 	}
 }
 
@@ -815,15 +1130,27 @@ func TestChannelsGetChannelsProjectsCollectibleUsernames(t *testing.T) {
 	if len(out) != 1 {
 		t.Fatalf("chats = %d, want 1", len(out))
 	}
-	vector, ok := out[0].(*tg.Channel).GetUsernames()
-	if !ok {
-		t.Fatalf("channel usernames unset, want registry vector")
-	}
-	if got := usernameStrings(vector); len(got) != 2 || got[0] != "chan_nft" || got[1] != "chan_slot" {
-		t.Fatalf("channel usernames = %v, want [chan_nft chan_slot]", got)
-	}
-	if scalar, ok := out[0].(*tg.Channel).GetUsername(); !ok || scalar != "chan_nft" {
-		t.Fatalf("scalar channel username = %q (set %v), want primary collectible chan_nft", scalar, ok)
+	assertVectorOnlyUsernames(t, "channel", out[0].(*tg.Channel), []string{"chan_nft", "chan_slot"})
+	for _, profile := range []tlprofile.Profile{
+		tlprofile.Profile225,
+		tlprofile.Profile226,
+		tlprofile.Profile227,
+		tlprofile.Profile228,
+	} {
+		stage := fmt.Sprintf("Layer %d channel", profile)
+		var wire bin.Buffer
+		if err := tlprofile.EncodeObject(profile, chats, &wire); err != nil {
+			t.Fatalf("encode %s: %v", stage, err)
+		}
+		decoded, err := tlprofile.DecodeObject(profile, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
+		if err != nil {
+			t.Fatalf("decode %s: %v", stage, err)
+		}
+		decodedChats, ok := decoded.(*tg.MessagesChats)
+		if !ok || len(decodedChats.Chats) != 1 {
+			t.Fatalf("decoded %s = %T %+v", stage, decoded, decoded)
+		}
+		assertVectorOnlyUsernames(t, stage, decodedChats.Chats[0].(*tg.Channel), []string{"chan_nft", "chan_slot"})
 	}
 }
 
@@ -837,11 +1164,5 @@ func TestChannelsGetChannelsDegradesWithoutRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get channels: %v", err)
 	}
-	vector, ok := chats.(*tg.MessagesChats).Chats[0].(*tg.Channel).GetUsernames()
-	if ok || len(vector) != 0 {
-		t.Fatalf("legacy channel usernames = %+v (set %v), want vector absent", vector, ok)
-	}
-	if scalar, ok := chats.(*tg.MessagesChats).Chats[0].(*tg.Channel).GetUsername(); !ok || scalar != "chan_slot" {
-		t.Fatalf("legacy scalar username = %q (set %v), want chan_slot", scalar, ok)
-	}
+	assertScalarOnlyUsername(t, "channel without registry", chats.(*tg.MessagesChats).Chats[0].(*tg.Channel), "chan_slot")
 }

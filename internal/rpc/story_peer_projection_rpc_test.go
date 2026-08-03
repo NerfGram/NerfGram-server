@@ -2,7 +2,6 @@ package rpc
 
 import (
 	"context"
-	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -1300,10 +1299,7 @@ func TestBuildOutboxStoryUpdatesHydratesCompanionPeersWithStoriesMaxID(t *testin
 	ownerUser := findUserClass(updates[0].Users, owner.ID)
 	assertUserStoryMaxID(t, ownerUser, 13)
 	projectedOwner := ownerUser.(*tg.User)
-	vector, set := projectedOwner.GetUsernames()
-	if !set || !reflect.DeepEqual(usernameStrings(vector), []string{"story_owner", "story_collectible"}) {
-		t.Fatalf("story owner usernames = %v (set %v), want complete vector", usernameStrings(vector), set)
-	}
+	assertVectorOnlyUsernames(t, "story owner", projectedOwner, []string{"story_owner", "story_collectible"})
 	if registry.peerCalls != 1 || registry.batchCalls != 0 {
 		t.Fatalf("username registry reads = peer %d / batch %d, want one claim-wide read", registry.peerCalls, registry.batchCalls)
 	}

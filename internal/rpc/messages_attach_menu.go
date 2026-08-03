@@ -228,6 +228,7 @@ func (r *Router) attachMenuUsers(ctx context.Context, viewerID int64, ids []int6
 		}
 		out = append(out, tgUser)
 	}
+	r.applyPeerReadModels(ctx, viewerID, out, nil)
 	return out
 }
 

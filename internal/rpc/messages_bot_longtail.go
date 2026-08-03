@@ -455,6 +455,7 @@ func (r *Router) onMessagesGetPreparedInlineMessage(ctx context.Context, req *tg
 			out.Users = append(out.Users, r.tgUser(u))
 		}
 	}
+	r.applyPeerReadModels(ctx, userID, out.Users, nil)
 	return out, nil
 }
 

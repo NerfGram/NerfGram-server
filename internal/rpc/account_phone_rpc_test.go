@@ -21,7 +21,7 @@ func TestAccountChangePhoneRPCReturnsSelfPushesOthersAndReplaysDifference(t *tes
 	auths := memory.NewAuthorizationStore()
 	codes := memory.NewCodeStore()
 	events := memory.NewUpdateEventStore()
-	user, err := users.Create(ctx, domain.User{AccessHash: 401, Phone: "15550013001", FirstName: "Alice"})
+	user, err := users.Create(ctx, domain.User{AccessHash: 401, Phone: "15550013001", FirstName: "Alice", Username: "Alice"})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -34,8 +34,13 @@ func TestAccountChangePhoneRPCReturnsSelfPushesOthersAndReplaysDifference(t *tes
 		appaccount.WithUsers(users),
 		appaccount.WithPhoneChange(memory.NewPhoneChangeStore(users, events), auths, codes, nil, "12345", time.Minute, 5),
 	)
+	registry := newFakeUsernameRegistry()
+	registry.byPeer[domain.Peer{Type: domain.PeerTypeUser, ID: user.ID}] = []domain.Username{
+		{Username: "Alice", Editable: true, Active: true, SortOrder: 0},
+		{Username: "aliceCollect0728b", Active: true, SortOrder: 1, CollectibleID: 2},
+	}
 	sessions := &captureSessions{}
-	r := New(Config{}, Deps{Account: accountSvc, Sessions: sessions}, zaptest.NewLogger(t), clock.System)
+	r := New(Config{}, Deps{Account: accountSvc, Sessions: sessions, Usernames: registry}, zaptest.NewLogger(t), clock.System)
 	reqCtx := WithSessionID(WithAuthKeyID(WithUserID(ctx, user.ID), authKeyID), 77)
 
 	sentClass, err := r.onAccountSendChangePhoneCode(reqCtx, &tg.AccountSendChangePhoneCodeRequest{PhoneNumber: "+1 555 001 3002"})
@@ -62,6 +67,7 @@ func TestAccountChangePhoneRPCReturnsSelfPushesOthersAndReplaysDifference(t *tes
 	if !ok || self.ID != user.ID || self.Phone != "15550013002" {
 		t.Fatalf("returned self = %T %+v", userClass, userClass)
 	}
+	assertVectorOnlyUsernames(t, "account.changePhone", self, []string{"Alice", "aliceCollect0728b"})
 
 	otherPush, ok := sessions.lastUserPush().(*tg.Updates)
 	if !ok || len(otherPush.Updates) != 2 {

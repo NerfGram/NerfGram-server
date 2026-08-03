@@ -314,7 +314,7 @@ func (r *Router) quickReplyUsers(ctx context.Context, userID int64) []tg.UserCla
 	if err != nil || self.ID == 0 {
 		return []tg.UserClass{}
 	}
-	return []tg.UserClass{r.tgSelfUser(self)}
+	return []tg.UserClass{r.tgSelfUserWithUsernames(ctx, self)}
 }
 
 func (r *Router) quickReplyMutationUpdates(ctx context.Context, userID int64, mutation domain.QuickReplyMutation, prefix []tg.UpdateClass) (*tg.Updates, error) {

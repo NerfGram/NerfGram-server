@@ -142,6 +142,11 @@ type Conn struct {
 	// Rewrap aliasing never delays execution. initialized stops collecting
 	// candidates after the first valid init wrapper on this physical generation.
 	rpcRewrapInitialized atomic.Bool
+	// layerRPCAdmissionTraceLogged bounds production INFO diagnostics to the
+	// first non-unknown exact-admission rejection on this physical generation.
+	// Repeated malformed requests remain visible at Debug without turning an
+	// authenticated reconnect/session into an unbounded INFO log source.
+	layerRPCAdmissionTraceLogged atomic.Bool
 	// rpcResultAcked is invoked by the sole outbound actor after it resolves an
 	// acknowledged server frame back to the rpc_result request msg_id.
 	rpcResultAcked func(*Conn, int64)

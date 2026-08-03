@@ -197,6 +197,7 @@ func (r *Router) onMessagesGetCommonChats(ctx context.Context, req *tg.MessagesG
 	for _, ch := range common.Channels {
 		chats = append(chats, tgChannelChatMin(userID, ch))
 	}
+	r.applyUsernamesToPeerObjects(ctx, nil, chats)
 	return &tg.MessagesChats{Chats: chats}, nil
 }
 

@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -357,13 +358,7 @@ func TestRouterBuildOutboxUpdatesProjectsUsernamesOncePerClaim(t *testing.T) {
 			wantScalar = "sender_b"
 			wantCollectible = "sender_b_collectible"
 		}
-		if scalar, set := user.GetUsername(); !set || scalar != wantScalar {
-			t.Fatalf("updates[%d] scalar username = %q (set %v), want %q", i, scalar, set, wantScalar)
-		}
-		vector, set := user.GetUsernames()
-		if !set || !reflect.DeepEqual(usernameStrings(vector), []string{wantScalar, wantCollectible}) {
-			t.Fatalf("updates[%d] usernames = %v (set %v), want [%s %s]", i, usernameStrings(vector), set, wantScalar, wantCollectible)
-		}
+		assertVectorOnlyUsernames(t, fmt.Sprintf("updates[%d]", i), user, []string{wantScalar, wantCollectible})
 	}
 	if registry.batchCalls != 1 || registry.peerCalls != 0 {
 		t.Fatalf("registry reads = batch %d / peer %d, want one batch read for the whole claim", registry.batchCalls, registry.peerCalls)

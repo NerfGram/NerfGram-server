@@ -486,8 +486,11 @@ func (r *Router) photosPhotoForSelf(ctx context.Context, userID int64, photo dom
 	if kind == domain.ProfilePhotoKindProfile {
 		applyProfilePhotoToUser(&self, photo)
 	}
-	out.Users = append(out.Users, r.tgSelfUser(self))
-	r.pushSelfPhotoUpdate(ctx, self)
+	projected := r.tgSelfUser(self)
+	pushed := r.tgSelfUser(self)
+	r.applyUsernamesToPeerObjects(ctx, []tg.UserClass{projected, pushed}, nil)
+	out.Users = append(out.Users, projected)
+	r.pushSelfPhotoUpdateWithUser(ctx, self, pushed)
 	return out
 }
 
@@ -501,6 +504,7 @@ func (r *Router) photosPhotoForUser(ctx context.Context, viewerUserID, targetUse
 		return out
 	}
 	out.Users = append(out.Users, r.tgUser(user))
+	r.applyUsernamesToPeerObjects(ctx, out.Users, nil)
 	return out
 }
 
@@ -560,7 +564,14 @@ func (r *Router) pushSelfPhotoUpdate(ctx context.Context, self domain.User) {
 	if self.ID == 0 {
 		return
 	}
-	updates := selfPhotoUpdates(self, int(r.clock.Now().Unix()), r.tgSelfUser(self))
+	r.pushSelfPhotoUpdateWithUser(ctx, self, r.tgSelfUserWithUsernames(ctx, self))
+}
+
+func (r *Router) pushSelfPhotoUpdateWithUser(ctx context.Context, self domain.User, projected *tg.User) {
+	if self.ID == 0 || projected == nil {
+		return
+	}
+	updates := selfPhotoUpdates(self, int(r.clock.Now().Unix()), projected)
 	r.pushUserUpdates(ctx, self.ID, updates)
 	r.pushSelfPhotoUpdateToCurrentSession(ctx, updates)
 }

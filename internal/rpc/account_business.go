@@ -239,6 +239,7 @@ func (r *Router) onAccountResolveBusinessChatLink(ctx context.Context, slug stri
 			}
 		}
 	}
+	r.applyPeerReadModels(ctx, viewerID, users, nil)
 	return &tg.AccountResolvedBusinessChatLinks{
 		Peer:     &tg.PeerUser{UserID: link.OwnerUserID},
 		Message:  link.Message,
@@ -271,10 +272,12 @@ func (r *Router) onAccountGetConnectedBots(ctx context.Context) (*tg.AccountConn
 	if !found {
 		return &tg.AccountConnectedBots{ConnectedBots: []tg.ConnectedBot{}, Users: []tg.UserClass{}}, nil
 	}
-	return &tg.AccountConnectedBots{
+	out := &tg.AccountConnectedBots{
 		ConnectedBots: []tg.ConnectedBot{tgConnectedBot(bot)},
 		Users:         []tg.UserClass{r.tgUser(botUser)},
-	}, nil
+	}
+	r.applyPeerReadModels(ctx, userID, out.Users, nil)
+	return out, nil
 }
 
 func (r *Router) onAccountUpdateConnectedBot(ctx context.Context, req *tg.AccountUpdateConnectedBotRequest) (tg.UpdatesClass, error) {
@@ -301,7 +304,7 @@ func (r *Router) onAccountUpdateConnectedBot(ctx context.Context, req *tg.Accoun
 			return nil, businessAutomationErr(err)
 		}
 		r.invalidateRPCProjectionForViewer(userID)
-		return r.connectedBusinessBotEmptyUpdates(botUser), nil
+		return r.connectedBusinessBotEmptyUpdates(ctx, userID, botUser), nil
 	}
 	recipients, err := r.domainBusinessBotRecipients(ctx, userID, req.Recipients)
 	if err != nil {
@@ -316,7 +319,7 @@ func (r *Router) onAccountUpdateConnectedBot(ctx context.Context, req *tg.Accoun
 		return nil, businessAutomationErr(err)
 	}
 	r.invalidateRPCProjectionForViewer(userID)
-	return r.connectedBusinessBotEmptyUpdates(botUser, tgConnectedBot(saved)), nil
+	return r.connectedBusinessBotEmptyUpdates(ctx, userID, botUser, tgConnectedBot(saved)), nil
 }
 
 func (r *Router) onAccountToggleConnectedBotPaused(ctx context.Context, req *tg.AccountToggleConnectedBotPausedRequest) (bool, error) {
@@ -410,17 +413,19 @@ func connectedBusinessBotUsable(u domain.User) bool {
 	return u.Bot && u.ID != 0 && u.ID != domain.BotFatherUserID
 }
 
-func (r *Router) connectedBusinessBotEmptyUpdates(botUser domain.User, bots ...tg.ConnectedBot) *tg.Updates {
+func (r *Router) connectedBusinessBotEmptyUpdates(ctx context.Context, viewerUserID int64, botUser domain.User, bots ...tg.ConnectedBot) *tg.Updates {
 	users := []tg.UserClass{}
 	if botUser.ID != 0 {
 		users = append(users, r.tgUser(botUser))
 	}
-	return &tg.Updates{
+	out := &tg.Updates{
 		Updates: []tg.UpdateClass{},
 		Users:   users,
 		Chats:   []tg.ChatClass{},
 		Date:    int(r.clock.Now().Unix()),
 	}
+	r.applyPeerReadModels(ctx, viewerUserID, out.Users, out.Chats)
+	return out
 }
 
 func (r *Router) connectedBusinessBotPeerSettings(ctx context.Context, ownerUserID int64, peer domain.Peer, settings domain.PeerSettings) (domain.PeerSettings, error) {

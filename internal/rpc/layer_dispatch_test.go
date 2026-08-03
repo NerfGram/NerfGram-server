@@ -586,7 +586,7 @@ func TestLayerAdmissionFieldPoliciesCoverEveryRoutableProfile(t *testing.T) {
 
 	r := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{}, zaptest.NewLogger(t), clock.System)
 	limits := tlprofile.Limits{MaxVectorElements: 8 << 10}
-	for profile := tlprofile.Profile225; profile <= tlprofile.Profile227; profile++ {
+	for profile := tlprofile.Profile225; profile <= tlprofile.Profile228; profile++ {
 		for _, tc := range cases {
 			tc := tc
 			if _, available := tlprofile.WireID(profile, tc.method); !available {

@@ -464,7 +464,7 @@ func (r *Router) onBotsUpdateUserEmojiStatus(ctx context.Context, req *tg.BotsUp
 			UserID:      u.ID,
 			EmojiStatus: tgUserEmojiStatus(u, r.clock.Now().Unix()),
 		}},
-		Users: []tg.UserClass{r.tgUser(u)},
+		Users: []tg.UserClass{r.tgSelfUserWithUsernames(ctx, u)},
 		Date:  int(r.clock.Now().Unix()),
 	})
 	return true, nil

@@ -62,6 +62,9 @@ func TestDispatchMarksSessionReceivesUpdates(t *testing.T) {
 	if sessions.sessionID != 42 {
 		t.Fatalf("marked session_id = %d, want 42", sessions.sessionID)
 	}
+	if sessions.message != nil {
+		t.Fatalf("session readiness emitted unsolicited update %T; readiness must only open delivery", sessions.message)
+	}
 }
 
 // TestDispatchSkipsReceivesUpdatesForInvokeWithoutUpdates 验证 invokeWithoutUpdates

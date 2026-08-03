@@ -144,11 +144,15 @@ func (r *Router) onChannelsGetFullChannel(ctx context.Context, input tg.InputCha
 					view.State.NotifySettings = &copy
 				}
 			}
-			return &tg.MessagesChatFull{
+<<<<<<< HEAD
+			out := &tg.MessagesChatFull{
 				FullChat: r.enrichCommunityFull(ctx, view),
+>>>>>>> upstream/main
 				Chats:    tgCommunityHydratedChats(userID, view),
 				Users:    tgUsers(view.Users),
-			}, nil
+			}
+			r.applyPeerReadModels(ctx, userID, out.Users, out.Chats)
+			return out, nil
 		}
 		if errors.Is(communityErrValue, domain.ErrCommunityPrivate) {
 			return nil, communityErr(communityErrValue)
@@ -177,11 +181,12 @@ func (r *Router) onChannelsGetFullChannel(ctx context.Context, input tg.InputCha
 		chats := append([]tg.ChatClass(nil), cached.chats...)
 		chats = r.appendLinkedDiscussionChat(ctx, userID, ref.ID, chats)
 		r.trackChannelInterest(ctx, userID, ref.ID)
-		r.applyPeerReadModels(ctx, userID, nil, chats)
+		users := r.tgUsersForIDs(ctx, userID, cached.userIDs)
+		r.applyPeerReadModels(ctx, userID, users, chats)
 		return &tg.MessagesChatFull{
 			FullChat: &full,
 			Chats:    chats,
-			Users:    r.tgUsersForIDs(ctx, userID, cached.userIDs),
+			Users:    users,
 		}, nil
 	}
 	view, err := r.channelFullReadView(ctx, userID, input)
@@ -228,11 +233,12 @@ func (r *Router) onChannelsGetFullChannel(ctx context.Context, input tg.InputCha
 	// projection cache so a revoked badge cannot outlive the change by a cache TTL.
 	r.applyBotVerificationToChannelFull(ctx, view.Channel.ID, full)
 	r.applyAndroidChannelReactionEditorCompat(ctx, full, canChangeInfo)
-	r.applyPeerReadModels(ctx, userID, nil, chats)
+	users := r.tgUsersForIDs(ctx, userID, userIDs)
+	r.applyPeerReadModels(ctx, userID, users, chats)
 	return &tg.MessagesChatFull{
 		FullChat: full,
 		Chats:    chats,
-		Users:    r.tgUsersForIDs(ctx, userID, userIDs),
+		Users:    users,
 	}, nil
 }
 
@@ -324,11 +330,13 @@ func (r *Router) onChannelsGetSendAs(ctx context.Context, req *tg.ChannelsGetSen
 			chats = append(chats, tgChannels(userID, extras)...)
 		}
 	}
-	return &tg.ChannelsSendAsPeers{
+	out := &tg.ChannelsSendAsPeers{
 		Peers: peers,
 		Chats: chats,
 		Users: r.tgUsersForIDs(ctx, userID, []int64{userID}),
-	}, nil
+	}
+	r.applyPeerReadModels(ctx, userID, out.Users, out.Chats)
+	return out, nil
 }
 
 func (r *Router) applyPendingJoinRequestsToFullChannel(ctx context.Context, full *tg.ChannelFull, channelID int64, userIDs []int64) []int64 {

@@ -70,6 +70,7 @@ func TestUploadPartPreflightBeforeBytesDecode(t *testing.T) {
 		id         uint32
 		offset     int
 		big        bool
+		part       int
 		parts      int
 		size       int
 		want       string
@@ -78,11 +79,14 @@ func TestUploadPartPreflightBeforeBytesDecode(t *testing.T) {
 		{name: "small_at_cap", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, size: appfiles.MaxUploadPartBytes},
 		{name: "small_over_cap", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, size: appfiles.MaxUploadPartBytes + 1, want: "FILE_PART_TOO_BIG"},
 		{name: "big_at_cap", id: tg.UploadSaveBigFilePartRequestTypeID, offset: 20, big: true, parts: appfiles.MaxUploadParts, size: appfiles.MaxUploadPartBytes},
+		{name: "part_negative", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, part: -1, size: 1, want: "FILE_PART_INVALID"},
+		{name: "part_at_limit", id: tg.UploadSaveBigFilePartRequestTypeID, offset: 20, part: appfiles.MaxUploadParts, parts: appfiles.MaxUploadParts, size: 1, want: "FILE_PART_INVALID"},
 		{name: "big_parts_over_cap", id: tg.UploadSaveBigFilePartRequestTypeID, offset: 20, big: true, parts: appfiles.MaxUploadParts + 1, size: 1, want: "FILE_PART_INVALID"},
+		{name: "empty", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, size: 0, want: "FILE_PART_INVALID"},
 		{name: "truncated", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, size: 1024, truncateBy: 1, want: "INPUT_REQUEST_INVALID"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			raw := uploadPartRequest(tc.id, tc.offset, tc.parts, tc.size)
+			raw := uploadPartRequest(tc.id, tc.offset, tc.part, tc.parts, tc.size)
 			if tc.truncateBy > 0 {
 				raw = raw[:len(raw)-tc.truncateBy]
 			}
@@ -100,6 +104,92 @@ func TestUploadPartPreflightBeforeBytesDecode(t *testing.T) {
 	}
 }
 
+func TestLayerRPCFlatBytesPayloadSizeRequiresCompleteLegalUpload(t *testing.T) {
+	router := New(Config{}, Deps{}, zaptest.NewLogger(t), clock.System)
+	for _, tc := range []struct {
+		name   string
+		id     uint32
+		offset int
+		part   int
+		parts  int
+		size   int
+		mutate func([]byte) []byte
+		wantOK bool
+	}{
+		{name: "small", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, size: 64 << 10, wantOK: true},
+		{name: "big", id: tg.UploadSaveBigFilePartRequestTypeID, offset: 20, parts: 364, size: 64 << 10, wantOK: true},
+		{name: "part_negative", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, part: -1, size: 1},
+		{name: "part_at_limit", id: tg.UploadSaveBigFilePartRequestTypeID, offset: 20, part: appfiles.MaxUploadParts, parts: 364, size: 1},
+		{name: "big_total_invalid", id: tg.UploadSaveBigFilePartRequestTypeID, offset: 20, parts: 0, size: 64 << 10},
+		{name: "empty_payload", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, size: 0},
+		{name: "payload_over_cap", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, size: appfiles.MaxUploadPartBytes + 1},
+		{
+			name: "truncated", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, size: 64 << 10,
+			mutate: func(wire []byte) []byte { return wire[:len(wire)-1] },
+		},
+		{
+			name: "trailing", id: tg.UploadSaveFilePartRequestTypeID, offset: 16, size: 64 << 10,
+			mutate: func(wire []byte) []byte { return append(wire, 0, 0, 0, 0) },
+		},
+		{name: "other_rpc", id: tg.HelpGetConfigRequestTypeID, offset: 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := uploadPartRequest(tc.id, tc.offset, tc.part, tc.parts, tc.size)
+			if tc.mutate != nil {
+				wire = tc.mutate(wire)
+			}
+			payloadBytes, ok := router.LayerRPCFlatBytesPayloadSize(wire)
+			if ok != tc.wantOK {
+				t.Fatalf("flat payload = %d/%v, want ok=%v", payloadBytes, ok, tc.wantOK)
+			}
+			if ok && payloadBytes != tc.size {
+				t.Fatalf("flat payload size = %d, want %d", payloadBytes, tc.size)
+			}
+		})
+	}
+}
+
+func TestLayerRPCFlatBytesPayloadSizeDoesNotAllocate(t *testing.T) {
+	router := New(Config{}, Deps{}, zaptest.NewLogger(t), clock.System)
+	wire := uploadPartRequest(
+		tg.UploadSaveBigFilePartRequestTypeID,
+		20,
+		7,
+		364,
+		appfiles.MaxUploadPartBytes,
+	)
+	var payloadBytes int
+	var ok bool
+	allocs := testing.AllocsPerRun(1000, func() {
+		payloadBytes, ok = router.LayerRPCFlatBytesPayloadSize(wire)
+	})
+	if !ok || payloadBytes != appfiles.MaxUploadPartBytes {
+		t.Fatalf("flat payload = %d/%v", payloadBytes, ok)
+	}
+	if allocs != 0 {
+		t.Fatalf("flat payload preflight allocations = %v, want 0", allocs)
+	}
+}
+
+func BenchmarkLayerRPCFlatBytesPayloadSize(b *testing.B) {
+	router := New(Config{}, Deps{}, zaptest.NewLogger(b), clock.System)
+	wire := uploadPartRequest(
+		tg.UploadSaveBigFilePartRequestTypeID,
+		20,
+		7,
+		364,
+		appfiles.MaxUploadPartBytes,
+	)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		payloadBytes, ok := router.LayerRPCFlatBytesPayloadSize(wire)
+		if !ok || payloadBytes != appfiles.MaxUploadPartBytes {
+			b.Fatalf("flat payload = %d/%v", payloadBytes, ok)
+		}
+	}
+}
+
 func fixedVectorRequest(id uint32, policy requestVectorPolicy, count int) []byte {
 	raw := make([]byte, policy.vectorOffset+8+count*policy.minElemBytes)
 	binary.LittleEndian.PutUint32(raw[0:4], id)
@@ -108,9 +198,12 @@ func fixedVectorRequest(id uint32, policy requestVectorPolicy, count int) []byte
 	return raw
 }
 
-func uploadPartRequest(id uint32, offset, parts, size int) []byte {
+func uploadPartRequest(id uint32, offset, part, parts, size int) []byte {
 	raw := make([]byte, offset)
 	binary.LittleEndian.PutUint32(raw[:4], id)
+	if offset >= 16 {
+		binary.LittleEndian.PutUint32(raw[12:16], uint32(part))
+	}
 	if offset == 20 {
 		binary.LittleEndian.PutUint32(raw[16:20], uint32(parts))
 	}

@@ -49,9 +49,7 @@ func (r *Router) sweepExpiredPremium(ctx context.Context, batch int) {
 			r.log.Warn("premium sweep failed", zap.Error(err))
 			return
 		}
-		for _, u := range users {
-			r.pushPremiumStatusUpdate(ctx, u)
-		}
+		r.pushPremiumStatusUpdates(ctx, users)
 		// 不满一批说明已扫完当前积压；满批则继续，避免长停机后积压跨多个周期。
 		if len(users) < batch {
 			return
@@ -153,14 +151,50 @@ func (r *Router) NotifyUserModerationFlagsChanged(ctx context.Context, u domain.
 // 授予、到期与 admin 认证变更共用：updateUser 触发客户端用随附的 self user
 // 对象刷新 premium/verified 等基础 flag（TDesktop processUser 按 flag 翻转）。
 func (r *Router) pushPremiumStatusUpdate(ctx context.Context, u domain.User) {
-	if u.ID == 0 {
+	r.pushPremiumStatusUpdates(ctx, []domain.User{u})
+}
+
+// pushPremiumStatusUpdates projects one username-registry snapshot over the
+// whole online subset. Premium expiry is swept in batches of up to 500 users;
+// reading each peer separately here would turn one maintenance batch into a
+// serial registry N+1 even though offline users need no immediate push.
+func (r *Router) pushPremiumStatusUpdates(ctx context.Context, candidates []domain.User) {
+	if len(candidates) == 0 || r.deps.Sessions == nil {
+		return
+	}
+	online, hasOnlineIndex := r.deps.Sessions.(OnlineUserProvider)
+	users := make([]domain.User, 0, len(candidates))
+	peers := make([]domain.Peer, 0, len(candidates))
+	seen := make(map[int64]struct{}, len(candidates))
+	for _, u := range candidates {
+		if u.ID == 0 {
+			continue
+		}
+		if _, ok := seen[u.ID]; ok {
+			continue
+		}
+		seen[u.ID] = struct{}{}
+		if hasOnlineIndex && !online.IsUserOnline(u.ID) {
+			continue
+		}
+		users = append(users, u)
+		peers = append(peers, domain.Peer{Type: domain.PeerTypeUser, ID: u.ID})
+	}
+	if len(users) == 0 {
 		return
 	}
 	pushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	r.pushUserUpdates(pushCtx, u.ID, &tg.Updates{
-		Updates: []tg.UpdateClass{&tg.UpdateUser{UserID: u.ID}},
-		Users:   []tg.UserClass{r.tgSelfUser(u)},
-		Date:    int(r.clock.Now().Unix()),
-	})
+	usernames := r.usernameRegistryMap(pushCtx, peers)
+	date := int(r.clock.Now().Unix())
+	for _, u := range users {
+		projected := r.tgSelfUser(u)
+		projectedUsers := []tg.UserClass{projected}
+		applyUsernamesFromRegistry(projectedUsers, nil, usernames)
+		r.pushUserUpdates(pushCtx, u.ID, &tg.Updates{
+			Updates: []tg.UpdateClass{&tg.UpdateUser{UserID: u.ID}},
+			Users:   projectedUsers,
+			Date:    date,
+		})
+	}
 }

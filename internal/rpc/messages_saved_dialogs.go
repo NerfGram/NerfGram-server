@@ -333,7 +333,9 @@ func (r *Router) savedDialogsProjection(ctx context.Context, userID int64, list 
 		}
 		if len(userIDs) > 0 {
 			if found, err := r.deps.Users.ByIDs(ctx, userID, userIDs); err == nil {
-				users = append(users, r.tgUsers(found)...)
+				projected := tgUsersForViewer(userID, r.withUsersPresence(found))
+				r.withBotProfileFlagsForUsers(ctx, projected)
+				users = append(users, projected...)
 			}
 		}
 	}
@@ -351,6 +353,8 @@ func (r *Router) savedDialogsProjection(ctx context.Context, userID int64, list 
 			}
 		}
 	}
+	r.applyUsernamesToPeerObjects(ctx, users, chats)
+	r.applyBotVerificationIconsToPeerObjects(ctx, users, chats)
 	return users, chats
 }
 

@@ -12,7 +12,10 @@ import (
 	"github.com/iamxvbaba/td/clock"
 	"github.com/iamxvbaba/td/proto"
 	"github.com/iamxvbaba/td/tg"
+	"github.com/iamxvbaba/td/tgerr"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/iamxvbaba/td/tlprofile"
 	appfiles "telesrv/internal/app/files"
@@ -84,6 +87,18 @@ func TestLayerRPCAdmissionMaterializationConstants(t *testing.T) {
 	}
 	if got := layerRPCAdmissionReservationSize(-1); got != layerRPCAdmissionGraphSlack {
 		t.Fatalf("negative wire charge = %d, want fixed slack %d", got, layerRPCAdmissionGraphSlack)
+	}
+	if got := layerRPCFlatBytesWireCharge(100, 80); got != 20*layerRPCAdmissionWireFactor+80*layerRPCAdmissionFlatBytesFactor {
+		t.Fatalf("flat bytes wire charge = %d", got)
+	}
+	if got := layerRPCFlatBytesWireCharge(10, 11); got != layerRPCAdmissionWireCharge(10) {
+		t.Fatalf("invalid flat bytes hint charge = %d, want generic %d", got, layerRPCAdmissionWireCharge(10))
+	}
+	if got := layerRPCFlatBytesWireCharge(maxInt, maxInt); got != maxInt {
+		t.Fatalf("saturating flat bytes wire charge = %d, want max int %d", got, maxInt)
+	}
+	if got := saturatingLayerRPCAdmissionCharge(maxInt, 1); got != maxInt {
+		t.Fatalf("saturating addition = %d, want max int %d", got, maxInt)
 	}
 }
 
@@ -193,6 +208,354 @@ func TestLayerRPCAdmissionExpandsTDLibNestedGZIPUnderTransferredBudget(t *testin
 	}
 	if got := s.frameBudget.usedBytes(); got != 0 {
 		t.Fatalf("nested gzip temporary frame budget retained after materialization: %d", got)
+	}
+}
+
+func TestLayerRPCAdmissionAdmitsTDLibUploadParts(t *testing.T) {
+	tests := []struct {
+		name        string
+		method      string
+		body        bin.Object
+		withoutGZIP bool
+		bare        bool
+	}{
+		{
+			name:   "pixel_9a_small_file_part_negative_file_id",
+			method: "upload.saveFilePart",
+			body: &tg.UploadSaveFilePartRequest{
+				FileID:   -3596058967254453060,
+				FilePart: 0,
+				Bytes:    make([]byte, 1071),
+			},
+		},
+		{
+			name:   "pixel_9a_big_file_part_gzip",
+			method: "upload.saveBigFilePart",
+			body: &tg.UploadSaveBigFilePartRequest{
+				FileID:         92,
+				FilePart:       0,
+				FileTotalParts: 364,
+				Bytes:          make([]byte, 64<<10),
+			},
+		},
+		{
+			name:        "pixel_9a_big_file_part_plain",
+			method:      "upload.saveBigFilePart",
+			withoutGZIP: true,
+			body: &tg.UploadSaveBigFilePartRequest{
+				FileID:         93,
+				FilePart:       7,
+				FileTotalParts: 364,
+				Bytes:          make([]byte, 64<<10),
+			},
+		},
+		{
+			name:   "pixel_9a_big_file_part_bare_upload_session",
+			method: "upload.saveBigFilePart",
+			bare:   true,
+			body: &tg.UploadSaveBigFilePartRequest{
+				FileID:         94,
+				FilePart:       15,
+				FileTotalParts: 364,
+				Bytes:          make([]byte, 64<<10),
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
+			s := New(Options{DC: 2, LayerRPC: router, Logger: zaptest.NewLogger(t)})
+			c := &Conn{authKeyID: [8]byte{8, 31}, sessionID: 831, metrics: NopMetrics{}}
+			c.startInboundRPCScheduler(s.rpcScheduler, 1, 4, time.Second)
+			defer func() {
+				c.closeInboundRPCScheduler()
+				s.rpcScheduler.stop(time.Second)
+			}()
+
+			var (
+				body          []byte
+				expandedBytes int
+			)
+			if tc.bare {
+				body = exactOutboundLayerRPCBody(t, tlprofile.Profile228, tc.body)
+			} else if tc.withoutGZIP {
+				body = tdlibWrappedBody(t, tlprofile.Profile228, tc.body)
+			} else {
+				body, expandedBytes = tdlibNestedGZIPBody(t, tlprofile.Profile228, tc.body)
+			}
+			plan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: 100, body: body}}}
+			defer plan.close()
+			if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); err != nil {
+				t.Fatal(err)
+			}
+			if plan.items[0].kind != inboundItemRPC || plan.rpcReservation == nil || len(plan.rpcTasks) != 1 {
+				t.Fatalf("admitted nested gzip upload plan = kind:%d reservation:%v tasks:%d payload:%v",
+					plan.items[0].kind, plan.rpcReservation != nil, len(plan.rpcTasks), plan.items[0].payload)
+			}
+			if got := plan.gzipExpandedBytes; got != expandedBytes {
+				t.Fatalf("nested gzip upload cumulative expansion = %d, want %d", got, expandedBytes)
+			}
+
+			// Admission alone is insufficient: the prepared wrapper chain must remain
+			// executable after the temporary gzip expansion buffer has been released.
+			// With no Files dependency configured, reaching the upload handler has the
+			// stable terminal NOT_IMPLEMENTED; INPUT_REQUEST_INVALID means the wrapper or
+			// prepared-call boundary corrupted the otherwise valid request.
+			requestBody := &bin.Buffer{Buf: append([]byte(nil), body...)}
+			admitted, err := router.AdmitLayerWithOptions(tlprofile.Profile228, requestBody, tlprofile.AdmissionOptions{
+				Limits: inboundLayerDecodeLimits,
+				ExpandGZIP: func(wire []byte, limit int) ([]byte, func(), error) {
+					return s.decodeGZIPWithGlobalBudgetLimit(&bin.Buffer{Buf: wire}, limit)
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, method, err := router.DispatchAdmitted(
+				rpc.WithUserID(context.Background(), 42),
+				[8]byte{8, 31},
+				831,
+				100,
+				1,
+				admitted,
+			)
+			if method != tc.method || !tgerr.Is(err, "NOT_IMPLEMENTED") {
+				t.Fatalf("nested gzip upload dispatch = method:%q err:%v, want %s/NOT_IMPLEMENTED", method, err, tc.method)
+			}
+		})
+	}
+}
+
+func TestLayerRPCAdmissionRejectionLogsBoundedMetadataWithoutUploadBody(t *testing.T) {
+	const marker = "DO_NOT_LOG_UPLOAD_BODY_MARKER"
+	payload := make([]byte, 1071)
+	copy(payload, marker)
+	body := tdlibWrappedBody(t, tlprofile.Profile228, &tg.UploadSaveFilePartRequest{
+		FileID:   -3596058967254453060,
+		FilePart: 0,
+		Bytes:    payload,
+	})
+	// Remove the final TL padding byte. Exact admission must reject the malformed
+	// wire while the edge still records its explicit wrapper and bounded cause.
+	body = body[:len(body)-1]
+
+	core, logs := observer.New(zap.DebugLevel)
+	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zap.New(core), clock.System)
+	s := New(Options{DC: 2, LayerRPC: router, Logger: zap.New(core)})
+	c := &Conn{
+		authKeyID:  [8]byte{8, 34},
+		authKeyHex: "0822000000000000",
+		sessionID:  834,
+		metrics:    NopMetrics{},
+	}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 2, time.Second)
+	defer func() {
+		c.closeInboundRPCScheduler()
+		s.rpcScheduler.stop(time.Second)
+	}()
+
+	for attempt := 0; attempt < 2; attempt++ {
+		plan := &inboundPlan{items: []inboundItem{{
+			kind:   inboundItemRPC,
+			msgID:  int64(100 + attempt*4),
+			typeID: tg.InvokeWithLayerRequestTypeID,
+			body:   body,
+		}}}
+		if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); err != nil {
+			plan.close()
+			t.Fatal(err)
+		}
+		if item := plan.items[0]; item.kind != inboundItemRPCAdmissionError {
+			plan.close()
+			t.Fatalf("malformed upload attempt %d kind = %d, want admission error", attempt, item.kind)
+		}
+		plan.close()
+	}
+
+	entries := logs.FilterMessage("RPC exact admission rejected").All()
+	if len(entries) != 2 {
+		t.Fatalf("admission rejection log count = %d, want 2", len(entries))
+	}
+	if entries[0].Level != zap.InfoLevel || entries[1].Level != zap.DebugLevel {
+		t.Fatalf("admission rejection levels = %s/%s, want info/debug", entries[0].Level, entries[1].Level)
+	}
+	fields := entries[0].ContextMap()
+	for key, want := range map[string]any{
+		"method":                  "invokeWithLayer#da9b0d0d",
+		"auth_key_id":             "0822000000000000",
+		"session_id":              int64(834),
+		"msg_id":                  int64(100),
+		"top_level_wire_id":       uint32(tg.InvokeWithLayerRequestTypeID),
+		"wire_bytes":              int64(len(body)),
+		"profile_origin":          "unknown",
+		"explicit_layer_selector": true,
+		"rpc_error_code":          int64(400),
+		"rpc_error_message":       "INPUT_REQUEST_INVALID",
+	} {
+		if got := fields[key]; got != want {
+			t.Fatalf("admission rejection field %q = %#v (%T), want %#v (%T); all=%#v", key, got, got, want, want, fields)
+		}
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Message, marker) || strings.Contains(entry.ContextMap()["error"].(string), marker) {
+			t.Fatalf("admission rejection leaked upload body marker: %#v", entry.ContextMap())
+		}
+		if _, ok := entry.ContextMap()["body"]; ok {
+			t.Fatalf("admission rejection exposed body field: %#v", entry.ContextMap())
+		}
+	}
+}
+
+func TestLayerRPCAdmissionAdmitsTDLibFirstUploadContainer(t *testing.T) {
+	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
+	s := New(Options{DC: 2, LayerRPC: router, Logger: zaptest.NewLogger(t)})
+	c := &Conn{authKeyID: [8]byte{8, 32}, sessionID: 832, metrics: NopMetrics{}}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 8, time.Second)
+	defer func() {
+		c.closeInboundRPCScheduler()
+		s.rpcScheduler.stop(time.Second)
+	}()
+
+	// A newly opened TDLib upload Session applies its invokeWithLayer /
+	// initConnection header to every query in the first MTProto container. The
+	// Pixel 9a trace contains eight gzip-packed 64 KiB saveBigFilePart requests
+	// in that first container, all with the same known total and distinct
+	// parts/message IDs. The fixture is an ELF and its first chunks compress to
+	// roughly 11-14 KiB each, yielding a 129 KiB encrypted write.
+	plan, legacyGenericCharge := tdlibFirstUploadPlan(t)
+	defer plan.close()
+	if legacyGenericCharge <= maxInflightRPCBytes {
+		t.Fatalf("test fixture generic charge = %d, must exceed old connection ceiling %d", legacyGenericCharge, maxInflightRPCBytes)
+	}
+
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.rpcReservation == nil || len(plan.rpcTasks) != len(plan.items) {
+		t.Fatalf("first upload container reservation/tasks = %v/%d, want retained/%d",
+			plan.rpcReservation != nil, len(plan.rpcTasks), len(plan.items))
+	}
+	if got := plan.rpcReservation.totalSize; got <= 0 || got >= legacyGenericCharge || got > maxInflightRPCBytes {
+		t.Fatalf("first upload container retained charge = %d, want 0 < charge < legacy %d and <= %d",
+			got, legacyGenericCharge, maxInflightRPCBytes)
+	}
+	for index := range plan.items {
+		item := &plan.items[index]
+		if item.kind != inboundItemRPC {
+			t.Fatalf("first upload container item %d kind = %d, payload = %v", index, item.kind, item.payload)
+		}
+		if method := plan.rpcTasks[index].method; method != "upload.saveBigFilePart" {
+			t.Fatalf("first upload container task %d method = %q, want upload.saveBigFilePart", index, method)
+		}
+	}
+}
+
+func TestLayerRPCAdmissionTDLibFirstUploadContainerRequiresFlatBytesCapability(t *testing.T) {
+	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
+	// The wrapper deliberately exposes exact admission but not the optional
+	// flat-bytes sizing capability. The edge must therefore retain the generic
+	// worst-case charge and reject the whole oversized batch atomically.
+	handler := &countingLayerRPCAdmission{LayerRPCHandler: router}
+	s := New(Options{DC: 2, LayerRPC: handler, Logger: zaptest.NewLogger(t)})
+	c := &Conn{authKeyID: [8]byte{8, 33}, sessionID: 833, metrics: NopMetrics{}}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 8, time.Second)
+	defer func() {
+		c.closeInboundRPCScheduler()
+		s.rpcScheduler.stop(time.Second)
+	}()
+
+	plan, _ := tdlibFirstUploadPlan(t)
+	defer plan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); err != nil {
+		t.Fatal(err)
+	}
+	for index := range plan.items {
+		if plan.items[index].kind != inboundItemCapacityError {
+			t.Fatalf("item %d kind = %d, want capacity error", index, plan.items[index].kind)
+		}
+	}
+	if plan.rpcReservation != nil || len(plan.rpcTasks) != 0 {
+		t.Fatalf("generic fallback retained reservation/tasks = %v/%d", plan.rpcReservation != nil, len(plan.rpcTasks))
+	}
+	if got := c.inflightRPCBytes.Load(); got != 0 {
+		t.Fatalf("generic fallback leaked connection charge %d", got)
+	}
+	if tasks, bytes := s.rpcScheduler.budgetSnapshot(); tasks != 0 || bytes != 0 {
+		t.Fatalf("generic fallback leaked global budget %d/%d", tasks, bytes)
+	}
+}
+
+func tdlibFirstUploadPlan(t *testing.T) (*inboundPlan, int64) {
+	t.Helper()
+	plan := &inboundPlan{items: make([]inboundItem, 8)}
+	var legacyGenericCharge int64
+	for index := range plan.items {
+		payload := make([]byte, 64<<10)
+		state := uint32(index + 1)
+		for byteIndex := 0; byteIndex < 13<<10; byteIndex++ {
+			state ^= state << 13
+			state ^= state >> 17
+			state ^= state << 5
+			payload[byteIndex] = byte(state)
+		}
+		body, expandedBytes := tdlibNestedGZIPBody(t, tlprofile.Profile228, &tg.UploadSaveBigFilePartRequest{
+			FileID:         95,
+			FilePart:       index,
+			FileTotalParts: 364,
+			Bytes:          payload,
+		})
+		plan.items[index] = inboundItem{
+			kind:  inboundItemRPC,
+			msgID: int64(100 + index*4),
+			body:  body,
+		}
+		legacyGenericCharge += int64(layerRPCAdmissionReservationSize(len(body) + expandedBytes))
+	}
+	return plan, legacyGenericCharge
+}
+
+func TestLayerRPCAdmissionAdmitsTDLibWrappedBindTempAuthKey(t *testing.T) {
+	router := rpc.New(rpc.Config{DC: 2}, rpc.Deps{}, zaptest.NewLogger(t), clock.System)
+	s := New(Options{DC: 2, LayerRPC: router, Logger: zaptest.NewLogger(t)})
+	c := &Conn{authKeyID: [8]byte{8, 41}, sessionID: -7940676790771565328, metrics: NopMetrics{}}
+	c.startInboundRPCScheduler(s.rpcScheduler, 1, 4, time.Second)
+	defer func() {
+		c.closeInboundRPCScheduler()
+		s.rpcScheduler.stop(time.Second)
+	}()
+
+	request := &tg.AuthBindTempAuthKeyRequest{
+		PermAuthKeyID:    9179421154451858694,
+		Nonce:            5318578202586482454,
+		ExpiresAt:        1785817822,
+		EncryptedMessage: make([]byte, 104),
+	}
+	body := tdlibWrappedBody(t, tlprofile.Profile228, request)
+	plan := &inboundPlan{items: []inboundItem{{kind: inboundItemRPC, msgID: 100, body: body}}}
+	defer plan.close()
+	if err := s.prepareInboundLayerRPCBatch(context.Background(), c, plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.items[0].kind != inboundItemRPC || plan.rpcReservation == nil || len(plan.rpcTasks) != 1 {
+		t.Fatalf("admitted TDLib bind plan = kind:%d reservation:%v tasks:%d payload:%v",
+			plan.items[0].kind, plan.rpcReservation != nil, len(plan.rpcTasks), plan.items[0].payload)
+	}
+	requestBody := &bin.Buffer{Buf: append([]byte(nil), body...)}
+	admitted, err := router.AdmitUnprofiled(requestBody, inboundLayerDecodeLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, method, err := router.DispatchAdmitted(
+		context.Background(),
+		c.authKeyID,
+		c.sessionID,
+		100,
+		1,
+		admitted,
+	)
+	if err != nil || method != "auth.bindTempAuthKey" || result == nil || !result.WireInvariant() {
+		t.Fatalf("TDLib wrapped bind dispatch = method:%q result:%T invariant:%v err:%v",
+			method, result, result != nil && result.WireInvariant(), err)
 	}
 }
 
@@ -313,7 +676,7 @@ func TestLayerRPCAdmissionNestedGZIPReDecodeReusesMaterializationCharge(t *testi
 	plan225 := &inboundPlan{}
 	budget225 := &layerRPCGZIPExpansionBudget{
 		server: s, plan: plan225, reservation: reservation225,
-		baseSourceBytes: len(body), chargedSourceBytes: len(body),
+		baseCharge: initialCharge, chargedSize: initialCharge,
 	}
 	options225 := tlprofile.AdmissionOptions{Limits: inboundLayerDecodeLimits, ExpandGZIP: budget225.expand}
 	item225 := inboundItem{msgID: 100, body: body}
@@ -327,7 +690,7 @@ func TestLayerRPCAdmissionNestedGZIPReDecodeReusesMaterializationCharge(t *testi
 	plan227 := &inboundPlan{}
 	budget227 := &layerRPCGZIPExpansionBudget{
 		server: s, plan: plan227, reservation: reservation227,
-		baseSourceBytes: len(body), chargedSourceBytes: len(body),
+		baseCharge: initialCharge, chargedSize: initialCharge,
 	}
 	options227 := tlprofile.AdmissionOptions{Limits: inboundLayerDecodeLimits, ExpandGZIP: budget227.expand}
 	item227 := inboundItem{msgID: 100, body: body}
@@ -413,6 +776,11 @@ func TestLayerRPCAdmissionTransfersOriginalReservationToFreshOwner(t *testing.T)
 func tdlibNestedGZIPBody(t *testing.T, profile tlprofile.Profile, terminal bin.Object) ([]byte, int) {
 	t.Helper()
 	terminalWire := exactOutboundLayerRPCBody(t, profile, terminal)
+	return tdlibWrappedBody(t, profile, zlibPackedObjectForTest(t, terminalWire)), len(terminalWire)
+}
+
+func tdlibWrappedBody(t *testing.T, profile tlprofile.Profile, terminal bin.Object) []byte {
+	t.Helper()
 	request := &tg.InvokeWithLayerRequest{
 		Layer: int(profile),
 		Query: &tg.InitConnectionRequest{
@@ -423,10 +791,14 @@ func tdlibNestedGZIPBody(t *testing.T, profile tlprofile.Profile, terminal bin.O
 			SystemLangCode: "en",
 			LangPack:       "",
 			LangCode:       "en",
-			Query:          &proto.GZIP{Data: terminalWire},
+			Params: &tg.JSONObject{Value: []tg.JSONObjectValue{{
+				Key:   "tz_offset",
+				Value: &tg.JSONNumber{Value: 8 * 60 * 60},
+			}}},
+			Query: terminal,
 		},
 	}
-	return exactLayerRPCBody(t, request), len(terminalWire)
+	return exactLayerRPCBody(t, request)
 }
 
 func TestLayerRPCAdmissionPendingReplayReleasesProvisionalEntry(t *testing.T) {

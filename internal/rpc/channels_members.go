@@ -28,13 +28,17 @@ func (r *Router) onChannelsGetAdminedPublicChannels(ctx context.Context, req *tg
 		if err != nil {
 			return nil, internalErr()
 		}
-		return &tg.MessagesChats{Chats: tgChannels(userID, channels)}, nil
+		chats := tgChannels(userID, channels)
+		r.applyUsernamesToPeerObjects(ctx, nil, chats)
+		return &tg.MessagesChats{Chats: chats}, nil
 	}
 	channels, err := r.deps.Channels.ListAdminedPublicChannels(ctx, userID)
 	if err != nil {
 		return nil, internalErr()
 	}
-	return &tg.MessagesChats{Chats: tgChannels(userID, channels)}, nil
+	chats := tgChannels(userID, channels)
+	r.applyUsernamesToPeerObjects(ctx, nil, chats)
+	return &tg.MessagesChats{Chats: chats}, nil
 }
 
 func (r *Router) onChannelsDeleteParticipantHistory(ctx context.Context, req *tg.ChannelsDeleteParticipantHistoryRequest) (*tg.MessagesAffectedHistory, error) {
@@ -110,6 +114,7 @@ func (r *Router) onChannelsGetMessageAuthor(ctx context.Context, req *tg.Channel
 	if len(users) == 0 {
 		return nil, peerIDInvalidErr()
 	}
+	r.applyPeerReadModels(ctx, userID, users, nil)
 	return users[0], nil
 }
 

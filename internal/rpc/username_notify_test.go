@@ -42,13 +42,7 @@ func TestNotifyPeerUsernamesChangedUserPushesPreloadedVector(t *testing.T) {
 	}
 	updates := sessions.lastUserPush().(*tg.Updates)
 	user := updates.Users[0].(*tg.User)
-	if scalar, ok := user.GetUsername(); !ok || scalar != "nft4" {
-		t.Fatalf("pushed scalar username = %q (set %v), want primary collectible nft4", scalar, ok)
-	}
-	vector, ok := user.GetUsernames()
-	if !ok || len(vector) != 2 || vector[0].Username != "nft4" {
-		t.Fatalf("pushed username vector = %+v (set %v)", vector, ok)
-	}
+	assertVectorOnlyUsernames(t, "pushed user", user, []string{"nft4", "owner_slot"})
 }
 
 func TestNotifyPeerUsernamesChangedChannelPushesPreloadedVector(t *testing.T) {
@@ -84,11 +78,5 @@ func TestNotifyPeerUsernamesChangedChannelPushesPreloadedVector(t *testing.T) {
 	}
 	updates := sessions.lastUserPush().(*tg.Updates)
 	channel := updates.Chats[0].(*tg.Channel)
-	if scalar, ok := channel.GetUsername(); !ok || scalar != "collectible" {
-		t.Fatalf("pushed scalar username = %q (set %v), want primary collectible", scalar, ok)
-	}
-	vector, ok := channel.GetUsernames()
-	if !ok || len(vector) != 2 || vector[0].Username != "collectible" {
-		t.Fatalf("pushed username vector = %+v (set %v)", vector, ok)
-	}
+	assertVectorOnlyUsernames(t, "pushed channel", channel, []string{"collectible", "channel_slot"})
 }

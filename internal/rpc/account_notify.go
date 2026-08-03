@@ -183,12 +183,14 @@ func (r *Router) onAccountGetNotifyExceptions(ctx context.Context, req *tg.Accou
 			chats = appendUniqueTGChats(chats, tgCommunityChats(views)...)
 		}
 	}
-	return &tg.Updates{
+	out := &tg.Updates{
 		Updates: updates,
 		Users:   r.tgUsersForIDs(ctx, userID, userIDs),
 		Chats:   chats,
 		Date:    int(r.clock.Now().Unix()),
-	}, nil
+	}
+	r.applyPeerReadModels(ctx, userID, out.Users, out.Chats)
+	return out, nil
 }
 
 // notifyExceptionQualifies 判定一条异常是否纳入 getNotifyExceptions 结果。

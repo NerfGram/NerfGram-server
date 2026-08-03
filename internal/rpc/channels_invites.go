@@ -69,9 +69,12 @@ func (r *Router) onMessagesCheckChatInvite(ctx context.Context, hash string) (tg
 		return nil, channelInviteErr(err)
 	}
 	if res.Already {
-		// chatInviteAlready#5a686d7c wraps a full Chat, so the badge flags already
-		// travel through tgChannelChat; nothing to re-apply here.
-		return &tg.ChatInviteAlready{Chat: tgChannelChat(userID, res.Channel, &res.Self)}, nil
+		// chatInviteAlready#5a686d7c wraps a full Chat. Run the shared peer
+		// read-model pass before nesting it so collectible usernames and badge
+		// facts cannot be lost behind a scalar-only complete Channel.
+		chat := tgChannelChat(userID, res.Channel, &res.Self)
+		r.applyPeerReadModels(ctx, userID, nil, []tg.ChatClass{chat})
+		return &tg.ChatInviteAlready{Chat: chat}, nil
 	}
 	invite := &tg.ChatInvite{
 		Channel:           true,

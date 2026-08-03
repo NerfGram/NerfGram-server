@@ -289,6 +289,7 @@ func (r *Router) onChannelsGetChannelRecommendations(ctx context.Context, req *t
 		return nil, channelInvalidErr(err)
 	}
 	chats := tgChannels(userID, res.Channels)
+	r.applyUsernamesToPeerObjects(ctx, nil, chats)
 	if res.Count > len(chats) {
 		return &tg.MessagesChatsSlice{Count: res.Count, Chats: chats}, nil
 	}

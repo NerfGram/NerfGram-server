@@ -25,6 +25,7 @@ func (r *Router) onChannelsGetLeftChannels(ctx context.Context, offset int) (tg.
 	for _, item := range list.Channels {
 		chats = append(chats, tgChannelChat(userID, item.Channel, &item.Self))
 	}
+	r.applyUsernamesToPeerObjects(ctx, nil, chats)
 	if len(chats) == 0 && list.Count > 0 {
 		return &tg.MessagesChatsSlice{Count: list.Count, Chats: chats}, nil
 	}
@@ -56,6 +57,7 @@ func (r *Router) onChannelsGetInactiveChannels(ctx context.Context) (*tg.Message
 		dates = append(dates, date)
 		chats = append(chats, tgChannelChatMin(userID, channel))
 	}
+	r.applyUsernamesToPeerObjects(ctx, nil, chats)
 	return &tg.MessagesInactiveChats{Dates: dates, Chats: chats, Users: []tg.UserClass{}}, nil
 }
 
@@ -71,5 +73,7 @@ func (r *Router) onChannelsGetGroupsForDiscussion(ctx context.Context) (tg.Messa
 	if err != nil {
 		return nil, channelInvalidErr(err)
 	}
-	return &tg.MessagesChats{Chats: tgChannels(userID, channels)}, nil
+	chats := tgChannels(userID, channels)
+	r.applyUsernamesToPeerObjects(ctx, nil, chats)
+	return &tg.MessagesChats{Chats: chats}, nil
 }

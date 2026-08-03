@@ -539,8 +539,10 @@ func appendUniqueTGChats(base []tg.ChatClass, extra ...tg.ChatClass) []tg.ChatCl
 // whole user/chat set, so a handler pays one call per read model per response
 // rather than one per peer.
 //
-// It is the single hook every handler uses; adding a read model here reaches all
-// of them at once.
+// It is the shared hook for handlers that return complete peer envelopes. New
+// builders still have to call it explicitly at their response boundary; nested
+// single-peer fields and fan-out builders use the corresponding narrow/preload
+// helpers instead.
 func (r *Router) applyPeerReadModels(ctx context.Context, viewerUserID int64, users []tg.UserClass, chats []tg.ChatClass) {
 	r.applyStoryMaxIDsToPeerObjects(ctx, viewerUserID, users, chats)
 	r.applyUsernamesToPeerObjects(ctx, users, chats)

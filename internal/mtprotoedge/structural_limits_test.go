@@ -1,6 +1,9 @@
 package mtprotoedge
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/zlib"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -684,4 +687,122 @@ func TestGZIPExpansionUsesProcessBudgetBeforeDecode(t *testing.T) {
 	if got := s.frameBudget.usedBytes(); got != 0 {
 		t.Fatalf("caller-bounded reservation failure leaked %d bytes", got)
 	}
+}
+
+func TestGZIPPackedAcceptsOfficialClientWrappers(t *testing.T) {
+	payload := []byte("official Telegram gzip_packed payload")
+	tests := []struct {
+		name   string
+		packed bin.Encoder
+	}{
+		{name: "tdlib_zlib", packed: zlibPackedObjectForTest(t, payload)},
+		{name: "drklo_gotd_gzip", packed: &proto.GZIP{Data: payload}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var wrapped bin.Buffer
+			if err := tt.packed.Encode(&wrapped); err != nil {
+				t.Fatalf("encode gzip_packed: %v", err)
+			}
+
+			s := New(Options{Logger: zaptest.NewLogger(t)})
+			s.frameBudget = newInboundFrameBudget(maxSingleGZIPExpandedBytes)
+			decoded, release, err := s.decodeGZIPWithGlobalBudget(&wrapped)
+			if err != nil {
+				t.Fatalf("decode gzip_packed: %v", err)
+			}
+			if !bytes.Equal(decoded, payload) {
+				t.Fatalf("decoded payload = %q, want %q", decoded, payload)
+			}
+			if got := s.frameBudget.usedBytes(); got != int64(len(payload)) {
+				t.Fatalf("held expansion budget = %d, want %d", got, len(payload))
+			}
+			release()
+			if got := s.frameBudget.usedBytes(); got != 0 {
+				t.Fatalf("released expansion budget = %d, want zero", got)
+			}
+		})
+	}
+}
+
+func TestGZIPPackedRejectsCorruptZLIBChecksumWithoutBudgetLeak(t *testing.T) {
+	packed := zlibPackedObjectForTest(t, []byte("checksum-protected payload"))
+	packed.PackedData[len(packed.PackedData)-1] ^= 0xff
+	var wrapped bin.Buffer
+	if err := packed.Encode(&wrapped); err != nil {
+		t.Fatalf("encode gzip_packed: %v", err)
+	}
+
+	s := New(Options{Logger: zaptest.NewLogger(t)})
+	s.frameBudget = newInboundFrameBudget(maxSingleGZIPExpandedBytes)
+	if _, release, err := s.decodeGZIPWithGlobalBudget(&wrapped); err == nil {
+		release()
+		t.Fatal("corrupt zlib checksum unexpectedly accepted")
+	}
+	if got := s.frameBudget.usedBytes(); got != 0 {
+		t.Fatalf("corrupt zlib checksum leaked %d budget bytes", got)
+	}
+}
+
+func TestGZIPPackedZLIBHonorsExpansionLimit(t *testing.T) {
+	payload := make([]byte, 1<<20)
+	packed := zlibPackedObjectForTest(t, payload)
+	var wrapped bin.Buffer
+	if err := packed.Encode(&wrapped); err != nil {
+		t.Fatalf("encode gzip_packed: %v", err)
+	}
+
+	s := New(Options{Logger: zaptest.NewLogger(t)})
+	s.frameBudget = newInboundFrameBudget(2 * maxSingleGZIPExpandedBytes)
+	if _, release, err := s.decodeGZIPWithGlobalBudgetLimit(&wrapped, len(payload)-1); err == nil {
+		release()
+		t.Fatal("caller-bounded zlib decode accepted an oversized expansion")
+	} else if got := gzipExpansionWork(err); got != len(payload) {
+		t.Fatalf("caller-bounded zlib expansion work = %d, want %d", got, len(payload))
+	}
+	if got := s.frameBudget.usedBytes(); got != 0 {
+		t.Fatalf("caller-bounded zlib rejection leaked %d bytes", got)
+	}
+}
+
+func TestGZIPPackedRejectsRawDEFLATEWithoutBudgetLeak(t *testing.T) {
+	var compressed bytes.Buffer
+	w, err := flate.NewWriter(&compressed, flate.DefaultCompression)
+	if err != nil {
+		t.Fatalf("create raw deflate writer: %v", err)
+	}
+	if _, err := w.Write([]byte("raw deflate is not a supported Telegram wrapper")); err != nil {
+		t.Fatalf("write raw deflate payload: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close raw deflate payload: %v", err)
+	}
+	packed := &mt.GzipPacked{PackedData: compressed.Bytes()}
+	var wrapped bin.Buffer
+	if err := packed.Encode(&wrapped); err != nil {
+		t.Fatalf("encode gzip_packed: %v", err)
+	}
+
+	s := New(Options{Logger: zaptest.NewLogger(t)})
+	s.frameBudget = newInboundFrameBudget(maxSingleGZIPExpandedBytes)
+	if _, release, err := s.decodeGZIPWithGlobalBudget(&wrapped); err == nil {
+		release()
+		t.Fatal("raw deflate unexpectedly accepted")
+	}
+	if got := s.frameBudget.usedBytes(); got != 0 {
+		t.Fatalf("raw deflate rejection leaked %d budget bytes", got)
+	}
+}
+
+func zlibPackedObjectForTest(t testing.TB, payload []byte) *mt.GzipPacked {
+	t.Helper()
+	var compressed bytes.Buffer
+	w := zlib.NewWriter(&compressed)
+	if _, err := w.Write(payload); err != nil {
+		t.Fatalf("write zlib payload: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close zlib payload: %v", err)
+	}
+	return &mt.GzipPacked{PackedData: compressed.Bytes()}
 }

@@ -76,12 +76,9 @@ func TestContactsSearchFindsUsers(t *testing.T) {
 		t.Fatalf("peer = %T %+v, want friend", box.Results[0], box.Results[0])
 	}
 	user := box.Users[0].(*tg.User)
-	if scalar, ok := user.GetUsername(); !ok || scalar != "search_friend" {
-		t.Fatalf("search result scalar username = %q (set %v), want search_friend", scalar, ok)
-	}
-	vector, ok := user.GetUsernames()
-	if !ok || len(vector) != 2 || vector[1].Username != "nft4" || !vector[1].Active {
-		t.Fatalf("search result username vector = %+v (set %v), want active nft4 alias", vector, ok)
+	vector := assertVectorOnlyUsernames(t, "contacts.search result", user, []string{"search_friend", "nft4"})
+	if !vector[1].Active {
+		t.Fatalf("search result username vector = %+v, want active nft4 alias", vector)
 	}
 }
 

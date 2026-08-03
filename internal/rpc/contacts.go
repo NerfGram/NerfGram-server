@@ -478,6 +478,7 @@ func (r *Router) onContactsGetBlocked(ctx context.Context, req *tg.ContactsGetBl
 		})
 		users = append(users, r.tgUser(item.User))
 	}
+	r.applyUsernamesToPeerObjects(ctx, users, nil)
 	if list.Count > len(blocked)+req.Offset {
 		return &tg.ContactsBlockedSlice{Count: list.Count, Blocked: blocked, Chats: []tg.ChatClass{}, Users: users}, nil
 	}
@@ -835,6 +836,7 @@ func (r *Router) onContactsDeleteContacts(ctx context.Context, ids []tg.InputUse
 		}
 	}
 	r.invalidateRPCProjectionForViewer(userID)
+	r.applyUsernamesToPeerObjects(ctx, users, nil)
 	out := &tg.Updates{Updates: updates, Users: users, Date: int(r.clock.Now().Unix())}
 	r.pushUserUpdatesIfNoReliableDispatch(ctx, userID, out)
 	return out, nil
@@ -874,7 +876,7 @@ func (r *Router) onContactsUpdateContactNote(ctx context.Context, req *tg.Contac
 		// private note into the shared update log.
 		r.pushContactNoteRefreshIfReliableDispatch(ctx, userID, peerUser)
 	} else {
-		r.pushUserUpdates(ctx, userID, r.contactNoteRefreshUpdates(peerUser, int(r.clock.Now().Unix()), true))
+		r.pushUserUpdates(ctx, userID, r.contactNoteRefreshUpdates(ctx, userID, peerUser, int(r.clock.Now().Unix()), true))
 	}
 	return true, nil
 }
@@ -1062,17 +1064,19 @@ func contactUserForUpdates(contact domain.Contact) domain.User {
 	return peerUser
 }
 
-func (r *Router) contactNoteRefreshUpdates(peerUser domain.User, date int, includeContactsReset bool) *tg.Updates {
+func (r *Router) contactNoteRefreshUpdates(ctx context.Context, viewerUserID int64, peerUser domain.User, date int, includeContactsReset bool) *tg.Updates {
 	updates := make([]tg.UpdateClass, 0, 2)
 	if includeContactsReset {
 		updates = append(updates, &tg.UpdateContactsReset{})
 	}
 	updates = append(updates, &tg.UpdateUser{UserID: peerUser.ID})
-	return &tg.Updates{
+	out := &tg.Updates{
 		Updates: updates,
 		Users:   []tg.UserClass{r.tgUser(peerUser)},
 		Date:    date,
 	}
+	r.applyUsernamesToPeerObjects(ctx, out.Users, nil)
+	return out
 }
 
 // pushContactNoteRefreshIfReliableDispatch complements the durable
@@ -1087,7 +1091,7 @@ func (r *Router) pushContactNoteRefreshIfReliableDispatch(ctx context.Context, u
 		ctx,
 		userID,
 		"push contact note full-user refresh",
-		r.contactNoteRefreshUpdates(peerUser, int(r.clock.Now().Unix()), false),
+		r.contactNoteRefreshUpdates(ctx, userID, peerUser, int(r.clock.Now().Unix()), false),
 	)
 }
 

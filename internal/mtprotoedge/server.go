@@ -93,6 +93,17 @@ type LayerRPCDefaultProfileOptionsAdmitter interface {
 	AdmitDefaultLayerWithOptions(profile tlprofile.Profile, b *bin.Buffer, options tlprofile.AdmissionOptions) (tlprofile.Admission, error)
 }
 
+// LayerRPCFlatBytesPayloadSizer is an optional, allocation-free admission
+// capability for exact terminal requests whose generated object graph contains
+// one already-bounded flat bytes payload. The handler may return ok only after
+// proving the complete terminal wire shape and every semantic field cap it
+// relies on. The edge still owns the multiplier, graph slack and all process /
+// connection budgets; an absent or invalid hint falls back to the conservative
+// generic graph charge.
+type LayerRPCFlatBytesPayloadSizer interface {
+	LayerRPCFlatBytesPayloadSize(wire []byte) (payloadBytes int, ok bool)
+}
+
 // LayerRPCSessionProfileResolver may restore an exact profile only when it was
 // previously proven for this same (auth_key_id, session_id). Auth-key-wide
 // device metadata is intentionally ineligible: a client upgrade can reuse its

@@ -147,20 +147,24 @@ func (r *Router) onPhoneGetGroupCallJoinAs(ctx context.Context, peer tg.InputPee
 		Chats: []tg.ChatClass{},
 		Users: r.tgUsersForIDs(ctx, userID, []int64{userID}),
 	}
+	finish := func() *tg.PhoneJoinAsPeers {
+		r.applyPeerReadModels(ctx, userID, out.Users, out.Chats)
+		return out
+	}
 	if r.deps.Channels == nil {
-		return out, nil
+		return finish(), nil
 	}
 	dp, err := r.checkedDomainPeerFromInputPeer(ctx, userID, peer)
 	if err != nil || dp.Type != domain.PeerTypeChannel || dp.ID == 0 {
-		return out, nil
+		return finish(), nil
 	}
 	view, err := r.deps.Channels.GetChannel(ctx, userID, dp.ID)
 	if err != nil || view.Self.Status != domain.ChannelMemberActive || !channelMemberIsAdmin(view.Self) {
-		return out, nil
+		return finish(), nil
 	}
 	out.Peers = append(out.Peers, &tg.PeerChannel{ChannelID: view.Channel.ID})
 	out.Chats = append(out.Chats, tgChannel(userID, view.Channel, &view.Self))
-	return out, nil
+	return finish(), nil
 }
 
 func (r *Router) conferenceCallCanAccess(ctx context.Context, callID, userID int64) (bool, error) {

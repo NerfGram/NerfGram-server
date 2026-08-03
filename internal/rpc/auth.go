@@ -408,7 +408,7 @@ func (r *Router) authLoginTokenSuccess(ctx context.Context, a domain.Authorizati
 		return nil, internalErr()
 	}
 	return &tg.AuthLoginTokenSuccess{
-		Authorization: &tg.AuthAuthorization{User: r.tgSelfUser(u)},
+		Authorization: &tg.AuthAuthorization{User: r.tgSelfUserWithUsernames(ctx, u)},
 	}, nil
 }
 
@@ -626,7 +626,7 @@ func (r *Router) finishAuthSignIn(ctx context.Context, u domain.User, needSignUp
 	r.bindSessionUser(ctx, u.ID)
 	r.recordNewLoginNotice(ctx, u)
 	r.pushSignInServiceNotificationToOthers(ctx, u)
-	return &tg.AuthAuthorization{User: r.tgSelfUser(u)}, nil
+	return &tg.AuthAuthorization{User: r.tgSelfUserWithUsernames(ctx, u)}, nil
 }
 
 func (r *Router) onAuthResendCode(ctx context.Context, req *tg.AuthResendCodeRequest) (tg.AuthSentCodeClass, error) {
@@ -735,7 +735,7 @@ func (r *Router) onAuthCheckPassword(ctx context.Context, password tg.InputCheck
 	if err != nil {
 		return nil, internalErr()
 	}
-	return &tg.AuthAuthorization{User: r.tgSelfUser(u)}, nil
+	return &tg.AuthAuthorization{User: r.tgSelfUserWithUsernames(ctx, u)}, nil
 }
 
 func (r *Router) onAuthRequestPasswordRecovery(ctx context.Context) (*tg.AuthPasswordRecovery, error) {
@@ -776,7 +776,7 @@ func (r *Router) onAuthRecoverPassword(ctx context.Context, req *tg.AuthRecoverP
 	if err != nil {
 		return nil, internalErr()
 	}
-	return &tg.AuthAuthorization{User: r.tgSelfUser(u)}, nil
+	return &tg.AuthAuthorization{User: r.tgSelfUserWithUsernames(ctx, u)}, nil
 }
 
 func (r *Router) onAuthCheckRecoveryPassword(ctx context.Context, code string) (bool, error) {
@@ -913,9 +913,11 @@ func (r *Router) onAuthFinishPasskeyLogin(ctx context.Context, req *tg.AuthFinis
 		r.setAuthUserCache(id, u.ID, true)
 	}
 	r.bindSessionUser(ctx, u.ID)
+	// preserve both the login notices/notifications and return the richer
+	// user object that includes username hydration.
 	r.recordNewLoginNotice(ctx, u)
 	r.pushSignInServiceNotificationToOthers(ctx, u)
-	return &tg.AuthAuthorization{User: r.tgSelfUser(u)}, nil
+	return &tg.AuthAuthorization{User: r.tgSelfUserWithUsernames(ctx, u)}, nil
 }
 
 func emailVerificationCode(v tg.EmailVerificationClass) string {
@@ -946,7 +948,7 @@ func (r *Router) onAuthImportBotAuthorization(ctx context.Context, req *tg.AuthI
 		r.setAuthUserCache(id, u.ID, true)
 	}
 	r.bindSessionUser(ctx, u.ID)
-	return &tg.AuthAuthorization{User: r.tgSelfUser(u)}, nil
+	return &tg.AuthAuthorization{User: r.tgSelfUserWithUsernames(ctx, u)}, nil
 }
 
 // onAuthSignUp 处理 auth.signUp：创建用户并绑定授权。
@@ -963,7 +965,7 @@ func (r *Router) onAuthSignUp(ctx context.Context, req *tg.AuthSignUpRequest) (t
 	}
 	r.bindSessionUser(ctx, u.ID)
 	r.enqueueLoginMessageBootstrap(ctx, loginMessage)
-	return &tg.AuthAuthorization{User: r.tgSelfUser(u)}, nil
+	return &tg.AuthAuthorization{User: r.tgSelfUserWithUsernames(ctx, u)}, nil
 }
 
 // onAuthLogOut 处理 auth.logOut：解绑当前 auth_key 的授权。

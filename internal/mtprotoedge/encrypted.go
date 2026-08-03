@@ -3,6 +3,7 @@ package mtprotoedge
 import (
 	"bytes"
 	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -413,7 +414,7 @@ func (s *Server) decodeGZIPWithGlobalBudgetLimit(b *bin.Buffer, limit int) ([]by
 		}
 	}
 
-	r, err := gzip.NewReader(bytes.NewReader(compressed))
+	r, err := newGZIPPackedReader(compressed)
 	if err != nil {
 		release()
 		return nil, func() {}, err
@@ -440,6 +441,19 @@ func (s *Server) decodeGZIPWithGlobalBudgetLimit(b *bin.Buffer, limit int) ([]by
 		reserved = int64(len(data))
 	}
 	return data, release, nil
+}
+
+// newGZIPPackedReader accepts the two wrapped DEFLATE formats emitted by
+// official Telegram clients. TDLib uses a zlib wrapper while DrKLO/gotd use a
+// gzip wrapper; raw DEFLATE is deliberately unsupported. Selecting by the gzip
+// magic keeps malformed gzip input on the gzip validator instead of silently
+// retrying it as another format.
+func newGZIPPackedReader(compressed []byte) (io.ReadCloser, error) {
+	source := bytes.NewReader(compressed)
+	if len(compressed) >= 2 && compressed[0] == 0x1f && compressed[1] == 0x8b {
+		return gzip.NewReader(source)
+	}
+	return zlib.NewReader(source)
 }
 
 // gzipPackedBytesView parses the TL bytes envelope without copying the compressed

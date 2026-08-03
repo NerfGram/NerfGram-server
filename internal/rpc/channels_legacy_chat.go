@@ -149,6 +149,7 @@ func (r *Router) onMessagesGetChats(ctx context.Context, ids []int64) (tg.Messag
 			}
 		}
 	}
+	r.applyUsernamesToPeerObjects(ctx, nil, chats)
 	return &tg.MessagesChats{Chats: chats}, nil
 }
 

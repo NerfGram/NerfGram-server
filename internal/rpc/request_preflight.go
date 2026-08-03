@@ -21,12 +21,6 @@ type requestVectorPolicy struct {
 	tooLong      func() error
 }
 
-type rpcPreflightWire interface {
-	WireSize() int
-	ByteAt(offset int) (byte, error)
-	Uint32At(offset int) (uint32, error)
-}
-
 type rawRPCPreflightWire []byte
 
 func (w rawRPCPreflightWire) WireSize() int { return len(w) }
@@ -159,7 +153,7 @@ func preflightRPCRequest(id uint32, b *bin.Buffer) error {
 	return preflightRPCWire(id, rawRPCPreflightWire(b.Buf))
 }
 
-func preflightRPCWire(id uint32, wire rpcPreflightWire) error {
+func preflightRPCWire(id uint32, wire rawRPCPreflightWire) error {
 	if wire == nil {
 		return inputRequestInvalidErr()
 	}
@@ -178,7 +172,38 @@ func preflightRPCWire(id uint32, wire rpcPreflightWire) error {
 	}
 }
 
-func preflightFixedVector(wire rpcPreflightWire, policy requestVectorPolicy) error {
+// LayerRPCFlatBytesPayloadSize exposes the only two byte-heavy, flat request
+// graphs to mtprotoedge's materialization budget. Returning ok is deliberately
+// stricter than recognizing the constructor: the complete TL bytes tail,
+// per-part byte ceiling and big-file total-parts policy must all pass the same
+// allocation-free preflight used by generated exact admission. All other RPCs
+// retain the generic worst-case graph charge.
+func (r *Router) LayerRPCFlatBytesPayloadSize(wire []byte) (int, bool) {
+	if r == nil || len(wire) < 4 {
+		return 0, false
+	}
+	raw := rawRPCPreflightWire(wire)
+	id := binary.LittleEndian.Uint32(wire[:4])
+	bytesOffset := 0
+	switch id {
+	case tg.UploadSaveFilePartRequestTypeID:
+		bytesOffset = 16
+	case tg.UploadSaveBigFilePartRequestTypeID:
+		bytesOffset = 20
+	default:
+		return 0, false
+	}
+	if err := preflightRPCWire(id, raw); err != nil {
+		return 0, false
+	}
+	payloadBytes, encodedBytes, err := tlBytesSizeAt(raw, bytesOffset)
+	if err != nil || encodedBytes != len(wire)-bytesOffset {
+		return 0, false
+	}
+	return payloadBytes, true
+}
+
+func preflightFixedVector(wire rawRPCPreflightWire, policy requestVectorPolicy) error {
 	if policy.vectorOffset < 4 || policy.minElemBytes <= 0 || wire.WireSize() < policy.vectorOffset+8 {
 		return inputRequestInvalidErr()
 	}
@@ -209,11 +234,19 @@ func preflightFixedVector(wire rpcPreflightWire, policy requestVectorPolicy) err
 	return nil
 }
 
-func preflightUploadPart(wire rpcPreflightWire, bytesOffset int, big bool) error {
+func preflightUploadPart(wire rawRPCPreflightWire, bytesOffset int, big bool) error {
+	if wire.WireSize() < bytesOffset {
+		return inputRequestInvalidErr()
+	}
+	rawPart, err := wire.Uint32At(12)
+	if err != nil {
+		return inputRequestInvalidErr()
+	}
+	part := int32(rawPart)
+	if part < 0 || part >= int32(appfiles.MaxUploadParts) {
+		return filePartInvalidErr()
+	}
 	if big {
-		if wire.WireSize() < 20 {
-			return inputRequestInvalidErr()
-		}
 		rawTotalParts, err := wire.Uint32At(16)
 		if err != nil {
 			return inputRequestInvalidErr()
@@ -230,15 +263,18 @@ func preflightUploadPart(wire rpcPreflightWire, bytesOffset int, big bool) error
 	if encoded != wire.WireSize()-bytesOffset {
 		return inputRequestInvalidErr()
 	}
+	if n == 0 {
+		return filePartInvalidErr()
+	}
 	if n > appfiles.MaxUploadPartBytes {
 		return filePartTooBigErr()
 	}
 	return nil
 }
 
-// tlBytesSizeAt parses a TL bytes prefix without copying the payload.  encoded includes prefix,
-// payload and 4-byte padding.
-func tlBytesSizeAt(wire rpcPreflightWire, offset int) (n, encoded int, err error) {
+// tlBytesSizeAt parses a TL bytes prefix without copying the payload. encoded
+// includes prefix, payload and 4-byte padding.
+func tlBytesSizeAt(wire rawRPCPreflightWire, offset int) (n, encoded int, err error) {
 	if offset < 0 || offset >= wire.WireSize() {
 		return 0, 0, fmt.Errorf("bytes prefix out of range")
 	}

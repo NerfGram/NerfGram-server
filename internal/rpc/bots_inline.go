@@ -1036,6 +1036,7 @@ func (r *Router) tgBotInlineResults(ctx context.Context, viewerUserID int64, in 
 			out.Users = append(out.Users, r.tgUser(u))
 		}
 	}
+	r.applyPeerReadModels(ctx, viewerUserID, out.Users, nil)
 	return out
 }
 

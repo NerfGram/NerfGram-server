@@ -42,6 +42,7 @@ const (
 	// 32-MiB per-connection budget and therefore remains admissible by default.
 	layerRPCAdmissionStaticObjectBytes = 512
 	layerRPCAdmissionWireFactor        = 60
+	layerRPCAdmissionFlatBytesFactor   = 2
 	layerRPCAdmissionGraphSlack        = layerRPCAdmissionStaticObjectBytes * 32
 )
 
@@ -164,33 +165,91 @@ func (s *Server) initialLayerRPCAdmissionCursor(ctx context.Context, c *Conn) (l
 // Saturation deliberately turns hostile integer-sized inputs into ordinary
 // capacity rejection; it must never wrap into a small accepted reservation.
 func layerRPCAdmissionReservationSize(wireBytes int) int {
+	return saturatingLayerRPCAdmissionCharge(
+		layerRPCAdmissionGraphSlack,
+		layerRPCAdmissionWireCharge(wireBytes),
+	)
+}
+
+func layerRPCAdmissionWireCharge(wireBytes int) int {
 	if wireBytes < 0 {
 		wireBytes = 0
 	}
 	maxInt := int(^uint(0) >> 1)
-	if wireBytes > (maxInt-layerRPCAdmissionGraphSlack)/layerRPCAdmissionWireFactor {
+	if wireBytes > maxInt/layerRPCAdmissionWireFactor {
 		return maxInt
 	}
-	return wireBytes*layerRPCAdmissionWireFactor + layerRPCAdmissionGraphSlack
+	return wireBytes * layerRPCAdmissionWireFactor
+}
+
+// layerRPCFlatBytesWireCharge keeps the generic factor on fixed TL wire and
+// applies a tight copy factor only to a payload which the production Router has
+// already proven to be one bounded flat bytes field. The temporary expanded
+// buffer remains independently owned by inboundFrameBudget while generated
+// admission materializes the request; 2x covers the retained bytes copy plus
+// allocator rounding without treating every payload byte as a possible nested
+// object/vector node. The per-request graph slack is owned by the base
+// reservation and must not be repeated for each nested gzip expansion.
+func layerRPCFlatBytesWireCharge(wireBytes, payloadBytes int) int {
+	if wireBytes < 0 || payloadBytes < 0 || payloadBytes > wireBytes {
+		return layerRPCAdmissionWireCharge(wireBytes)
+	}
+	fixedBytes := wireBytes - payloadBytes
+	maxInt := int(^uint(0) >> 1)
+	if fixedBytes > maxInt/layerRPCAdmissionWireFactor {
+		return maxInt
+	}
+	charge := fixedBytes * layerRPCAdmissionWireFactor
+	if payloadBytes > (maxInt-charge)/layerRPCAdmissionFlatBytesFactor {
+		return maxInt
+	}
+	return charge + payloadBytes*layerRPCAdmissionFlatBytesFactor
+}
+
+func saturatingLayerRPCAdmissionCharge(left, right int) int {
+	if left < 0 {
+		left = 0
+	}
+	if right < 0 {
+		right = 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	if right > maxInt-left {
+		return maxInt
+	}
+	return left + right
+}
+
+func (s *Server) layerRPCExpandedWireCharge(wire []byte) int {
+	if s != nil {
+		if sizer, ok := s.layerRPC.(LayerRPCFlatBytesPayloadSizer); ok {
+			if payloadBytes, flat := sizer.LayerRPCFlatBytesPayloadSize(wire); flat && payloadBytes >= 0 && payloadBytes <= len(wire) {
+				return layerRPCFlatBytesWireCharge(len(wire), payloadBytes)
+			}
+		}
+	}
+	return layerRPCAdmissionWireCharge(len(wire))
 }
 
 // layerRPCGZIPExpansionBudget bridges transient process-wide expansion memory
-// to the durable scheduler charge of one exact typed request. sourceBytes is
-// conservative: it retains the original compressed wire plus every successful
-// expansion seen across nested envelopes or an authoritative-profile re-decode.
+// to the durable scheduler charge of one exact typed request. The original
+// compressed wire retains the generic graph charge. Every successful expansion
+// adds its own charge; only a handler-proven flat bytes terminal can use the
+// tighter payload factor. An authoritative-profile re-decode reuses the largest
+// already-held charge instead of double-counting sequential attempts.
 type layerRPCGZIPExpansionBudget struct {
-	server               *Server
-	plan                 *inboundPlan
-	reservation          *inboundRPCBatchReservation
-	entry                int
-	baseSourceBytes      int
-	attemptExpandedBytes int
-	chargedSourceBytes   int
+	server                *Server
+	plan                  *inboundPlan
+	reservation           *inboundRPCBatchReservation
+	entry                 int
+	baseCharge            int
+	attemptExpandedCharge int
+	chargedSize           int
 }
 
 func (b *layerRPCGZIPExpansionBudget) beginAttempt() {
 	if b != nil {
-		b.attemptExpandedBytes = 0
+		b.attemptExpandedCharge = 0
 	}
 }
 
@@ -221,17 +280,19 @@ func (b *layerRPCGZIPExpansionBudget) expand(wire []byte, admissionLimit int) ([
 		return nil, release, err
 	}
 	b.plan.gzipExpandedBytes += len(data)
-	b.attemptExpandedBytes += len(data)
-	targetSourceBytes := b.baseSourceBytes + b.attemptExpandedBytes
-	targetCharge := layerRPCAdmissionReservationSize(targetSourceBytes)
-	if targetSourceBytes > b.chargedSourceBytes {
+	b.attemptExpandedCharge = saturatingLayerRPCAdmissionCharge(
+		b.attemptExpandedCharge,
+		b.server.layerRPCExpandedWireCharge(data),
+	)
+	targetCharge := saturatingLayerRPCAdmissionCharge(b.baseCharge, b.attemptExpandedCharge)
+	if targetCharge > b.chargedSize {
 		if err := b.reservation.growEntry(b.entry, targetCharge); err != nil {
 			if errors.Is(err, ErrInboundRPCQueueFull) {
 				return nil, release, errors.Join(errLayerRPCGZIPCapacity, err)
 			}
 			return nil, release, err
 		}
-		b.chargedSourceBytes = targetSourceBytes
+		b.chargedSize = targetCharge
 	}
 	return data, release, nil
 }
@@ -293,7 +354,9 @@ func (s *Server) prepareInboundLayerRPCBatch(ctx context.Context, c *Conn, plan 
 		}
 		expansionBudget := &layerRPCGZIPExpansionBudget{
 			server: s, plan: plan, reservation: reservation,
-			entry: reservationIndex, baseSourceBytes: len(item.body), chargedSourceBytes: len(item.body),
+			entry:       reservationIndex,
+			baseCharge:  provisionalSpecs[reservationIndex].size,
+			chargedSize: provisionalSpecs[reservationIndex].size,
 		}
 		expansionBudgets[reservationIndex] = expansionBudget
 		options := tlprofile.AdmissionOptions{
@@ -338,16 +401,11 @@ func (s *Server) prepareInboundLayerRPCBatch(ctx context.Context, c *Conn, plan 
 			if errors.Is(err, ErrLayerProfileConflict) {
 				return err
 			}
-			s.log.Debug("RPC exact admission rejected",
-				zap.String("method", method),
-				zap.String("auth_key_id", c.authKeyHex),
-				zap.Int64("session_id", c.sessionID),
-				zap.Int64("msg_id", item.msgID),
-				zap.Error(err),
-			)
+			rpcError := layerRPCAdmissionError(err)
+			s.logLayerRPCAdmissionRejection(c, item, itemState, admissionCursor, method, rpcError, err)
 			item.kind = inboundItemRPCAdmissionError
 			item.method = method
-			item.payload = layerRPCAdmissionError(err)
+			item.payload = rpcError
 			c.metrics.InboundRPCDropped(method, "layer_admission")
 			continue
 		}
@@ -1159,6 +1217,63 @@ func layerRPCAdmissionError(err error) *mt.RPCError {
 		return &mt.RPCError{ErrorCode: 501, ErrorMessage: "NOT_IMPLEMENTED"}
 	}
 	return &mt.RPCError{ErrorCode: 400, ErrorMessage: "INPUT_REQUEST_INVALID"}
+}
+
+// logLayerRPCAdmissionRejection preserves one production-visible diagnostic for
+// an otherwise generic RPC 400 without exposing the request body. The INFO path
+// is one-shot per physical Conn; compatibility-traced unknown RPCs already have
+// their own warning and therefore do not consume this diagnostic slot.
+func (s *Server) logLayerRPCAdmissionRejection(
+	c *Conn,
+	item *inboundItem,
+	state LayerProfileSnapshot,
+	cursor layerRPCAdmissionCursor,
+	method string,
+	rpcError *mt.RPCError,
+	admissionErr error,
+) {
+	if s == nil || s.log == nil || c == nil || item == nil || rpcError == nil {
+		return
+	}
+	wireID := item.typeID
+	if wireID == 0 {
+		if id, err := (&bin.Buffer{Buf: item.body}).PeekID(); err == nil {
+			wireID = id
+		}
+	}
+	fields := []zap.Field{
+		zap.String("method", method),
+		zap.String("auth_key_id", c.authKeyHex),
+		zap.Int64("session_id", c.sessionID),
+		zap.Int64("msg_id", item.msgID),
+		zap.Uint32("top_level_wire_id", wireID),
+		zap.Int("wire_bytes", len(item.body)),
+		zap.Int("selected_profile", int(state.Profile)),
+		zap.String("profile_origin", layerProfileOriginLogName(state.Origin)),
+		zap.Uint32("profile_epoch", state.Epoch),
+		zap.Int("raw_layer_evidence", cursor.rawLayer),
+		zap.Int64("layer_evidence_msg_id", cursor.evidenceMsgID),
+		zap.Bool("explicit_layer_selector", layerRPCAdmissionHasExplicitSelector(item.body, admissionErr)),
+		zap.Int("rpc_error_code", rpcError.ErrorCode),
+		zap.String("rpc_error_message", rpcError.ErrorMessage),
+		zap.Error(admissionErr),
+	}
+	if !errors.Is(admissionErr, tlprofile.ErrUnknownRPCMethod) && c.layerRPCAdmissionTraceLogged.CompareAndSwap(false, true) {
+		s.log.Info("RPC exact admission rejected", fields...)
+		return
+	}
+	s.log.Debug("RPC exact admission rejected", fields...)
+}
+
+func layerProfileOriginLogName(origin LayerProfileOrigin) string {
+	switch origin {
+	case LayerProfileInherited:
+		return "inherited"
+	case LayerProfileExplicit:
+		return "explicit"
+	default:
+		return "unknown"
+	}
 }
 
 func (s *Server) layerRPCDependencies(c *Conn, msgID int64, request tlprofile.Admission) layerRPCDependencySet {

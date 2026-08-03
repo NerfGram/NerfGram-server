@@ -74,6 +74,7 @@ func (r *Router) telegramLoginRequestResult(ctx context.Context, viewerUserID in
 		return nil, telegramLoginOAuthInvalidErr()
 	}
 	botTL := r.withBotProfileFlags(ctx, r.tgUser(bot))
+	r.applyPeerReadModels(ctx, viewerUserID, []tg.UserClass{botTL}, nil)
 	out := &tg.URLAuthResultRequest{
 		RequestWriteAccess: request.Requests(domain.TelegramLoginScopeBotAccess),
 		RequestPhoneNumber: request.Requests(domain.TelegramLoginScopePhone),
@@ -379,6 +380,7 @@ func (r *Router) onAccountGetWebAuthorizations(ctx context.Context) (*tg.Account
 			}
 		}
 	}
+	r.applyPeerReadModels(ctx, userID, result.Users, nil)
 	return result, nil
 }
 
