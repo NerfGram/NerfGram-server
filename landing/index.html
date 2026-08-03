@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NerfGram — Next-Gen Open Source Telegram Server</title>
+    <meta name="description" content="NerfGram is a high-performance, self-hosted, Telegram-compatible MTProto server with zero client modifications, TON Collectible Usernames, and Stars Gifts.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@500;600;700;800;900&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #07090E;
+            --bg-card: rgba(18, 24, 38, 0.7);
+            --bg-card-hover: rgba(28, 36, 56, 0.85);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-primary: #F8FAFC;
+            --text-secondary: #94A3B8;
+            --text-muted: #64748B;
+            --accent-cyan: #00F2FE;
+            --accent-purple: #7928CA;
+            --accent-green: #10B981;
+            --accent-pink: #FF0080;
+            --gradient-primary: linear-gradient(135deg, #00F2FE 0%, #24A1DE 50%, #7928CA 100%);
+            --radius-lg: 20px;
+            --radius-md: 12px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background-color: var(--bg-dark); color: var(--text-primary); line-height: 1.6; background-image: radial-gradient(circle at 15% 15%, rgba(0, 242, 254, 0.08) 0%, transparent 45%), radial-gradient(circle at 85% 65%, rgba(121, 40, 202, 0.1) 0%, transparent 50%); background-attachment: fixed; }
+        a { color: inherit; text-decoration: none; }
+        .container { max-width: 1240px; margin: 0 auto; padding: 0 24px; }
+        .navbar { position: fixed; top: 0; left: 0; right: 0; z-index: 1000; background: rgba(7, 9, 14, 0.8); backdrop-filter: blur(20px); border-bottom: 1px solid var(--border-color); }
+        .nav-content { display: flex; align-items: center; justify-content: space-between; height: 80px; }
+        .logo { display: flex; align-items: center; gap: 12px; font-family: 'Outfit', sans-serif; font-size: 24px; font-weight: 800; }
+        .logo-icon { width: 40px; height: 40px; background: var(--gradient-primary); border-radius: 12px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 20px rgba(36, 161, 222, 0.4); }
+        .logo-icon svg { width: 22px; height: 22px; fill: #ffffff; }
+        .logo span { background: linear-gradient(135deg, #ffffff 0%, #CBD5E1 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .nav-links { display: flex; align-items: center; gap: 32px; list-style: none; }
+        .nav-links a { font-size: 15px; font-weight: 500; color: var(--text-secondary); }
+        .nav-links a:hover { color: var(--text-primary); }
+        .nav-cta { display: flex; align-items: center; gap: 16px; }
+        .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; font-size: 15px; font-weight: 600; border-radius: 10px; border: none; cursor: pointer; transition: all 0.25s ease; }
+        .btn-primary { background: var(--gradient-primary); color: #ffffff; box-shadow: 0 4px 20px rgba(36, 161, 222, 0.35); }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(0, 242, 254, 0.5); }
+        .btn-secondary { background: rgba(255, 255, 255, 0.05); color: var(--text-primary); border: 1px solid var(--border-color); }
+        .btn-secondary:hover { background: rgba(255, 255, 255, 0.1); transform: translateY(-2px); }
+        .hero { padding: 180px 0 100px; text-align: center; }
+        .hero-badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 18px; background: rgba(36, 161, 222, 0.1); border: 1px solid rgba(36, 161, 222, 0.25); border-radius: 30px; font-size: 14px; font-weight: 600; color: var(--accent-cyan); margin-bottom: 24px; }
+        .hero-badge span { width: 8px; height: 8px; background: var(--accent-cyan); border-radius: 50%; box-shadow: 0 0 10px var(--accent-cyan); display: inline-block; }
+        .hero-title { font-family: 'Outfit', sans-serif; font-size: 64px; font-weight: 900; line-height: 1.1; max-width: 900px; margin: 0 auto 24px; letter-spacing: -1.5px; }
+        .hero-title .gradient-text { background: var(--gradient-primary); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .hero-subtitle { font-size: 20px; color: var(--text-secondary); max-width: 680px; margin: 0 auto 40px; }
+        .hero-actions { display: flex; justify-content: center; gap: 16px; margin-bottom: 60px; }
+        .hero-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; max-width: 900px; margin: 0 auto; padding: 30px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-lg); backdrop-filter: blur(16px); }
+        .stat-value { font-family: 'Outfit', sans-serif; font-size: 32px; font-weight: 800; }
+        .stat-label { font-size: 13px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
+        .section { padding: 100px 0; }
+        .section-header { text-align: center; max-width: 700px; margin: 0 auto 64px; }
+        .section-tag { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.5px; color: var(--accent-cyan); display: block; margin-bottom: 12px; }
+        .section-title { font-family: 'Outfit', sans-serif; font-size: 42px; font-weight: 800; letter-spacing: -1px; margin-bottom: 16px; }
+        .section-desc { font-size: 17px; color: var(--text-secondary); }
+        .features-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+        .feature-card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-lg); padding: 36px 30px; backdrop-filter: blur(16px); transition: all 0.3s ease; }
+        .feature-card:hover { transform: translateY(-6px); background: var(--bg-card-hover); border-color: rgba(36, 161, 222, 0.3); }
+        .feature-icon { width: 56px; height: 56px; border-radius: 14px; background: rgba(36, 161, 222, 0.1); display: flex; align-items: center; justify-content: center; margin-bottom: 24px; color: var(--accent-cyan); border: 1px solid rgba(36, 161, 222, 0.2); }
+        .feature-icon svg { width: 28px; height: 28px; }
+        .feature-title { font-family: 'Outfit', sans-serif; font-size: 22px; font-weight: 700; margin-bottom: 12px; }
+        .feature-desc { font-size: 15px; color: var(--text-secondary); }
+        .comparison-wrapper { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-lg); overflow: hidden; backdrop-filter: blur(16px); }
+        .comparison-table { width: 100%; border-collapse: collapse; text-align: left; }
+        .comparison-table th, .comparison-table td { padding: 20px 28px; border-bottom: 1px solid var(--border-color); }
+        .comparison-table th { font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; background: rgba(255, 255, 255, 0.02); }
+        .check-icon { color: var(--accent-green); font-weight: 800; }
+        .cross-icon { color: var(--accent-pink); font-weight: 800; }
+        .highlight-col { background: rgba(36, 161, 222, 0.05); }
+        .code-box { background: #0B0F17; border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 24px; font-family: 'Fira Code', monospace; font-size: 14px; }
+        .code-box .prompt { color: var(--accent-cyan); }
+        .code-box .comment { color: var(--text-muted); }
+        .faq-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
+        .faq-item { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 28px; backdrop-filter: blur(16px); }
+        .faq-question { font-family: 'Outfit', sans-serif; font-size: 18px; font-weight: 700; margin-bottom: 12px; }
+        .faq-answer { font-size: 15px; color: var(--text-secondary); }
+        .footer { border-top: 1px solid var(--border-color); padding: 60px 0 40px; background: rgba(5, 7, 11, 0.95); }
+        .footer-content { display: flex; align-items: center; justify-content: space-between; margin-bottom: 40px; }
+        .footer-logo { font-family: 'Outfit', sans-serif; font-size: 20px; font-weight: 800; }
+        .footer-links { display: flex; gap: 24px; list-style: none; font-size: 14px; color: var(--text-muted); }
+        .footer-bottom { text-align: center; font-size: 14px; color: var(--text-muted); border-top: 1px solid var(--border-color); padding-top: 30px; }
+        @media (max-width: 992px) { .hero-title { font-size: 48px; } .features-grid, .faq-grid { grid-template-columns: 1fr; } .hero-stats { grid-template-columns: repeat(2, 1fr); } }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <div class="container nav-content">
+            <a href="#" class="logo"><div class="logo-icon"><svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></div><span>NerfGram</span></a>
+            <ul class="nav-links">
+                <li><a href="#why-us">Why NerfGram</a></li>
+                <li><a href="#comparison">Comparison</a></li>
+                <li><a href="#quickstart">Quickstart</a></li>
+                <li><a href="#faq">FAQ</a></li>
+            </ul>
+            <div class="nav-cta">
+                <a href="https://github.com/kernelfoxx/NerfGram-server" target="_blank" class="btn btn-secondary">GitHub</a>
+                <a href="#quickstart" class="btn btn-primary">Deploy Server</a>
+            </div>
+        </div>
+    </nav>
+    <section class="hero">
+        <div class="container">
+            <div class="hero-badge"><span></span> MTProto Layer 225 Compatible • Go 1.25 High Performance</div>
+            <h1 class="hero-title">The Open-Source Telegram Server <br><span class="gradient-text">You Actually Control.</span></h1>
+            <p class="hero-subtitle">Same Telegram experience, but 100% self-hosted. Zero client modifications required — works directly with official Telegram apps, TON Collectible Usernames, and Stars Gifts.</p>
+            <div class="hero-actions">
+                <a href="#quickstart" class="btn btn-primary">Get Started in 5 Minutes</a>
+                <a href="https://github.com/kernelfoxx/NerfGram-server" target="_blank" class="btn btn-secondary">View Source Code</a>
+            </div>
+            <div class="hero-stats">
+                <div class="stat-item"><div class="stat-value">0ms</div><div class="stat-label">Client Patch Needed</div></div>
+                <div class="stat-item"><div class="stat-value">MTProto 225</div><div class="stat-label">Layer Protocol</div></div>
+                <div class="stat-item"><div class="stat-value">TON / Fragment</div><div class="stat-label">Collectible Usernames</div></div>
+                <div class="stat-item"><div class="stat-value">100%</div><div class="stat-label">Data Privacy</div></div>
+            </div>
+        </div>
+    </section>
+    <section id="why-us" class="section">
+        <div class="container">
+            <div class="section-header">
+                <span class="section-tag">Why Choose NerfGram</span>
+                <h2 class="section-title">Built for Performance, Freedom & Privacy</h2>
+                <p class="section-desc">NerfGram fills the gap between proprietary platforms and self-hosted communication. Take back your messages, usernames, and server infrastructure.</p>
+            </div>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg></div>
+                    <h3 class="feature-title">Native App Compatibility</h3>
+                    <p class="feature-desc">Connect using standard official Telegram apps (Android, iOS, Desktop, Web). No custom builds, third-party APKs, or client patching necessary.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4M7.835 4.697a3.42 3.42 0 001.946-.806 3.42 3.42 0 014.438 0 3.42 3.42 0 001.946.806 3.42 3.42 0 013.138 3.138 3.42 3.42 0 00.806 1.946 3.42 3.42 0 010 4.438 3.42 3.42 0 00-.806 1.946 3.42 3.42 0 01-3.138 3.138 3.42 3.42 0 00-1.946.806 3.42 3.42 0 01-4.438 0 3.42 3.42 0 00-1.946-.806 3.42 3.42 0 01-3.138-3.138 3.42 3.42 0 00-.806-1.946 3.42 3.42 0 010-4.438 3.42 3.42 0 00.806-1.946 3.42 3.42 0 013.138-3.138z"></path></svg></div>
+                    <h3 class="feature-title">TON & Fragment Collectibles</h3>
+                    <p class="feature-desc">Full server-side engine for issuing, trading, and toggling collectible (NFT-style) usernames, custom verification badges, and Fragment pricing metadata.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg></div>
+                    <h3 class="feature-title">Zero-Leak Privacy</h3>
+                    <p class="feature-desc">Hardened against phone discovery exploits. Existing account login codes are delivered in-app, protecting your server against phone harvesting and unauthorized access.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+    <section id="comparison" class="section">
+        <div class="container">
+            <div class="section-header">
+                <span class="section-tag">Comparison</span>
+                <h2 class="section-title">How NerfGram Compares</h2>
+            </div>
+            <div class="comparison-wrapper">
+                <table class="comparison-table">
+                    <thead>
+                        <tr><th>Feature</th><th class="highlight-col">NerfGram Server</th><th>Official Cloud</th><th>Upstream Forks</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>100% Self-Hosted & Private</td><td class="highlight-col"><span class="check-icon">✓</span> Full Control</td><td><span class="cross-icon">✗</span> Cloud Hosted</td><td><span class="check-icon">✓</span> Self-hosted</td></tr>
+                        <tr><td>No Client Code Modifications</td><td class="highlight-col"><span class="check-icon">✓</span> Direct Connection</td><td><span class="check-icon">✓</span> Direct Connection</td><td><span class="cross-icon">✗</span> Requires Client Patches</td></tr>
+                        <tr><td>Collectible (NFT) Usernames Engine</td><td class="highlight-col"><span class="check-icon">✓</span> Built-in & Resolved</td><td><span class="check-icon">✓</span> Fragment-only</td><td><span class="cross-icon">✗</span> Unimplemented</td></tr>
+                        <tr><td>Stars & Unique Gifts Catalog</td><td class="highlight-col"><span class="check-icon">✓</span> Full Support</td><td><span class="check-icon">✓</span> Paid Stars</td><td><span class="cross-icon">✗</span> Missing</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+    <section id="quickstart" class="section">
+        <div class="container">
+            <div class="section-header">
+                <span class="section-tag">Quickstart</span>
+                <h2 class="section-title">Launch Your Server in Minutes</h2>
+            </div>
+            <div class="code-box">
+                <div class="command-line"><span class="prompt">$</span> git clone https://github.com/kernelfoxx/NerfGram-server.git</div>
+                <div class="command-line"><span class="prompt">$</span> cd NerfGram-server && cp .env.example .env</div>
+                <div class="command-line"><span class="prompt">$</span> cd deploy && docker compose up -d && cd ..</div>
+                <div class="command-line"><span class="prompt">$</span> go build -o bin/gramsrv ./cmd/telesrv</div>
+                <div class="command-line"><span class="prompt">$</span> ./bin/gramsrv</div>
+            </div>
+        </div>
+    </section>
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-logo">NerfGram</div>
+                <ul class="footer-links">
+                    <li><a href="https://github.com/kernelfoxx/NerfGram-server" target="_blank">GitHub</a></li>
+                    <li><a href="https://nerfgram.space" target="_blank">Website</a></li>
+                </ul>
+            </div>
+            <div class="footer-bottom">&copy; 2026 NerfGram Open Source Project.</div>
+        </div>
+    </footer>
+</body>
+</html>
