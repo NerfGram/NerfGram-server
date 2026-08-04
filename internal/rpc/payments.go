@@ -28,7 +28,8 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 		return []tg.PremiumGiftCodeOption{}, nil
 	})
 	registerRPC[*tg.PaymentsGetStarsSubscriptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsSubscriptions, func(ctx context.Context, req *tg.PaymentsGetStarsSubscriptionsRequest) (any, error) {
-		return &tg.PaymentsStarsSubscriptions{
+		return &tg.PaymentsStarsStatus{
+			Balance:       &tg.StarsAmount{Amount: 0},
 			Subscriptions: []tg.StarsSubscription{},
 			Users:         []tg.UserClass{},
 			Chats:         []tg.ChatClass{},
