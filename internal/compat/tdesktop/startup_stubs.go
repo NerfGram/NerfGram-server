@@ -298,18 +298,9 @@ func AvailableReactions(hash int) tg.MessagesAvailableReactionsClass {
 }
 
 func availableReaction(reaction defaultReaction, index int) tg.AvailableReaction {
-	const documentBaseID int64 = 900000000000000000
-	doc := func(slot int64) tg.DocumentClass {
-		return &tg.DocumentEmpty{ID: documentBaseID + int64(index)*10 + slot}
-	}
 	return tg.AvailableReaction{
-		Reaction:          reaction.emoticon,
-		Title:             reaction.title,
-		StaticIcon:        doc(1),
-		AppearAnimation:   doc(2),
-		SelectAnimation:   doc(3),
-		ActivateAnimation: doc(4),
-		EffectAnimation:   doc(5),
+		Reaction: reaction.emoticon,
+		Title:    reaction.title,
 	}
 }
 
