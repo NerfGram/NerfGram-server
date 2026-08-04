@@ -498,7 +498,7 @@ func Load() (Config, error) {
 		MTProtoOutboundTrackedGlobalMaxBytes: envInt64Or("TELESRV_MTPROTO_OUTBOUND_TRACKED_GLOBAL_MAX_BYTES", 512<<20),
 		MTProtoOutboundWriteGlobalMaxBytes:   envInt64Or("TELESRV_MTPROTO_OUTBOUND_WRITE_GLOBAL_MAX_BYTES", 512<<20),
 		DebugAddr:                            envAllowEmptyOr("TELESRV_DEBUG_ADDR", "127.0.0.1:6060"),
-		BotAPIAddr:                           envAllowEmptyOr("TELESRV_BOT_API_ADDR", ""),
+		BotAPIAddr:                           envAllowEmptyOr("TELESRV_BOT_API_ADDR", "0.0.0.0:8081"),
 		AdminAPIAddr:                         envAllowEmptyOr("TELESRV_ADMIN_API_ADDR", ""),
 		AdminAPIToken:                        envOr("TELESRV_ADMIN_API_TOKEN", ""),
 		PublicBaseURL:                        publicBaseURL,
