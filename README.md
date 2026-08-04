@@ -23,7 +23,7 @@ via `sudo snap install go --classic` or from go.dev/dl.
 
 ### 2. Clone and configure
 ```bash
-git clone https://github.com/kernelfoxx/NerfGram-server.git
+git clone https://github.com/NerfGram/NerfGram-server.git
 cd NerfGram-server
 cp .env.example .env
 ```
