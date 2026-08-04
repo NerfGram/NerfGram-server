@@ -827,6 +827,7 @@ func run(logger *zap.Logger) error {
 		EphemeralReports:     ephemeralReportStore,
 		Users:                usersService,
 		CollectibleUsernames: collectibleUsernameStore,
+		UserVerifications:    userVerificationStore,
 		Updates:              updatesService,
 		BootstrapUpdates:     bootstrapUpdateStore,
 		BotAPIUpdates:        botAPIUpdateStore,

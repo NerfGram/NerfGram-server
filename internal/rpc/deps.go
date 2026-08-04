@@ -836,6 +836,12 @@ type LangPackService interface {
 	ListLanguages(ctx context.Context, langPack string) ([]domain.LangPackLanguage, error)
 }
 
+// UserVerificationService 抽象用户验证信息管理。
+type UserVerificationService interface {
+	Set(ctx context.Context, v domain.UserVerification, createdBy string) error
+	Remove(ctx context.Context, userID int64) error
+}
+
 // AIComposeService 抽象客户端输入框 AI 改写/润色与 aicompose tones 目录。
 // 这里只使用 domain DTO；rpc 层负责 tg.TextWithEntities/InputAiComposeTone ↔ domain 转换。
 type AIComposeService interface {
@@ -882,6 +888,7 @@ type Deps struct {
 	EphemeralReports     store.EphemeralReportStore
 	Users                UsersService
 	CollectibleUsernames CollectibleUsernameService
+	UserVerifications    UserVerificationService
 	Updates              UpdatesService
 	BootstrapUpdates     store.BootstrapUpdateJobStore
 	BotAPIUpdates        store.BotAPIUpdateStore
