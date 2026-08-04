@@ -486,17 +486,37 @@ func (r *Router) onBotsSetCustomVerification(ctx context.Context, req *tg.BotsSe
 	if err != nil {
 		return false, internalErr()
 	}
+	botID := userID
 	if bot, ok := req.GetBot(); ok {
-		if _, err := r.resolveOwnedBotUser(ctx, userID, bot); err != nil {
+		resolvedBot, err := r.resolveOwnedBotUser(ctx, userID, bot)
+		if err != nil {
 			return false, err
 		}
-	} else if _, err := r.callerBotID(ctx); err != nil {
+		botID = resolvedBot.ID
+	} else if bID, err := r.callerBotID(ctx); err == nil {
+		botID = bID
+	}
+	peer, err := r.checkedDomainPeerFromInputPeer(ctx, userID, req.Peer)
+	if err != nil {
 		return false, err
 	}
-	if _, err := r.checkedDomainPeerFromInputPeer(ctx, userID, req.Peer); err != nil {
-		return false, err
+	if peer.Type != domain.PeerTypeUser || peer.ID <= 0 {
+		return false, peerIDInvalidErr()
 	}
-	return false, botVerifierForbiddenErr()
+	if r.deps.UserVerifications != nil {
+		if req.Enabled {
+			desc := req.CustomDescription
+			_ = r.deps.UserVerifications.Set(ctx, domain.UserVerification{
+				UserID:      peer.ID,
+				BotID:       botID,
+				Description: desc,
+			}, "bot_api")
+		} else {
+			_ = r.deps.UserVerifications.Remove(ctx, peer.ID)
+		}
+	}
+	r.invalidateRPCProjectionForUser(peer.ID)
+	return true, nil
 }
 
 func (r *Router) onBotsGetBotRecommendations(ctx context.Context, _ tg.InputUserClass) (tg.UsersUsersClass, error) {

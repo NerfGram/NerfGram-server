@@ -38,6 +38,21 @@ func (r *Router) onFragmentGetCollectibleInfo(ctx context.Context, req *tg.Fragm
 	if !found {
 		return nil, collectibleInfoInvalidErr()
 	}
+	if cu.Currency == "" {
+		cu.Currency = "USD"
+	}
+	if cu.Amount <= 0 {
+		cu.Amount = 5000
+	}
+	if cu.CryptoCurrency == "" {
+		cu.CryptoCurrency = "TON"
+	}
+	if cu.CryptoAmount <= 0 {
+		cu.CryptoAmount = 1000000000
+	}
+	if cu.URL == "" {
+		cu.URL = "https://fragment.com/username/" + cu.Username
+	}
 	return &tg.FragmentCollectibleInfo{
 		PurchaseDate:   int(cu.PurchaseDate),
 		Currency:       cu.Currency,
