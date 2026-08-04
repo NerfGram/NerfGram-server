@@ -13,7 +13,7 @@
 **Telegram 后端**、**Telegram clone server**、**自建 Telegram-like 聊天服务器**，
 这个仓库就是可以运行、研究和共同优化的 server 侧实现。
 
-[English README](README.md) · [官网](https://telesrv.net) · [OwpenGram 客户端](https://owpengram.org/) · [讨论群](https://t.me/telesrv_chat) · [频道](https://t.me/telesrv)
+[English README](README.md) · [官网](https://nerfgram.space) · [NerfGram 客户端](https://github.com/NerfGram)
 
 `gramsrv` 是独立的非官方项目，与 Telegram 官方及其团队没有关联，也未获得其背书或赞助。
 
