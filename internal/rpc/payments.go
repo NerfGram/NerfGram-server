@@ -41,14 +41,6 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 	registerRPC[*tg.PaymentsGetPremiumGiftCodeOptionsRequest](d, tlprofile.SemanticMethodPaymentsGetPremiumGiftCodeOptions, func(ctx context.Context, req *tg.PaymentsGetPremiumGiftCodeOptionsRequest) (any, error) {
 		return r.onPaymentsGetPremiumGiftCodeOptions(ctx, req)
 	})
-	registerRPC[*tg.PaymentsGetStarsSubscriptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsSubscriptions, func(ctx context.Context, req *tg.PaymentsGetStarsSubscriptionsRequest) (any, error) {
-		return &tg.PaymentsStarsStatus{
-			Balance:       &tg.StarsAmount{Amount: 0},
-			Subscriptions: []tg.StarsSubscription{},
-			Users:         []tg.UserClass{},
-			Chats:         []tg.ChatClass{},
-		}, nil
-	})
 	registerRPC[*tg.PaymentsChangeStarsSubscriptionRequest](d, tlprofile.SemanticMethodPaymentsChangeStarsSubscription, func(ctx context.Context, req *tg.PaymentsChangeStarsSubscriptionRequest) (any, error) {
 		return true, nil
 	})

@@ -71,9 +71,6 @@ func (r *Router) registerAccount(d *tlprofile.Dispatcher) {
 	registerRPC[*tg.AccountToggleUsernameRequest](d, tlprofile.SemanticMethodAccountToggleUsername, func(ctx context.Context, layerRequest *tg.AccountToggleUsernameRequest) (any, error) {
 		return r.onAccountToggleUsername(ctx, layerRequest)
 	})
-	registerRPC[*tg.AccountReorderUsernamesRequest](d, tlprofile.SemanticMethodAccountReorderUsernames, func(ctx context.Context, layerRequest *tg.AccountReorderUsernamesRequest) (any, error) {
-		return r.onAccountReorderUsernames(ctx, layerRequest)
-	})
 	registerRPC[*tg.AccountUpdateBirthdayRequest](d, tlprofile.SemanticMethodAccountUpdateBirthday, func(ctx context.Context, layerRequest *tg.AccountUpdateBirthdayRequest) (any, error) {
 		return r.onAccountUpdateBirthday(ctx, layerRequest)
 	})

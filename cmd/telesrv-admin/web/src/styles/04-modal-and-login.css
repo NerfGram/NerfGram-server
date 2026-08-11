@@ -6,7 +6,7 @@
   place-items: center;
   padding: 24px;
   background: var(--overlay);
-  backdrop-filter: blur(2px);
+  backdrop-filter: blur(8px);
 }
 
 .modal {

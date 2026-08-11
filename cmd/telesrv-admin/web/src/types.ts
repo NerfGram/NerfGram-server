@@ -77,7 +77,6 @@ export type AccountDetail = {
   LoginEmail: string;
   StarsBalance: number;
   StarsGranted: boolean;
-  Fake: boolean;
   Restriction: RestrictionRow;
   HasRestriction: boolean;
   Authorizations: AuthorizationRow[];

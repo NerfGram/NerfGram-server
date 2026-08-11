@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FromGram admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <script>
       (function () {
         try {
@@ -11,20 +14,18 @@
           var theme =
             stored === "light" || stored === "dark"
               ? stored
-              : window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
-                ? "dark"
-                : "light";
+              : "dark";
           document.documentElement.setAttribute("data-theme", theme);
           document.documentElement.style.colorScheme = theme;
         } catch (e) {
-          document.documentElement.setAttribute("data-theme", "light");
+          document.documentElement.setAttribute("data-theme", "dark");
         }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-DmVQ38zs.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DoEVT50t.css">
+    <script type="module" crossorigin src="/assets/index-BN3vNOdc.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-Cc62Z8F1.css">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"></div>
   </body>
 </html>
