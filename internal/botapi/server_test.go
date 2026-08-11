@@ -109,6 +109,34 @@ func TestSavePreparedInlineMessageParsesPeerTypes(t *testing.T) {
 	}
 }
 
+func TestGiftPremiumSubscriptionParsesOfficialFieldsAndIdempotencyKey(t *testing.T) {
+	bots := &fakeBotAPIBots{profile: domain.BotProfile{BotUserID: 1001, TokenSecret: "secret"}}
+	gateway := &fakeBotAPIGateway{premiumGiftResult: true}
+	h := (&handler{bots: bots, gateway: gateway}).routes()
+	body := `{
+		"user_id": 2002,
+		"month_count": 3,
+		"star_count": 750,
+		"text": "<b>Enjoy</b>",
+		"text_parse_mode": "HTML",
+		"request_id": "update_771"
+	}`
+	rec := performBotAPIRequest(t, h, bots.profile, "giftPremiumSubscription", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if !gateway.premiumGiftCalled || gateway.premiumGiftBotID != 1001 ||
+		gateway.premiumGiftUserID != 2002 || gateway.premiumGiftMonths != 3 ||
+		gateway.premiumGiftStars != 750 || gateway.premiumGiftRequestID != "update_771" {
+		t.Fatalf("premium gift call = %#v", gateway)
+	}
+	if gateway.premiumGiftMessage.Text != "Enjoy" ||
+		len(gateway.premiumGiftMessage.Entities) != 1 ||
+		gateway.premiumGiftMessage.Entities[0].Type != domain.MessageEntityBold {
+		t.Fatalf("premium gift message = %#v", gateway.premiumGiftMessage)
+	}
+}
+
 func TestAnswerWebAppQueryRejectsUnsupportedResult(t *testing.T) {
 	webapps := &fakeWebAppService{}
 	bots := &fakeBotAPIBots{profile: domain.BotProfile{BotUserID: 1001, TokenSecret: "secret"}}
@@ -1496,6 +1524,32 @@ type fakeBotAPIGateway struct {
 	ephemeralEdits           []domain.BotAPIEphemeralEditInput
 	ephemeralDeleteCalled    bool
 	ephemeralDeleteMessageID int
+	premiumGiftCalled        bool
+	premiumGiftBotID         int64
+	premiumGiftUserID        int64
+	premiumGiftMonths        int
+	premiumGiftStars         int64
+	premiumGiftMessage       domain.PremiumGiftMessage
+	premiumGiftRequestID     string
+	premiumGiftResult        bool
+}
+
+func (f *fakeBotAPIGateway) BotAPIGiftPremiumSubscription(
+	_ context.Context,
+	botID, userID int64,
+	monthCount int,
+	starCount int64,
+	message domain.PremiumGiftMessage,
+	requestID string,
+) (bool, error) {
+	f.premiumGiftCalled = true
+	f.premiumGiftBotID = botID
+	f.premiumGiftUserID = userID
+	f.premiumGiftMonths = monthCount
+	f.premiumGiftStars = starCount
+	f.premiumGiftMessage = message
+	f.premiumGiftRequestID = requestID
+	return f.premiumGiftResult, nil
 }
 
 func (f *fakeBotAPIGateway) BotAPISelf(context.Context, int64) (domain.User, error) {

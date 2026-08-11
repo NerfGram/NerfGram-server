@@ -19,7 +19,7 @@ This document describes every setting loaded by `internal/config`. Defaults and 
 | Setting | Type / code default | Description and constraints |
 |---|---|---|
 | `TELESRV_LISTEN` | string / `0.0.0.0:2398` | MTProto TCP listen address. Must match the address/port reachable by patched clients. |
-| `TELESRV_ADVERTISE_IP` | string / `127.0.0.1` | Client-reachable server IP used by media/call fallbacks. The current static Desktop DC patch does not derive its MTProto endpoint from this value. |
+| `TELESRV_ADVERTISE_IP` | string / `127.0.0.1` | Client-reachable server IP written to `help.getConfig.DCOptions` and used by media/call fallbacks. The loopback default is only safe for pure local TDesktop validation; Android, LAN, and remote validation must set the host LAN/public IP explicitly. On Windows, prefer `scripts\restart-local-server.ps1 -Listen 0.0.0.0:2398 -AdvertiseIP <client-reachable-ip>` so a manual `Start-Process` launch cannot drop the environment. |
 | `TELESRV_RSA_KEY` | path / `data/server_rsa.pem` | MTProto RSA private key. Generated when missing. Treat the file as a secret and keep it stable across restarts. |
 | `TELESRV_DC` | int / `2` | Canonical server DC ID used in server-originated configuration and media/DC metadata. It does not partition key-exchange state on the current single backend. |
 | `TELESRV_DEFAULT_COUNTRY_CODE` | ISO alpha-2 / `CN` | Country returned by `help.getNearestDc` for login-page preselection. Clients map `CN` to calling code `+86`, `US` to `+1`, and so on. Input is trimmed, uppercased, and validated as a country or autonomous area; malformed or unknown values fail startup. |
@@ -64,13 +64,26 @@ Retained typed graphs remain charged to the RPC scheduler budget above.
 | `TELESRV_ADMIN_UI_PASSWORD` | secret string / empty | Admin UI login password. Configure this or `TELESRV_ADMIN_UI_TOKEN`. |
 | `TELESRV_ADMIN_UI_TOKEN` | secret string / empty | Alternative Admin UI login credential. Admin write calls still use the separate `TELESRV_ADMIN_API_TOKEN`. |
 | `TELESRV_ADMIN_SESSION_KEY` | secret string / empty | Encrypts/signs Admin UI session cookies. Production should use at least 32 random bytes; changing it invalidates sessions. |
-| `TELESRV_ADMIN_UI_PERMISSIONS` | comma-separated list / `*` | Permissions granted to an Admin UI session authenticated with `TELESRV_ADMIN_UI_PASSWORD` / `_TOKEN`. `*` grants every permission and is the default, so enabling RBAC never locks an operator out of a panel that worked before. Names use letters, digits and `._:-`, at most 64 characters, and may end in `namespace.*` to grant a whole namespace. An empty list or an unparsable name fails startup. |
+| `TELESRV_ADMIN_UI_PERMISSIONS` | comma-separated list / `*` | Permissions granted to an Admin UI session authenticated with `TELESRV_ADMIN_UI_PASSWORD` / `_TOKEN`. `*` grants every permission and is the default. Reading a managed bot token requires the explicit `bots.token.read` permission; the token is returned only by the command response and is not persisted in the audit result. Names use letters, digits and `._:-`, at most 64 characters, and may end in `namespace.*` to grant a whole namespace. An empty list or an unparsable name fails startup. |
 | `TELESRV_ADMIN_SCOPED_TOKENS` | `name:token:perm1,perm2` entries separated by `;` / empty | Additional Admin API bearer tokens carrying a bounded permission set each, so an integration gets exactly the rights it needs instead of the unrestricted `TELESRV_ADMIN_API_TOKEN`. A token may contain neither `:` nor whitespace, every entry must list at least one permission, names and tokens must be unique, and reusing `TELESRV_ADMIN_API_TOKEN` as a scoped token is refused because it would silently widen it to every permission. Any malformed entry fails startup rather than silently granting or dropping rights. |
 | `TELESRV_PUBLIC_BASE_URL` | HTTP(S) URL / `https://telesrv.net` | Client-visible canonical public-link root. Paths are allowed; credentials, query, and fragment are rejected. Local example: `http://127.0.0.1:2401`. |
+| `TELESRV_BRAND_PRODUCT_NAME` | string / `Telesrv` | Parent product display name shared by the system account, login notices, invites, WebAuthn, built-in bots, and upstream visible-copy rewriting. Trimmed, non-empty, no control characters, at most 64 Unicode characters. |
+| `TELESRV_BRAND_PRODUCT_USERNAME` | username / `telesrv` | Public username of system account 777000. It is trimmed, loses an optional leading `@`, is normalized to lowercase, and must be a 5–32 character ASCII username starting with a letter. |
+| `TELESRV_BRAND_DESKTOP_APP_NAME` | string / `Telesrv Desktop` | Desktop/Windows name returned by `account.getAuthorizations`; same validation as the product name. |
+| `TELESRV_BRAND_ANDROID_APP_NAME` | string / `Telesrv Android` | Android name shown in authorization lists; same validation as the product name. |
+| `TELESRV_BRAND_IOS_APP_NAME` | string / `Telesrv iOS` | iOS name shown in authorization lists; same validation as the product name. |
+| `TELESRV_BRAND_MACOS_APP_NAME` | string / `Telesrv macOS` | macOS name shown in authorization lists; same validation as the product name. |
+| `TELESRV_BRAND_WEB_A_APP_NAME` | string / `Telesrv Web A` | Authorization-list name for `telegram-tt` / `weba`; durable detection tokens remain unchanged. |
+| `TELESRV_BRAND_WEB_K_APP_NAME` | string / `Telesrv Web K` | Authorization-list name for `tweb` / `webk`; durable detection tokens remain unchanged. |
+| `TELESRV_BRAND_PREMIUM_NAME` | string / `Telesrv Premium` | Product name used by Premium status and related client-visible copy; same validation as the product name. |
+| `TELESRV_BRAND_STARS_NAME` | string / `Telesrv Stars` | Product name used by Stars payment labels and related client-visible copy; same validation as the product name. |
+| `TELESRV_UPDATE_PUBLIC_URL` | nullable HTTP(S) URL / empty | Client-visible root of `cmd/telesrv-update`; advertised through `help.getConfig.autoupdate_url_prefix`. Empty disables native desktop updates. See `docs/update-service.md`. |
+| `TELESRV_UPDATE_SERVICE_URL` | nullable HTTP(S) URL / `TELESRV_UPDATE_PUBLIC_URL` | Internal update resolver used for `help.getAppUpdate`. It may be a loopback/private route; empty falls back to the public update URL. |
+| `TELESRV_UPDATE_REQUEST_TIMEOUT` | duration / `2s` | Deadline for an application-update resolve call; must be greater than zero and at most `30s`. Resolver failure returns `help.noAppUpdate`, not an RPC 500. |
 | `TELESRV_PUBLIC_APP_SCHEME` | URL scheme / `telesrv` | Automatic app-open scheme on landing pages. Must match patched client registration. `tg`, `http`, and `https` are rejected. |
 | `TELESRV_PUBLIC_APP_LINK_BASE` | nullable custom URL base / empty | Optional host-based root for multi-server clients, for example `owpg://example.com`. When set, links use `owpg://example.com/oauth`, `owpg://example.com/<username>`, and equivalent route paths. Only exact `<custom-scheme>://<host>` values are accepted; ports, paths, queries, and fragments are rejected. `TELESRV_PUBLIC_APP_SCHEME` remains an accepted legacy input. |
 | `TELESRV_PUBLIC_WEB_BASE_URL` | HTTP(S) URL / `https://weba.telesrv.net` | Web-client root used by public username pages. Same URL validation as `TELESRV_PUBLIC_BASE_URL`. |
-| `TELESRV_PUBLIC_APP_NAME` | string / `telesrv` | Public landing-page product name; trimmed, non-empty, no control characters, maximum 64 Unicode characters. |
+| `TELESRV_PUBLIC_APP_NAME` | string / `TELESRV_BRAND_PRODUCT_NAME` | Public landing-page product name; trimmed, non-empty, no control characters, maximum 64 Unicode characters. |
 | `TELESRV_PUBLIC_LINK_WEB_ADDR` | nullable address / empty | Username/avatar/sticker/emoji/chatlist/collectible-gift landing pages plus the hash-only moderation appeal form. Empty disables it. Production should bind loopback behind exact nginx routes. Moderation `freeze_account` actions fail closed when this listener is disabled because telesrv cannot issue a reachable appeal URL. `.env.example` enables `127.0.0.1:2401` for development. |
 | `TELESRV_TELEGRAM_LOGIN_ENABLE` | bool / `false` | Mount the self-hosted Telegram Login/OIDC provider on `TELESRV_PUBLIC_LINK_WEB_ADDR`. Enabling it requires that listener and all key files below. |
 | `TELESRV_TELEGRAM_LOGIN_ISSUER` | absolute origin URL / `TELESRV_PUBLIC_BASE_URL` | Exact public issuer used in discovery and tokens. HTTPS is required by default; paths, credentials, query, and fragment are rejected. The next setting permits any HTTP host/IP. |
@@ -393,12 +406,31 @@ key rings independently on different instances.
 | `TELESRV_REDIS_DB` | int / `0` | Redis logical database number. |
 | `TELESRV_LANGPACK_SEED_DIR` | path / `data/langpack` | TDesktop `.strings` language-pack seed directory. |
 | `TELESRV_OFFICIAL_GIFTS_DIR` | path / `data/official-gifts` | Read-only snapshot generated by `cmd/giftfetch`, used for verified explicit imports in the admin UI. |
-| `TELESRV_BLOB_DIR` | path / `data/blobs` | Local development blob-backend root for media bytes. |
+| `TELESRV_BLOB_BACKEND` | enum / `localfs` | The only permanent media backend: `localfs` or `s3`. There is no cross-backend fallback, dual read, or dual write; startup rejects rows for another backend. |
+| `TELESRV_BLOB_DIR` | path / `data/blobs` | Permanent media and transient upload parts for `localfs`; S3 mode never falls back to this directory. |
+| `TELESRV_BLOB_STAGING_DIR` | path / `data/blob-staging` | Local transient upload parts and write spool in `s3` mode; not a permanent backend. |
+| `TELESRV_S3_ENDPOINT` | host[:port] / empty | Required in `s3` mode, without an `http://` or `https://` scheme. |
+| `TELESRV_S3_REGION` | string / `us-east-1` | S3 region. |
+| `TELESRV_S3_BUCKET` | string / empty | Required permanent-media bucket in `s3` mode. |
+| `TELESRV_S3_ACCESS_KEY_ID` | secret / empty | Required in `s3` mode; no weak shipped credential. |
+| `TELESRV_S3_SECRET_ACCESS_KEY` | secret / empty | Required in `s3` mode and never logged. |
+| `TELESRV_S3_USE_SSL` | bool / `true` | Use TLS for the S3 endpoint. |
+| `TELESRV_S3_PATH_STYLE` | bool / `false` | Force path-style bucket lookup; commonly `true` for local MinIO. |
+| `TELESRV_S3_CREATE_BUCKET` | bool / `false` | Allow startup to create a missing bucket only when explicitly enabled. |
+| `TELESRV_STORAGE_LOW_SPACE_GUARD_ENABLE` | bool / `true` | Enable storage capacity admission. Startup requires a valid initial snapshot; refresh failures retain the last valid snapshot and log a warning. |
+| `TELESRV_STORAGE_MIN_FREE_BYTES` | int64 / `1073741824` | Minimum local filesystem free bytes. It protects permanent files and upload parts for `localfs`, and local upload/spool space for `s3`; `0` disables this dimension. |
+| `TELESRV_STORAGE_MAX_TOTAL_BYTES` | int64 / `0` | Optional S3 permanent-byte budget, counted over unique `object_key` values tracked by `file_blobs`; `0` disables it. This is not bucket billing usage. |
+| `TELESRV_STORAGE_USAGE_REFRESH_INTERVAL` | duration / `1m` | Capacity snapshot refresh interval; must be positive while the guard is enabled. |
 | `TELESRV_STICKER_SEED_DIR` | path / `data/sticker-seed` | Sticker/reaction seed packages imported into documents, sticker sets, and blobs. |
 | `TELESRV_STICKER_SEED_MAX_SETS` | int / `300` | Maximum regular sticker sets imported at startup; `<=0` means unlimited. |
+| `TELESRV_GIF_SEED_DIR` | path / `data/gifs` | Optional built-in `@gif` startup directory. It accepts only `.gif/.mp4`, with at most 50 total entries; a missing directory is skipped, while changed same-name content or invalid media fails startup. Outputs use only the explicitly selected blob backend. |
 | `TELESRV_PREMIUM_PROMO_SEED_DIR` | path / `data/premium-promo` | Exported `help.getPremiumPromo` manifest, MP4 videos, and JPEG thumbnails. A missing directory keeps the no-video fallback; an existing invalid/incomplete directory fails startup. |
 
 The language-pack file manifest is authoritative. To add a language, place `data/langpack/<pack>/<pack>_<lang>_v<version>.strings` and restart `telesrv`. The `pack` must match its first-level directory and may use the letters, digits, `-`, and `_` already used by Telegram (for example, `android_x`); `lang` is canonicalized to lowercase with hyphens (`pt_BR` becomes `pt-br`). Only the highest file version for each language is loaded. Effective content changes require a version bump; same-version effective mutations and version rollbacks stop startup. Removing a language file or an entire pack subdirectory atomically removes its database catalog and strings on the next restart. Startup streams a source-file SHA-256 first: unchanged files reuse the last atomic manifest without parsing strings or writing the database, while only new or changed files are parsed and replaced through PostgreSQL `COPY`.
+
+Object storage is intentionally single-backend. Do not flip
+`TELESRV_BLOB_BACKEND` until an explicit offline migration has copied the
+objects, verified size/SHA-256, and updated `file_blobs.backend`.
 
 ## 5. Authentication, OTP providers, SMTP, and passkeys
 
@@ -424,7 +456,7 @@ The language-pack file manifest is authoritative. To add a language, place `data
 | `TELESRV_SMTP_USERNAME` | sensitive string / empty | SMTP username. Also used as sender when `TELESRV_SMTP_FROM` is empty. |
 | `TELESRV_SMTP_PASSWORD` | secret string / empty | SMTP password. |
 | `TELESRV_SMTP_FROM` | email/string / empty | Envelope/header sender. Either this or SMTP username is required when login email is enabled. |
-| `TELESRV_SMTP_FROM_NAME` | string / `telesrv` | Display name for login-email messages. |
+| `TELESRV_SMTP_FROM_NAME` | string / `TELESRV_BRAND_PRODUCT_NAME` | Display name for login-email messages; when unset, it inherits the parent product display name. |
 | `TELESRV_SMTP_TLS` | enum / `starttls` | `starttls`, `tls`, or `none`; any other value fails startup. |
 | `TELESRV_SMTP_TIMEOUT` | duration / `10s` | SMTP operation timeout; must be positive when the SMTP provider is used. |
 | `TELESRV_PASSKEY_RP_ID` | hostname / `telesrv.net` | WebAuthn relying-party ID used for `rpIdHash`. Android Credential Manager requires alignment with hosted `assetlinks.json`. |
@@ -528,6 +560,9 @@ path. `TELESRV_PUBLIC_BASE_URL` must resolve to that proxy for moderation freeze
 
 | Setting | Type / code default | Description and constraints |
 |---|---|---|
+| `TELESRV_PREMIUM_BOT_USERNAME` | username / `premiumbot` | Reserved built-in Premium storefront username. A leading `@` is normalized away; invalid usernames fail startup. |
+| `TELESRV_PREMIUM_BOT_USER_ID` | int64 / `1250000015` | Stable built-in Premium bot user ID. It must be positive and must not collide with another system account. |
+| `TELESRV_PREMIUM_PLANS` | `months:days:stars` CSV / `3:90:750,6:180:1300,12:365:2400` | Seeds and synchronizes config-owned Premium plans. Months must be unique; all values are positive and bounded. Saving a row in the admin UI makes it admin-owned, so later restarts do not overwrite it. A catalog change bumps the durable plan version and invalidates outstanding old-price forms. |
 | `TELESRV_PREMIUM_GRANT_MONTHS` | int / `3` | Premium months granted to newly registered users; `0` disables new grants. Existing migration backfills are unaffected. |
 | `TELESRV_STARS_STARTING_GRANT` | int64 / `1000` | Idempotent lazy starting Stars balance for all accounts; `0` disables automatic grant. |
 | `TELESRV_PREMIUM_SWEEP_INTERVAL` | duration / `1m` | Expired-premium cleanup/push interval. Read paths derive expiry independently. |
@@ -617,6 +652,10 @@ deliberate anti-SSRF decision, and validation is the only thing ever done to an 
 | `TELESRV_VERIFICATION_BOT_RATE_WINDOW` | duration / `1m` | Window for the bot dialog rate; must be positive whenever that limit is set. |
 | `TELESRV_VERIFICATION_NOTIFY_INTERVAL` | duration / `15s` | Applicant-notification worker interval; must be positive. A decision commits with its outbox row, never with a message send, so delivery is a separate retrying cycle over durable rows. |
 | `TELESRV_VERIFICATION_NOTIFY_BATCH` | int / `50` | Outbox rows delivered per cycle; must be `1..500`. |
+| `TELESRV_BROADCAST_WORKER_INTERVAL` | duration / `3s` | System-broadcast worker interval; must be positive. |
+| `TELESRV_BROADCAST_WORKER_LEASE` | duration / `30s` | Recipient claim lease used for crash recovery; must be positive and no more than `1h`. |
+| `TELESRV_BROADCAST_MATERIALIZE_BATCH` | int / `200` | Maximum all-user recipient IDs materialized by one database keyset step; must be `1..1000`. IDs stay inside PostgreSQL. |
+| `TELESRV_BROADCAST_DELIVERY_BATCH` | int / `50` | Maximum leased recipients delivered per cycle; must be `1..500`. Each message commits independently. |
 | `TELESRV_VERIFICATION_MAX_ACTIVE_PER_USER` | int / `3` | Applications one applicant may keep open (draft, submitted, in review) at once. `0` disables the cap; must be `0..50`. |
 
 The defaults ship the feature on with the official bar in place, so no existing deployment changes behaviour: user

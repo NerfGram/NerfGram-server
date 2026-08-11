@@ -37,7 +37,7 @@ func TestStarGiftStorePostgres(t *testing.T) {
 			ID: docID, AccessHash: docID + 1, MimeType: "application/x-tgsticker", Size: 4, DCID: 2,
 			Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}},
 		},
-		Blob:      domain.FileBlob{LocationKey: "doc:" + fmt.Sprint(docID), Backend: domain.MediaBackendLocalFS, ObjectKey: "test-star-gift", Size: 4, SHA256: make([]byte, 32), MimeType: "application/x-tgsticker"},
+		Blob:      postgresTestBlob("doc:"+fmt.Sprint(docID), "test-star-gift", 4, "application/x-tgsticker"),
 		Animation: domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7","w":512,"h":512,"fr":30,"ip":0,"op":30,"layers":[{}]}`), SHA256: make([]byte, 32), SourceFormat: domain.StarGiftAnimationTGS, Width: 512, Height: 512},
 		Actor:     "test", CommandID: "test-star-gift-" + suffix,
 	})
@@ -80,7 +80,7 @@ func TestStarGiftStorePostgres(t *testing.T) {
 			ID: docID2, AccessHash: docID2 + 1, MimeType: "application/x-tgsticker", Size: 4, DCID: 2,
 			Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}},
 		},
-		Blob:      domain.FileBlob{LocationKey: "doc:" + fmt.Sprint(docID2), Backend: domain.MediaBackendLocalFS, ObjectKey: "test-star-gift-v2", Size: 4, SHA256: make([]byte, 32), MimeType: "application/x-tgsticker"},
+		Blob:      postgresTestBlob("doc:"+fmt.Sprint(docID2), "test-star-gift-v2", 4, "application/x-tgsticker"),
 		Animation: domain.StarGiftAnimation{JSON: []byte(`{"v":"5.7","w":512,"h":512,"fr":30,"ip":0,"op":30,"layers":[{}]}`), SHA256: make([]byte, 32), SourceFormat: domain.StarGiftAnimationTGS, Width: 512, Height: 512},
 		Actor:     "test", CommandID: "test-star-gift-v2-" + suffix,
 	})

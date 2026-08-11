@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"strconv"
+	"strings"
 	"sync"
 
 	compatandroid "telesrv/internal/compat/android"
@@ -56,10 +57,10 @@ const tdesktopClient = "tdesktop"
 //
 // WebK directly calls Array.some on fragment_prefixes while rendering user profiles,
 // so this compatibility key must always remain an array, even when it is empty.
-const tdesktopDefaultAppConfigBase = `{"chat_read_mark_expire_period":604800,"chat_read_mark_size_threshold":50,"pm_read_date_expire_period":604800,"quote_length_max":1024,"telegram_antispam_group_size_min":200,"telegram_antispam_user_id":"5434988373","fragment_prefixes":["888"],"forum_upgrade_participants_min":2,"reactions_default":{"_":"reactionEmoji","emoticon":"👍"},"reactions_uniq_max":11,"reactions_user_max_default":1,"reactions_user_max_premium":3,"reactions_in_chat_max":3,"boosts_channel_level_max":100,"rich_message_posting":"enabled","upload_markup_video":true,"emojies_send_dice":["🎲","🎯","🏀","⚽","⚽️","🎳","🎰"],"premium_purchase_blocked":false,"stars_purchase_blocked":false,"stargifts_blocked":false,"stargifts_pinned_to_top_limit":6,"giveaway_gifts_purchase_available":true,"giveaway_boosts_per_premium":4,"giveaway_countries_max":10,"giveaway_add_peers_max":10,"giveaway_period_max":604800,"stories_stealth_future_period":1500,"stories_stealth_past_period":300,"stories_stealth_cooldown_period":10800,"quick_replies_limit":100,"quick_reply_messages_limit":20,"business_chat_links_limit":100,"dialog_filters_enabled":true,"chatlist_update_period":3600,"chatlist_invites_limit_default":3,"chatlist_invites_limit_premium":20,"chatlists_joined_limit_default":2,"chatlists_joined_limit_premium":20,"about_length_limit_default":70,"about_length_limit_premium":140,"bot_verification_description_length_limit":70,"caption_length_limit_default":1024,"caption_length_limit_premium":4096,"channels_limit_default":500,"channels_limit_premium":1000,"channels_public_limit_default":10,"channels_public_limit_premium":20,"dialog_filters_limit_default":10,"dialog_filters_limit_premium":20,"dialog_filters_chats_limit_default":100,"dialog_filters_chats_limit_premium":200,"dialogs_pinned_limit_default":5,"dialogs_pinned_limit_premium":10,"dialogs_folder_pinned_limit_default":100,"dialogs_folder_pinned_limit_premium":200,"saved_dialogs_pinned_limit_default":5,"saved_dialogs_pinned_limit_premium":100,"saved_gifs_limit_default":200,"saved_gifs_limit_premium":400,"stickers_faved_limit_default":5,"stickers_faved_limit_premium":10,"recommended_channels_limit_default":10,"recommended_channels_limit_premium":100,"aicompose_tone_examples_num":3,"aicompose_tone_title_length_max":12,"aicompose_tone_prompt_length_max":1024,"aicompose_tone_saved_limit_default":5,"aicompose_tone_saved_limit_premium":20,"upload_max_fileparts_default":4000,"upload_max_fileparts_premium":8000`
+const tdesktopDefaultAppConfigBase = `{"chat_read_mark_expire_period":604800,"chat_read_mark_size_threshold":50,"pm_read_date_expire_period":604800,"quote_length_max":1024,"telegram_antispam_group_size_min":200,"telegram_antispam_user_id":"5434988373","fragment_prefixes":["888"],"forum_upgrade_participants_min":2,"reactions_default":{"_":"reactionEmoji","emoticon":"👍"},"reactions_uniq_max":11,"reactions_user_max_default":1,"reactions_user_max_premium":3,"reactions_in_chat_max":3,"boosts_channel_level_max":100,"rich_message_posting":"enabled","upload_markup_video":true,"emojies_send_dice":["🎲","🎯","🏀","⚽","⚽️","🎳","🎰"],"premium_purchase_blocked":false,"premium_gift_attach_menu_icon":true,"premium_gift_text_field_icon":true,"gift_text_length_max":128,"stars_purchase_blocked":false,"stargifts_blocked":false,"stargifts_pinned_to_top_limit":6,"giveaway_gifts_purchase_available":true,"giveaway_boosts_per_premium":4,"giveaway_countries_max":10,"giveaway_add_peers_max":10,"giveaway_period_max":604800,"stories_stealth_future_period":1500,"stories_stealth_past_period":300,"stories_stealth_cooldown_period":10800,"quick_replies_limit":100,"quick_reply_messages_limit":20,"business_chat_links_limit":100,"dialog_filters_enabled":true,"chatlist_update_period":3600,"chatlist_invites_limit_default":3,"chatlist_invites_limit_premium":20,"chatlists_joined_limit_default":2,"chatlists_joined_limit_premium":20,"about_length_limit_default":70,"about_length_limit_premium":140,"bot_verification_description_length_limit":70,"caption_length_limit_default":1024,"caption_length_limit_premium":4096,"channels_limit_default":500,"channels_limit_premium":1000,"channels_public_limit_default":10,"channels_public_limit_premium":20,"dialog_filters_limit_default":10,"dialog_filters_limit_premium":20,"dialog_filters_chats_limit_default":100,"dialog_filters_chats_limit_premium":200,"dialogs_pinned_limit_default":5,"dialogs_pinned_limit_premium":10,"dialogs_folder_pinned_limit_default":100,"dialogs_folder_pinned_limit_premium":200,"saved_dialogs_pinned_limit_default":5,"saved_dialogs_pinned_limit_premium":100,"saved_gifs_limit_default":200,"saved_gifs_limit_premium":400,"stickers_faved_limit_default":5,"stickers_faved_limit_premium":10,"recommended_channels_limit_default":10,"recommended_channels_limit_premium":100,"aicompose_tone_examples_num":3,"aicompose_tone_title_length_max":12,"aicompose_tone_prompt_length_max":1024,"aicompose_tone_saved_limit_default":5,"aicompose_tone_saved_limit_premium":20,"upload_max_fileparts_default":4000,"upload_max_fileparts_premium":8000`
 const tdesktopNoForwardsAppConfig = `,"no_forwards_request_expire_period":86400`
 
-const defaultAppConfigHash = 27 // 默认 app config 内容变更时必须递增，否则缓存端只会收到 notModified。
+const defaultAppConfigHash = 28 // 默认 app config 内容变更时必须递增，否则缓存端只会收到 notModified。
 
 // Service 提供客户端启动配置与国家区号目录。
 //
@@ -72,6 +73,7 @@ type Service struct {
 	countries     store.CountryStore
 	accountFreeze AccountFreezeProvider
 	mapboxToken   string
+	premiumBot    string
 
 	appConfigOnce  sync.Once
 	appConfigCache domain.AppConfig
@@ -101,9 +103,23 @@ func WithMapboxToken(token string) Option {
 	}
 }
 
+// WithPremiumBotUsername publishes the local Premium storefront to clients.
+func WithPremiumBotUsername(username string) Option {
+	return func(s *Service) {
+		username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+		if domain.ValidBotUsername(username) {
+			s.premiumBot = username
+		}
+	}
+}
+
 // NewService 创建 help 服务。
 func NewService(appConfigs store.AppConfigStore, countries store.CountryStore, opts ...Option) *Service {
-	s := &Service{appConfigs: appConfigs, countries: countries}
+	s := &Service{
+		appConfigs: appConfigs,
+		countries:  countries,
+		premiumBot: domain.PremiumBotUser().Username,
+	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(s)
@@ -113,28 +129,56 @@ func NewService(appConfigs store.AppConfigStore, countries store.CountryStore, o
 }
 
 func defaultAppConfig(mapboxToken string) domain.AppConfig {
-	jsonBytes := defaultAppConfigJSON(mapboxToken)
-	return domain.AppConfig{Client: tdesktopClient, Hash: defaultAppConfigHashFor(mapboxToken), JSON: jsonBytes}
+	return defaultAppConfigWithPremiumBot(mapboxToken, domain.PremiumBotUser().Username)
 }
 
 func defaultAppConfigJSON(mapboxToken string) []byte {
+	return defaultAppConfigJSONWithPremiumBot(mapboxToken, domain.PremiumBotUser().Username)
+}
+
+func defaultAppConfigWithPremiumBot(mapboxToken, premiumBotUsername string) domain.AppConfig {
+	jsonBytes := defaultAppConfigJSONWithPremiumBot(mapboxToken, premiumBotUsername)
+	return domain.AppConfig{
+		Client: tdesktopClient,
+		Hash:   defaultAppConfigHashForPremiumBot(mapboxToken, premiumBotUsername),
+		JSON:   jsonBytes,
+	}
+}
+
+func defaultAppConfigJSONWithPremiumBot(mapboxToken, premiumBotUsername string) []byte {
+	if !domain.ValidBotUsername(premiumBotUsername) {
+		premiumBotUsername = domain.PremiumBotUser().Username
+	}
+	username, _ := json.Marshal(premiumBotUsername)
+	premiumFragment := `,"premium_bot_username":` + string(username)
 	androidInvoiceBilling := `,"premium_playmarket_direct_currency_list":` + compatandroid.DirectInvoiceCurrenciesJSON()
 	if mapboxToken == "" {
-		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + androidInvoiceBilling + `}`)
+		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + `}`)
 	}
 	token, err := json.Marshal(mapboxToken)
 	if err != nil {
-		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + androidInvoiceBilling + `}`)
+		return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + `}`)
 	}
 	tokenJSON := string(token)
-	return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + androidInvoiceBilling + `,"tdesktop_config_map":{"maps":` + tokenJSON + `,"geo":` + tokenJSON + `,"bmaps":` + tokenJSON + `,"bgeo":` + tokenJSON + `}}`)
+	return []byte(tdesktopDefaultAppConfigBase + tdesktopNoForwardsAppConfig + premiumFragment + androidInvoiceBilling + `,"tdesktop_config_map":{"maps":` + tokenJSON + `,"geo":` + tokenJSON + `,"bmaps":` + tokenJSON + `,"bgeo":` + tokenJSON + `}}`)
 }
 
 func defaultAppConfigHashFor(mapboxToken string) int {
-	if mapboxToken == "" {
-		return defaultAppConfigHash
+	return defaultAppConfigHashForPremiumBot(mapboxToken, domain.PremiumBotUser().Username)
+}
+
+func defaultAppConfigHashForPremiumBot(mapboxToken, premiumBotUsername string) int {
+	if !domain.ValidBotUsername(premiumBotUsername) {
+		premiumBotUsername = domain.PremiumBotUser().Username
 	}
-	return defaultAppConfigHash + 1 + int(crc32.ChecksumIEEE([]byte(mapboxToken))&0x3fffffff)
+	hash := defaultAppConfigHash
+	if premiumBotUsername != domain.PremiumBotUser().Username {
+		hash += 1 + int(crc32.ChecksumIEEE([]byte(premiumBotUsername))&0x1fffffff)
+	}
+	if mapboxToken == "" {
+		return hash
+	}
+	return hash + 1 + int(crc32.ChecksumIEEE([]byte(mapboxToken))&0x1fffffff)
 }
 
 // GetAppConfig returns the cached global app config plus an authenticated,
@@ -198,7 +242,7 @@ func (s *Service) loadAppConfig(ctx context.Context) domain.AppConfig {
 	if s == nil {
 		return defaultAppConfig("")
 	}
-	defaultCfg := defaultAppConfig(s.mapboxToken)
+	defaultCfg := defaultAppConfigWithPremiumBot(s.mapboxToken, s.premiumBot)
 	s.appConfigOnce.Do(func() {
 		if s.appConfigs == nil {
 			s.appConfigCache = defaultCfg

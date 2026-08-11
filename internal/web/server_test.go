@@ -482,7 +482,7 @@ func TestHandlerServesBotUsernameLandingPage(t *testing.T) {
 		"http://127.0.0.1:2401/TetrisBot",
 		"telesrv://resolve?domain=TetrisBot",
 		"Start Bot",
-		"Open telesrv to start a chat with this bot.",
+		"Open Telesrv to start a chat with this bot.",
 		`property="og:title" content="Tetris Bot"`,
 		`property="al:android:url" content="telesrv://resolve?domain=TetrisBot"`,
 	} {

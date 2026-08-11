@@ -107,6 +107,10 @@ func locationInvalidErr() error      { return tgerr.New(400, "LOCATION_INVALID")
 func fileIDInvalidErr() error        { return tgerr.New(400, "FILE_ID_INVALID") }
 func documentInvalidErr() error      { return tgerr.New(400, "DOCUMENT_INVALID") }
 
+// A capacity failure is not a rate limit: FLOOD_WAIT would make clients retry
+// an operation that cannot succeed until an operator adds capacity.
+func storageFullErr() error { return tgerr.New(400, "STORAGE_FULL") }
+
 func mediaEmptyErr() error { return tgerr.New(400, "MEDIA_EMPTY") }
 
 func frozenMethodInvalidErr() error      { return tgerr.New(420, "FROZEN_METHOD_INVALID") }

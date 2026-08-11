@@ -33,6 +33,7 @@ type Service struct {
 	photos    userprojection.ProfilePhotoProvider
 	privacy   phonePrivacyService
 	freezes   userprojection.AccountFreezeProvider
+	phones    userprojection.CollectiblePhoneProvider
 	projector *userprojection.Projector
 	versions  store.ReadModelVersionStore
 	cache     *contactListReadModelCache
@@ -53,6 +54,10 @@ func WithPrivacyEvaluator(p phonePrivacyService) Option {
 
 func WithAccountFreezeProvider(p userprojection.AccountFreezeProvider) Option {
 	return func(s *Service) { s.freezes = p }
+}
+
+func WithCollectiblePhoneProvider(p userprojection.CollectiblePhoneProvider) Option {
+	return func(s *Service) { s.phones = p }
 }
 
 // WithReadModelVersions enables durable hash-token fast paths for NotModified RPCs.
@@ -91,6 +96,7 @@ func (s *Service) rebuildProjector() {
 		userprojection.WithPhotoProvider(s.photos),
 		userprojection.WithPrivacyEvaluator(s.privacy),
 		userprojection.WithAccountFreezeProvider(s.freezes),
+		userprojection.WithCollectiblePhoneProvider(s.phones),
 	)
 }
 

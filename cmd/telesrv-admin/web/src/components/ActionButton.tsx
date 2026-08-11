@@ -1,4 +1,4 @@
-import { CheckCircle2, CircleAlert, FileJson, Loader2, Play, X } from "lucide-react";
+import { Check, CheckCircle2, CircleAlert, Copy, FileJson, Loader2, Play, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
@@ -18,7 +18,8 @@ export function ActionButton({
   tone = "danger",
   disabled = false,
   onDone,
-  onError
+  onError,
+  secretField
 }: {
   label: string;
   path: string;
@@ -35,6 +36,7 @@ export function ActionButton({
   // form — an optimistic-locking 409, say — and replace the raw backend text with
   // an explanation by returning it.
   onError?: (error: unknown) => string | undefined;
+  secretField?: string;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -42,11 +44,13 @@ export function ActionButton({
   const [result, setResult] = useState<CommandResult | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [secretCopied, setSecretCopied] = useState(false);
 
   function reset() {
     setReason("");
     setResult(null);
     setError("");
+    setSecretCopied(false);
   }
 
   async function run(confirm: boolean) {
@@ -79,6 +83,17 @@ export function ActionButton({
       return { payload_error: errorMessage(err) };
     }
   }, [open, payload]);
+  const secretValue = secretField && result?.details && typeof result.details[secretField] === "string"
+    ? result.details[secretField] as string
+    : "";
+  const visibleDetails = secretValue && result?.details
+    ? Object.fromEntries(Object.entries(result.details).filter(([key]) => key !== secretField))
+    : result?.details;
+
+  async function copySecret() {
+    await navigator.clipboard.writeText(secretValue);
+    setSecretCopied(true);
+  }
 
   return (
     <>
@@ -135,7 +150,19 @@ export function ActionButton({
                 <div className="result-line"><span>{t("action.status")}</span><strong>{result.status}</strong></div>
                 <div className="result-line"><span>{t("action.dryRun")}</span><strong>{result.dry_run ? t("common.yes") : t("common.no")}</strong></div>
                   <div className="result-message">{result.message || result.error}</div>
-                  {result.details && <JsonBlock value={JSON.stringify(result.details, null, 2)} />}
+                  {secretValue && (
+                    <div className="secret-reveal">
+                      <div className="secret-reveal-label">{t("action.oneTimeSecret")}</div>
+                      <div className="secret-reveal-row">
+                        <code className="secret-reveal-value">{"•".repeat(Math.min(secretValue.length, 40))}</code>
+                        <button className="btn icon-text" type="button" onClick={() => void copySecret()}>
+                          {secretCopied ? <Check size={15} /> : <Copy size={15} />}
+                          {secretCopied ? t("common.copied") : t("common.copy")}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {visibleDetails && Object.keys(visibleDetails).length > 0 && <JsonBlock value={JSON.stringify(visibleDetails, null, 2)} />}
                 </div>
               )}
             </div>

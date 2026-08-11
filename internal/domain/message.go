@@ -159,6 +159,9 @@ type Message struct {
 	// Pinned 是 owner 视角的置顶标志（官方私聊多置顶语义：双方各自
 	// 的 box 行独立持有，非 pm_oneside 操作两侧同步翻转）。
 	Pinned bool
+	// Deleted 是 owner 视角的软删除可见性标记。它只用于更新重放/差分恢复
+	// 判断是否还能下发消息快照；普通历史查询应在 store 层直接过滤 deleted box。
+	Deleted bool
 	// SavedPeer 是 Saved Messages 分会话分组键（message.saved_peer_id）。
 	// 仅 self-chat box 行非零：直发笔记 = self；转发进收藏夹 = 源会话 peer；
 	// 存量回填兜底 hidden author 占位 user 2666000。非 self-chat 行恒零值。
@@ -274,7 +277,11 @@ type MessageFilter struct {
 	// userFull.pinned_msg_id 的查询路径）。
 	PinnedOnly     bool
 	MusicOnly      bool
-	NeedTotalCount bool
+	PhoneCallsOnly bool
+	// MissedPhoneCallsOnly narrows PhoneCallsOnly to incoming calls that ended
+	// with the protocol-level "missed" reason.
+	MissedPhoneCallsOnly bool
+	NeedTotalCount       bool
 	// SavedPeer 非零时仅返回 self-chat 中该 saved 子会话的消息
 	// （messages.getSavedHistory）；Peer 必须同时是 self。
 	SavedPeer Peer
@@ -302,6 +309,10 @@ type SendPrivateTextRequest struct {
 	Date            int
 	OriginAuthKeyID [8]byte
 	OriginSessionID int64
+	// OriginClientSession carries the exact request's initConnection language
+	// into an in-process bot responder. Stores and idempotency fingerprints
+	// intentionally ignore this ephemeral metadata.
+	OriginClientSession ClientSessionMetadata
 	// OriginUserID identifies the authenticated initiator when a server-generated
 	// service message is authored by another user. Zero preserves the ordinary
 	// send path where the sender is the initiator.

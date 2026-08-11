@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -19,7 +20,11 @@ import (
 func (s *StarGiftLifecycleStore) IssueStarGiftPurchaseForm(ctx context.Context, form domain.StarGiftPurchaseForm) (domain.StarGiftPurchaseForm, error) {
 	if s == nil || s.db == nil || form.FormID != 0 || form.BuyerUserID <= 0 || !validLifecyclePeer(form.To) ||
 		form.GiftID <= 0 || form.RevisionID <= 0 || form.ChargeStars <= 0 || form.IssuedAt <= 0 ||
-		form.ExpiresAt != form.IssuedAt+600 || len([]rune(form.Message)) > 128 {
+		form.ExpiresAt != form.IssuedAt+600 || !(domain.PremiumGiftMessage{Text: form.Message, Entities: form.MessageEntities}).Valid() {
+		return domain.StarGiftPurchaseForm{}, domain.ErrStarGiftFormPurposeInvalid
+	}
+	entitiesJSON, err := encodeMessageEntities(form.MessageEntities)
+	if err != nil {
 		return domain.StarGiftPurchaseForm{}, domain.ErrStarGiftFormPurposeInvalid
 	}
 	for attempt := 0; attempt < 8; attempt++ {
@@ -32,9 +37,9 @@ func (s *StarGiftLifecycleStore) IssueStarGiftPurchaseForm(ctx context.Context, 
 			form.FormID = 1
 		}
 		_, err := s.db.Exec(ctx, `INSERT INTO star_gift_purchase_forms(buyer_user_id,form_id,gift_id,revision_id,
-recipient_peer_type,recipient_peer_id,include_upgrade,hide_name,message,charge_stars,issued_at,expires_at)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, form.BuyerUserID, form.FormID, form.GiftID, form.RevisionID,
-			string(form.To.Type), form.To.ID, form.IncludeUpgrade, form.HideName, form.Message, form.ChargeStars, form.IssuedAt, form.ExpiresAt)
+recipient_peer_type,recipient_peer_id,include_upgrade,hide_name,message,message_entities,charge_stars,issued_at,expires_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, form.BuyerUserID, form.FormID, form.GiftID, form.RevisionID,
+			string(form.To.Type), form.To.ID, form.IncludeUpgrade, form.HideName, form.Message, entitiesJSON, form.ChargeStars, form.IssuedAt, form.ExpiresAt)
 		if err == nil {
 			return form, nil
 		}
@@ -56,15 +61,16 @@ func validateStarGiftPurchaseForm(ctx context.Context, db sqlcgen.DBTX, req doma
 	if req.BuyerUserID <= 0 || req.FormID == 0 || req.Date <= 0 {
 		return domain.ErrStarGiftFormExpired
 	}
-	query := `SELECT gift_id,revision_id,recipient_peer_type,recipient_peer_id,include_upgrade,hide_name,message,
+	query := `SELECT gift_id,revision_id,recipient_peer_type,recipient_peer_id,include_upgrade,hide_name,message,message_entities::text,
 charge_stars,issued_at,expires_at FROM star_gift_purchase_forms WHERE buyer_user_id=$1 AND form_id=$2`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var form domain.StarGiftPurchaseForm
 	var peerType string
+	var entitiesJSON string
 	err := db.QueryRow(ctx, query, req.BuyerUserID, req.FormID).Scan(&form.GiftID, &form.RevisionID, &peerType, &form.To.ID,
-		&form.IncludeUpgrade, &form.HideName, &form.Message, &form.ChargeStars, &form.IssuedAt, &form.ExpiresAt)
+		&form.IncludeUpgrade, &form.HideName, &form.Message, &entitiesJSON, &form.ChargeStars, &form.IssuedAt, &form.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ErrStarGiftFormExpired
 	}
@@ -72,11 +78,15 @@ charge_stars,issued_at,expires_at FROM star_gift_purchase_forms WHERE buyer_user
 		return err
 	}
 	form.FormID, form.BuyerUserID, form.To.Type = req.FormID, req.BuyerUserID, domain.PeerType(peerType)
+	form.MessageEntities, err = decodeMessageEntities(entitiesJSON)
+	if err != nil {
+		return domain.ErrStarGiftFormPurposeInvalid
+	}
 	if form.ExpiresAt < req.Date {
 		return domain.ErrStarGiftFormExpired
 	}
 	if form.To != req.To || form.GiftID != req.GiftID || form.IncludeUpgrade != req.IncludeUpgrade ||
-		form.HideName != req.HideName || form.Message != req.Message {
+		form.HideName != req.HideName || form.Message != req.Message || !slices.Equal(form.MessageEntities, req.MessageEntities) {
 		return domain.ErrStarGiftFormPurposeInvalid
 	}
 	if form.RevisionID != req.RevisionID || form.ChargeStars != req.ChargeStars {
@@ -88,7 +98,8 @@ charge_stars,issued_at,expires_at FROM star_gift_purchase_forms WHERE buyer_user
 func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domain.StarGiftPurchaseRequest) (domain.StarGiftPurchaseResult, error) {
 	req.CommandKey = strings.TrimSpace(req.CommandKey)
 	if s == nil || s.db == nil || req.BuyerUserID <= 0 || !validLifecyclePeer(req.To) || req.GiftID <= 0 ||
-		req.FormID == 0 || req.CommandKey == "" || len(req.CommandKey) > 256 || req.Date <= 0 || len([]rune(req.Message)) > 128 {
+		req.FormID == 0 || req.CommandKey == "" || len(req.CommandKey) > 256 || req.Date <= 0 ||
+		!(domain.PremiumGiftMessage{Text: req.Message, Entities: req.MessageEntities}).Valid() {
 		return domain.StarGiftPurchaseResult{}, domain.ErrStarGiftInvalid
 	}
 	if replay, found, err := s.loadStarGiftPurchaseReplay(ctx, req, domain.SendPrivateTextResult{}); err != nil || found {
@@ -123,7 +134,8 @@ func (s *StarGiftLifecycleStore) PurchaseStarGift(ctx context.Context, req domai
 			sticker := gift.Sticker
 			send.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
 				Kind: domain.MessageServiceActionStarGift, StarGift: &domain.MessageStarGiftAction{GiftID: gift.ID,
-					Stars: gift.Stars, ConvertStars: saved.ConvertStars, Title: gift.Title, Sticker: &sticker, Message: req.Message,
+					Stars: gift.Stars, ConvertStars: saved.ConvertStars, Title: gift.Title, Sticker: &sticker,
+					Message: req.Message, MessageEntities: append([]domain.MessageEntity(nil), req.MessageEntities...),
 					FromUserID: req.BuyerUserID, PeerUserID: req.To.ID, To: req.To, NameHidden: req.HideName, Saved: true,
 					CanUpgrade: gift.UpgradeStars > 0, PrepaidUpgrade: saved.PrepaidUpgradeStars > 0,
 					PrepaidUpgradeHash: saved.PrepaidUpgradeHash, UpgradePriceStars: gift.UpgradeStars,
@@ -181,7 +193,8 @@ func (s *StarGiftLifecycleStore) purchaseStarGiftToChannel(ctx context.Context, 
 		sticker := gift.Sticker
 		action := domain.ChannelMessageAction{Type: domain.ChannelActionStarGift, StarGift: &domain.MessageStarGiftAction{
 			GiftID: gift.ID, Stars: gift.Stars, ConvertStars: saved.ConvertStars, Title: gift.Title,
-			Sticker: &sticker, Message: saved.Message, FromUserID: req.BuyerUserID, PeerChannelID: req.To.ID,
+			Sticker: &sticker, Message: saved.Message, MessageEntities: append([]domain.MessageEntity(nil), saved.MessageEntities...),
+			FromUserID: req.BuyerUserID, PeerChannelID: req.To.ID,
 			SavedID: id, NameHidden: saved.NameHidden, Saved: true, CanUpgrade: gift.UpgradeStars > 0,
 			PrepaidUpgrade: saved.PrepaidUpgradeStars > 0, PrepaidUpgradeHash: saved.PrepaidUpgradeHash,
 			UpgradePriceStars: gift.UpgradeStars, UpgradeStars: saved.PrepaidUpgradeStars,
@@ -285,7 +298,8 @@ last_sale_date=$2,updated_at=now() WHERE gift_id=$1`, gift.ID, req.Date); err !=
 	}
 	saved := domain.SavedStarGift{Owner: req.To, FromUserID: req.BuyerUserID, GiftID: gift.ID, RevisionID: gift.RevisionID,
 		Date: req.Date, NameHidden: req.HideName, ConvertStars: gift.ConvertStars, PrepaidUpgradeStars: upgradePrice,
-		PrepaidUpgradeHash: prepayHash, Message: req.Message, Unsaved: req.RecipientUnsaved}
+		PrepaidUpgradeHash: prepayHash, Message: req.Message,
+		MessageEntities: append([]domain.MessageEntity(nil), req.MessageEntities...), Unsaved: req.RecipientUnsaved}
 	return gift, saved, balance, nil
 }
 
@@ -317,6 +331,7 @@ FROM star_gift_purchase_commands WHERE buyer_user_id=$1 AND command_key=$2`, req
 		return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
 	}
 	if saved.Owner != req.To || saved.GiftID != req.GiftID || saved.NameHidden != req.HideName || saved.Message != req.Message ||
+		!slices.Equal(saved.MessageEntities, req.MessageEntities) ||
 		(saved.PrepaidUpgradeStars > 0) != req.IncludeUpgrade {
 		return domain.StarGiftPurchaseResult{}, false, domain.ErrStarGiftInvalid
 	}
@@ -346,6 +361,7 @@ FROM star_gift_purchase_commands WHERE buyer_user_id=$1 AND command_key=$2`, req
 }
 
 func starGiftPurchaseFingerprint(req domain.StarGiftPurchaseRequest) [32]byte {
-	return sha256.Sum256([]byte(fmt.Sprintf("telesrv:star-gift-purchase:v1:%d:%s:%d:%d:%t:%t:%s",
-		req.BuyerUserID, req.To.Type, req.To.ID, req.GiftID, req.IncludeUpgrade, req.HideName, req.Message)))
+	entitiesJSON, _ := encodeMessageEntities(req.MessageEntities)
+	return sha256.Sum256([]byte(fmt.Sprintf("telesrv:star-gift-purchase:v2:%d:%s:%d:%d:%t:%t:%s:%s",
+		req.BuyerUserID, req.To.Type, req.To.ID, req.GiftID, req.IncludeUpgrade, req.HideName, req.Message, entitiesJSON)))
 }

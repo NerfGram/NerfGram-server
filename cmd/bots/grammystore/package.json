@@ -1,0 +1,17 @@
+{
+  "name": "telesrv-grammy-store-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --check src/bot.js && node --check src/catalog.js && node --check src/db.js && node --check src/i18n.js",
+    "migrate:legacy": "node scripts/migrate-legacy-db.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "17.4.2",
+    "grammy": "1.45.1"
+  }
+}

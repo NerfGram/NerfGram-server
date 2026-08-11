@@ -30,9 +30,10 @@ import (
 // app-link。客户端实体保持在前(超过上限裁剪时优先保留),结果裁剪到实体上限。
 func augmentAutoEntities(message string, entities []tg.MessageEntityClass, appLinks links.AppLinkBuilder) []tg.MessageEntityClass {
 	// 快路径:绝大多数消息不含任何可自动识别的触发字符。单次 ContainsAny 扫描即短路返回,
-	// 跳过下面各检测器对全文的扫描与区间分配(纯文本发送零额外开销)。所有 http(s) 链接
-	// 都含 '/',故 "@#$/" 一并覆盖 url 检测;email/phone 未实现故不在触发集内。
-	if message == "" || !strings.ContainsAny(message, "@#$/") {
+	// 跳过下面各检测器对全文的扫描与区间分配(纯文本发送零额外开销)。裸域名 URL 只需
+	// 一个 '.' 即可触发（如 github.com），进入检测后仍会做 TLD/边界校验；email/phone
+	// 未实现故不在触发集内。
+	if message == "" || !strings.ContainsAny(message, "@#$/.") {
 		return entities
 	}
 	type interval struct{ start, end int }

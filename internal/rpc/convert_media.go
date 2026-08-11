@@ -154,6 +154,17 @@ func tgMessageMedia(m *domain.MessageMedia) tg.MessageMediaClass {
 		}
 		out.SetStars(m.Giveaway.Stars)
 		return out
+	case domain.MessageMediaKindInvoice:
+		if m.Invoice == nil || !m.Invoice.Valid() {
+			return &tg.MessageMediaEmpty{}
+		}
+		return &tg.MessageMediaInvoice{
+			Title:       m.Invoice.Title,
+			Description: m.Invoice.Description,
+			Currency:    domain.PremiumCurrencyStars,
+			TotalAmount: m.Invoice.AmountStars,
+			StartParam:  m.Invoice.StartParam,
+		}
 	default:
 		return &tg.MessageMediaEmpty{}
 	}

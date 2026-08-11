@@ -33,6 +33,43 @@ type inlineBotRPCTestFixture struct {
 	document domain.Document
 }
 
+type builtinGifCatalogRPCSource struct{ doc domain.Document }
+
+func (s builtinGifCatalogRPCSource) ListGifCatalog(context.Context, bool) ([]domain.GifCatalogEntry, error) {
+	return []domain.GifCatalogEntry{{ID: 91, Title: "Wave", DocumentID: s.doc.ID, Enabled: true}}, nil
+}
+func (s builtinGifCatalogRPCSource) GetDocuments(context.Context, []int64) ([]domain.Document, error) {
+	return []domain.Document{s.doc}, nil
+}
+
+func TestBuiltinGifInlineQueryAcceptsGlobalEmptyPeerAndRegistersQuery(t *testing.T) {
+	ctx := context.Background()
+	users := memory.NewUserStore()
+	botStore := memory.NewBotStore(users)
+	owner, err := users.Create(ctx, domain.User{AccessHash: 7001, Phone: "15550007001", FirstName: "Owner"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := domain.Document{ID: 901, AccessHash: 902, DCID: 2, MimeType: "video/mp4", Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrAnimated}, {Kind: domain.DocAttrVideo, W: 320, H: 240, Duration: 1}}}
+	bots := botsapp.NewService(users, botStore, memory.NewMessageStore(memory.NewDialogStore()), botsapp.WithGifCatalog(builtinGifCatalogRPCSource{doc: doc}))
+	router := New(Config{DC: 2, IP: "127.0.0.1", Port: 2398}, Deps{Users: appusers.NewService(users), Bots: bots, ServiceBotInlineResults: bots}, zaptest.NewLogger(t), clock.System)
+	got, err := router.onMessagesGetInlineBotResults(WithUserID(ctx, owner.ID), &tg.MessagesGetInlineBotResultsRequest{Bot: inputUser(domain.GifBotUser()), Peer: &tg.InputPeerEmpty{}, Query: "wave"})
+	if err != nil {
+		t.Fatalf("global @gif query: %v", err)
+	}
+	if got.QueryID == 0 || len(got.Results) != 1 {
+		t.Fatalf("results = query_id %d len %d", got.QueryID, len(got.Results))
+	}
+	media, ok := got.Results[0].(*tg.BotInlineMediaResult)
+	if !ok {
+		t.Fatalf("result type = %T", got.Results[0])
+	}
+	wireDoc, ok := media.Document.(*tg.Document)
+	if !ok || wireDoc.ID != doc.ID {
+		t.Fatalf("document = %#v", media.Document)
+	}
+}
+
 func newInlineBotRPCTestFixture(t *testing.T) inlineBotRPCTestFixture {
 	t.Helper()
 	ctx := context.Background()

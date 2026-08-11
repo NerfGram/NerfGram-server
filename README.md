@@ -66,10 +66,12 @@ or sponsored by Telegram or the official Telegram team.
 | ✅ | Media and files | Upload, download, local blob storage, photos, documents, thumbnails, canonical GIFv conversion, external media fetch, web page previews, map tile cache hooks, profile/channel photos. |
 | ✅ | Stickers and reactions | Sticker/reaction catalog, seed support, saved GIFs, recent reactions, top reactions, default reactions, and moderation-oriented reaction paths. |
 | ✅ | Gifts and stars | Dynamic star gift catalog, admin import tools, collectible/unique gift upgrade flows, prepaid upgrade tracking, and local stars ledger foundations. |
+| ✅ | Premium with Stars | Built-in `@premiumbot`, native Layer 228 self/gift invoices, atomic Stars settlement, expiring entitlements, refunds, and Bot API `giftPremiumSubscription`. See [docs/premium-stars.md](docs/premium-stars.md). |
 | ✅ | Bots and mini apps | Bot service foundations, callbacks, inline helpers, webview/mini-app paths, a minimal Bot API gateway for libraries such as `python-telegram-bot`, persistent `getUpdates` delivery, and demo tools. |
 | ✅ | Calls and live streams | Private call signaling foundations, group call state, RTMP live streaming, scheduled video chats, channel `join_as`, SFU/TURN building blocks, liveness, and expiry workers. |
 | ✅ | Admin and operations | Admin API/UI backend, per-account freeze (admin-set read-only restriction, advertised to the client via appConfig), PostgreSQL migrations, Redis volatile state, retention workers, pprof/debug hooks, and load-test helpers. |
 | ✅ | Desktop, Android, iOS, and Web focus | Telegram Desktop is the primary target, with Android, iOS, and Web compatibility paths actively covered by the same server. |
+| ✅ | Native client updates | Separate update/CDN service, TDesktop `/current4` plus signed package delivery, and localized `help.getAppUpdate` for Android/iOS. See [docs/update-service.md](docs/update-service.md). |
 
 Some items are compatibility-first or experimental, but they are real open
 server code, not hidden product-only features.

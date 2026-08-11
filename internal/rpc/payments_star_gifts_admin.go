@@ -52,10 +52,10 @@ func (r *Router) AdminGrantStarGift(ctx context.Context, grant domain.AdminStarG
 	}
 	switch grant.Recipient.Type {
 	case domain.PeerTypeUser:
-		_, _, err = r.sendStarGiftToUser(ctx, senderID, grant.Recipient.ID, gift, grant.HideName, grant.Message, 0)
+		_, _, err = r.sendStarGiftToUser(ctx, senderID, grant.Recipient.ID, gift, grant.HideName, grant.Message, nil, 0)
 		return err
 	case domain.PeerTypeChannel:
-		_, _, err = r.sendStarGiftToChannel(ctx, senderID, grant.Recipient.ID, gift, grant.HideName, grant.Message, 0)
+		_, _, err = r.sendStarGiftToChannel(ctx, senderID, grant.Recipient.ID, gift, grant.HideName, grant.Message, nil, 0)
 		return err
 	default:
 		return fmt.Errorf("unsupported recipient peer type %q", grant.Recipient.Type)

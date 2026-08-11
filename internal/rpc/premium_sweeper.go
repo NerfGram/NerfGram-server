@@ -37,21 +37,32 @@ func (r *Router) RunPremiumSweeper(ctx context.Context, interval time.Duration, 
 }
 
 func (r *Router) sweepExpiredPremium(ctx context.Context, batch int) {
-	svc, ok := r.deps.Users.(UserPremiumService)
-	if !ok {
+	var sweep func(context.Context, int, int) ([]domain.User, error)
+	if r.deps.Premium != nil {
+		sweep = r.deps.Premium.SweepExpired
+	} else if svc, ok := r.deps.Users.(UserPremiumService); ok {
+		sweep = func(ctx context.Context, now, limit int) ([]domain.User, error) {
+			return svc.SweepExpiredPremium(ctx, int64(now), limit)
+		}
+	}
+	if sweep == nil {
 		return
 	}
 	for {
 		sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		users, err := svc.SweepExpiredPremium(sweepCtx, r.clock.Now().Unix(), batch)
+		users, err := sweep(sweepCtx, int(r.clock.Now().Unix()), batch)
 		cancel()
 		if err != nil {
 			r.log.Warn("premium sweep failed", zap.Error(err))
 			return
 		}
+		for _, u := range users {
+			r.invalidatePremiumUserCaches(ctx, u.ID)
+			r.invalidateRPCProjectionForUser(u.ID)
+		}
 		r.pushPremiumStatusUpdates(ctx, users)
 		// 不满一批说明已扫完当前积压；满批则继续，避免长停机后积压跨多个周期。
-		if len(users) < batch {
+		if len(users) == 0 {
 			return
 		}
 	}
@@ -78,6 +89,10 @@ func (r *Router) NotifyUserChanged(ctx context.Context, u domain.User) error {
 
 type moderationUserAudienceService interface {
 	ModerationFlagAudience(ctx context.Context, userID int64, limit int) ([]int64, error)
+}
+
+type dialogPeerMetadataInvalidator interface {
+	InvalidateDialog(userID int64, peer domain.Peer)
 }
 
 // NotifyUserModerationFlagsChanged sends the standard, non-PTS updateUser
@@ -109,6 +124,8 @@ func (r *Router) NotifyUserModerationFlagsChanged(ctx context.Context, u domain.
 	botVerificationIcon := r.peerBotVerificationIcon(pushCtx, domain.Peer{Type: domain.PeerTypeUser, ID: u.ID})
 	usernames := r.usernameRegistryMap(pushCtx, []domain.Peer{{Type: domain.PeerTypeUser, ID: u.ID}})
 	seen := make(map[int64]struct{}, len(audience))
+	dialogs, _ := r.deps.Dialogs.(dialogPeerMetadataInvalidator)
+	peer := domain.Peer{Type: domain.PeerTypeUser, ID: u.ID}
 	for _, viewerUserID := range audience {
 		if viewerUserID == 0 {
 			continue
@@ -117,6 +134,13 @@ func (r *Router) NotifyUserModerationFlagsChanged(ctx context.Context, u domain.
 			continue
 		}
 		seen[viewerUserID] = struct{}{}
+		if dialogs != nil {
+			// The getDialogs list hash intentionally describes dialog ordering, not
+			// embedded User flags. Clearing the viewer's cached hash forces exactly
+			// one full response with the refreshed peer and prevents a stale badge
+			// from reappearing when the dialog list next refreshes.
+			dialogs.InvalidateDialog(viewerUserID, peer)
+		}
 		if online, ok := r.deps.Sessions.(OnlineUserProvider); ok && !online.IsUserOnline(viewerUserID) {
 			continue
 		}

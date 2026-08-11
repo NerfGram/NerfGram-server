@@ -9,6 +9,10 @@ var (
 	ErrFilePartsInvalid    = errors.New("file parts invalid")
 	ErrFilePartTooBig      = errors.New("file part too big")
 	ErrUploadQuotaExceeded = errors.New("upload quota exceeded")
-	ErrPhotoInvalid        = errors.New("photo invalid")
-	ErrDocumentInvalid     = errors.New("document invalid")
+	// ErrStorageFull means the configured storage capacity guard rejected a
+	// write. It is distinct from per-account upload quota and must not be mapped
+	// to FLOOD_WAIT: retrying cannot create disk or object-store capacity.
+	ErrStorageFull     = errors.New("storage full")
+	ErrPhotoInvalid    = errors.New("photo invalid")
+	ErrDocumentInvalid = errors.New("document invalid")
 )

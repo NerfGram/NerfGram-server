@@ -4,6 +4,148 @@
   gap: 14px;
 }
 
+.dashboard-section {
+  display: grid;
+  gap: 10px;
+}
+
+.dashboard-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--heading);
+  font-size: 13px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dashboard-section-title span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.stat-tile {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 14px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+a.stat-tile.clickable {
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.stat-tile.clickable:hover {
+  border-color: var(--brand-tint-border);
+  box-shadow: var(--shadow);
+  transform: translateY(-1px);
+}
+
+.stat-tile-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stat-tile-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--brand);
+  background: var(--brand-tint);
+  border: 1px solid var(--brand-tint-border);
+  border-radius: var(--radius-sm);
+}
+
+.stat-tile.warn .stat-tile-icon {
+  color: var(--warn);
+  background: var(--warn-tint);
+  border-color: var(--warn-border);
+}
+
+.stat-tile.danger .stat-tile-icon {
+  color: var(--danger);
+  background: var(--danger-tint);
+  border-color: var(--danger-border);
+}
+
+.stat-tile.good .stat-tile-icon {
+  color: var(--good);
+  background: var(--good-tint);
+  border-color: var(--good-border);
+}
+
+.stat-tile-open {
+  color: var(--muted);
+}
+
+.stat-tile-value {
+  color: var(--heading);
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.stat-tile.warn .stat-tile-value {
+  color: var(--warn);
+}
+
+.stat-tile.danger .stat-tile-value {
+  color: var(--danger);
+}
+
+.stat-tile-label {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.stat-tile-sub {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.stat-tile-bar {
+  overflow: hidden;
+  width: 100%;
+  height: 5px;
+  background: var(--panel-subtle);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.stat-tile-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--brand-2);
+}
+
+.stat-tile.warn .stat-tile-bar > span {
+  background: var(--warn);
+}
+
+.stat-tile.danger .stat-tile-bar > span {
+  background: var(--danger);
+}
+
 .overview-band,
 .page-frame {
   min-width: 0;

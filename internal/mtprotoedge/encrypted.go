@@ -1365,7 +1365,12 @@ func (s *Server) completeRPCResult(c *Conn, reqMsgID int64, encoded *encodedOutb
 
 // sendPong 回复 mt.PingRequest / mt.PingDelayDisconnectRequest。
 func (s *Server) sendPong(ctx context.Context, c *Conn, reqMsgID, pingID int64) error {
-	return c.SendAsync(ctx, proto.MessageServerResponse, &mt.Pong{MsgID: reqMsgID, PingID: pingID})
+	// Telegram iOS keeps the account in its connection-context "updating" state
+	// until the initial actualization ping receives its matching pong. A pong is
+	// therefore a request-correlated transport barrier, not disposable keepalive
+	// noise: if it cannot be written, reconnect instead of silently stranding the
+	// client on an otherwise healthy session.
+	return c.SendRequiredControl(ctx, proto.MessageServerResponse, &mt.Pong{MsgID: reqMsgID, PingID: pingID})
 }
 
 // sendFutureSalts 回复 MTProto get_future_salts。
@@ -1388,7 +1393,10 @@ func (s *Server) sendFutureSalts(ctx context.Context, c *Conn, reqMsgID int64, n
 			Salt:       c.salt,
 		})
 	}
-	return c.SendAsync(ctx, proto.MessageServerResponse, &mt.FutureSalts{
+	// future_salts completes the client's time/salt synchronization task. If it
+	// cannot be written, fail the connection so the client reconnects instead of
+	// remaining connected in a permanent service-task state.
+	return c.SendRequiredControl(ctx, proto.MessageServerResponse, &mt.FutureSalts{
 		ReqMsgID: reqMsgID,
 		Now:      now,
 		Salts:    salts,
@@ -1401,7 +1409,7 @@ func (s *Server) sendFutureSalts(ctx context.Context, c *Conn, reqMsgID int64, n
 // （Android 收到后才调 getDifference）随之丢失。
 func (s *Server) sendNewSessionCreated(ctx context.Context, c *Conn, firstMsgID int64) error {
 	// This notification changes the client's request map and update recovery
-	// state. Unlike best-effort ack/pong traffic, it must be written successfully
+	// state. Unlike best-effort ack traffic, it must be written successfully
 	// before the corresponding RPC batch starts executing.
 	return c.SendRequiredControl(ctx, proto.MessageFromServer, &mt.NewSessionCreated{
 		FirstMsgID: firstMsgID,
@@ -1425,7 +1433,9 @@ func (s *Server) sendAck(ctx context.Context, c *Conn, ids ...int64) error {
 
 // sendMsgsStateInfo 回复 msgs_state_req/msg_resend_req。
 func (s *Server) sendMsgsStateInfo(ctx context.Context, c *Conn, reqMsgID int64, info []byte) error {
-	return c.SendAsync(ctx, proto.MessageServerResponse, &mt.MsgsStateInfo{ReqMsgID: reqMsgID, Info: info})
+	// msgs_state_info terminates the client's resend service. Do not acknowledge
+	// the request locally and then silently discard its answer from a full queue.
+	return c.SendRequiredControl(ctx, proto.MessageServerResponse, &mt.MsgsStateInfo{ReqMsgID: reqMsgID, Info: info})
 }
 
 func (s *Server) sendDestroySession(ctx context.Context, c *Conn, sessionID int64) error {

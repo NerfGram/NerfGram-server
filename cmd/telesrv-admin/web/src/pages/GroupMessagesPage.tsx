@@ -81,7 +81,7 @@ export function GroupMessagesPage({ navigate }: { navigate: Navigate }) {
               <th>{t("common.messageId")}</th>
               <th>{t("common.time")}</th>
               <th>{t("common.sender")}</th>
-              <th>From Peer</th>
+              <th>{t("common.fromPeer")}</th>
               <th>PTS</th>
               <th>{t("common.views")}</th>
               <th>{t("common.status")}</th>

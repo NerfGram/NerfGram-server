@@ -33,14 +33,138 @@ func TestLoadDefaultsAdvertiseIPToLoopback(t *testing.T) {
 	if cfg.PublicWebBaseURL != "https://weba.telesrv.net" {
 		t.Fatalf("PublicWebBaseURL = %q, want https://weba.telesrv.net", cfg.PublicWebBaseURL)
 	}
-	if cfg.PublicAppName != "telesrv" {
-		t.Fatalf("PublicAppName = %q, want telesrv", cfg.PublicAppName)
+	if cfg.PublicAppName != "Telesrv" {
+		t.Fatalf("PublicAppName = %q, want Telesrv", cfg.PublicAppName)
+	}
+	if cfg.Branding.ProductName != "Telesrv" || cfg.Branding.ProductUsername != "telesrv" ||
+		cfg.Branding.DesktopAppName != "Telesrv Desktop" || cfg.Branding.StarsName != "Telesrv Stars" ||
+		cfg.Branding.PublicBaseURL != cfg.PublicBaseURL {
+		t.Fatalf("Branding = %+v", cfg.Branding)
 	}
 	if cfg.CallRegistryMaxEntries != 10_000 {
 		t.Fatalf("CallRegistryMaxEntries = %d, want 10000", cfg.CallRegistryMaxEntries)
 	}
 	if cfg.PremiumPromoSeedDir != "data/premium-promo" {
 		t.Fatalf("PremiumPromoSeedDir = %q, want data/premium-promo", cfg.PremiumPromoSeedDir)
+	}
+	if cfg.BlobBackendKind != string(domain.MediaBackendLocalFS) {
+		t.Fatalf("BlobBackendKind = %q, want localfs", cfg.BlobBackendKind)
+	}
+	if cfg.BlobDir != "data/blobs" {
+		t.Fatalf("BlobDir = %q, want data/blobs", cfg.BlobDir)
+	}
+	if !cfg.StorageLowSpaceGuardEnable || cfg.StorageMinFreeBytes != 1<<30 || cfg.StorageMaxTotalBytes != 0 || cfg.StorageUsageRefreshInterval != time.Minute {
+		t.Fatalf("unexpected storage capacity defaults: enabled=%v min=%d max=%d interval=%v", cfg.StorageLowSpaceGuardEnable, cfg.StorageMinFreeBytes, cfg.StorageMaxTotalBytes, cfg.StorageUsageRefreshInterval)
+	}
+}
+
+func TestLoadS3BlobStorageConfig(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_BLOB_BACKEND", "s3")
+	t.Setenv("TELESRV_BLOB_STAGING_DIR", `D:\staging\telesrv`)
+	t.Setenv("TELESRV_S3_ENDPOINT", "minio.example.test:9000")
+	t.Setenv("TELESRV_S3_BUCKET", "telesrv-media")
+	t.Setenv("TELESRV_S3_ACCESS_KEY_ID", "access")
+	t.Setenv("TELESRV_S3_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("TELESRV_S3_USE_SSL", "false")
+	t.Setenv("TELESRV_S3_PATH_STYLE", "true")
+	t.Setenv("TELESRV_S3_CREATE_BUCKET", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BlobBackendKind != "s3" || cfg.S3Endpoint != "minio.example.test:9000" || cfg.S3Bucket != "telesrv-media" {
+		t.Fatalf("unexpected s3 config: backend=%q endpoint=%q bucket=%q", cfg.BlobBackendKind, cfg.S3Endpoint, cfg.S3Bucket)
+	}
+	if cfg.S3UseSSL || !cfg.S3PathStyle || !cfg.S3CreateBucket {
+		t.Fatalf("unexpected s3 flags: ssl=%v path_style=%v create=%v", cfg.S3UseSSL, cfg.S3PathStyle, cfg.S3CreateBucket)
+	}
+}
+
+func TestLoadRejectsInvalidBlobStorageConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		backend  string
+		endpoint string
+		bucket   string
+		access   string
+		secret   string
+	}{
+		{name: "unknown backend", backend: "mirror"},
+		{name: "missing s3 endpoint", backend: "s3", bucket: "media", access: "access", secret: "secret"},
+		{name: "endpoint has scheme", backend: "s3", endpoint: "http://minio:9000", bucket: "media", access: "access", secret: "secret"},
+		{name: "missing s3 bucket", backend: "s3", endpoint: "minio:9000", access: "access", secret: "secret"},
+		{name: "missing s3 credentials", backend: "s3", endpoint: "minio:9000", bucket: "media"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv("TELESRV_BLOB_BACKEND", tt.backend)
+			t.Setenv("TELESRV_S3_ENDPOINT", tt.endpoint)
+			t.Setenv("TELESRV_S3_BUCKET", tt.bucket)
+			t.Setenv("TELESRV_S3_ACCESS_KEY_ID", tt.access)
+			t.Setenv("TELESRV_S3_SECRET_ACCESS_KEY", tt.secret)
+			if _, err := Load(); err == nil {
+				t.Fatal("invalid blob storage config accepted")
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidStorageCapacityConfig(t *testing.T) {
+	for _, item := range []struct{ key, value string }{
+		{"TELESRV_STORAGE_MIN_FREE_BYTES", "-1"},
+		{"TELESRV_STORAGE_MAX_TOTAL_BYTES", "-1"},
+		{"TELESRV_STORAGE_USAGE_REFRESH_INTERVAL", "0s"},
+		{"TELESRV_STORAGE_USAGE_REFRESH_INTERVAL", "-1s"},
+	} {
+		t.Run(item.key+"="+item.value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv(item.key, item.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted invalid %s=%s", item.key, item.value)
+			}
+		})
+	}
+}
+
+func TestLoadUpdateServiceConfig(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_UPDATE_PUBLIC_URL", "https://updates.example.test/root/")
+	t.Setenv("TELESRV_UPDATE_SERVICE_URL", "http://127.0.0.1:2402/")
+	t.Setenv("TELESRV_UPDATE_REQUEST_TIMEOUT", "3s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UpdatePublicURL != "https://updates.example.test/root" || cfg.UpdateServiceURL != "http://127.0.0.1:2402" {
+		t.Fatalf("update URLs = %q / %q", cfg.UpdatePublicURL, cfg.UpdateServiceURL)
+	}
+	if cfg.UpdateRequestTimeout != 3*time.Second {
+		t.Fatalf("UpdateRequestTimeout = %v", cfg.UpdateRequestTimeout)
+	}
+}
+
+func TestLoadUpdateServiceDefaultsInternalURLToPublic(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_UPDATE_PUBLIC_URL", "https://updates.example.test")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.UpdateServiceURL != cfg.UpdatePublicURL {
+		t.Fatalf("UpdateServiceURL = %q, want %q", cfg.UpdateServiceURL, cfg.UpdatePublicURL)
+	}
+}
+
+func TestLoadRejectsInvalidUpdateServiceConfig(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_UPDATE_PUBLIC_URL", "file:///updates")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid update public URL accepted")
 	}
 }
 
@@ -54,6 +178,96 @@ func TestLoadPremiumPromoSeedDirOverride(t *testing.T) {
 	}
 	if cfg.PremiumPromoSeedDir != `D:\seed\premium-promo` {
 		t.Fatalf("PremiumPromoSeedDir = %q", cfg.PremiumPromoSeedDir)
+	}
+}
+
+func TestLoadPremiumBotAndPlans(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_PREMIUM_BOT_USERNAME", "@premium_store_bot")
+	t.Setenv("TELESRV_PREMIUM_BOT_USER_ID", "1250000999")
+	t.Setenv("TELESRV_PREMIUM_PLANS", "1:30:250,12:365:2400")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.PremiumBotUsername != "premium_store_bot" || cfg.PremiumBotUserID != 1250000999 {
+		t.Fatalf("Premium bot config = %q/%d", cfg.PremiumBotUsername, cfg.PremiumBotUserID)
+	}
+	if len(cfg.PremiumPlans) != 2 || cfg.PremiumPlans[0].Months != 1 ||
+		cfg.PremiumPlans[0].DurationDays != 30 || cfg.PremiumPlans[0].AmountStars != 250 ||
+		cfg.PremiumPlans[1].Months != 12 {
+		t.Fatalf("Premium plans = %+v", cfg.PremiumPlans)
+	}
+}
+
+func TestLoadBrandingConfig(t *testing.T) {
+	disableDefaultConfigFile(t)
+	t.Setenv("TELESRV_PUBLIC_BASE_URL", "https://links.example.test/root/")
+	t.Setenv("TELESRV_BRAND_PRODUCT_NAME", " Example Chat ")
+	t.Setenv("TELESRV_BRAND_PRODUCT_USERNAME", "@Example_Chat")
+	t.Setenv("TELESRV_BRAND_DESKTOP_APP_NAME", "Example Workstation")
+	t.Setenv("TELESRV_BRAND_ANDROID_APP_NAME", "Example Droid")
+	t.Setenv("TELESRV_BRAND_IOS_APP_NAME", "Example Phone")
+	t.Setenv("TELESRV_BRAND_MACOS_APP_NAME", "Example Mac")
+	t.Setenv("TELESRV_BRAND_WEB_A_APP_NAME", "Example Web Alpha")
+	t.Setenv("TELESRV_BRAND_WEB_K_APP_NAME", "Example Web Kappa")
+	t.Setenv("TELESRV_BRAND_PREMIUM_NAME", "Example Plus")
+	t.Setenv("TELESRV_BRAND_STARS_NAME", "Example Credits")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	brand := cfg.Branding
+	if brand.ProductName != "Example Chat" || brand.ProductUsername != "example_chat" ||
+		brand.DesktopAppName != "Example Workstation" || brand.AndroidAppName != "Example Droid" ||
+		brand.IOSAppName != "Example Phone" || brand.MacOSAppName != "Example Mac" ||
+		brand.WebAAppName != "Example Web Alpha" || brand.WebKAppName != "Example Web Kappa" ||
+		brand.PremiumName != "Example Plus" || brand.StarsName != "Example Credits" ||
+		brand.PublicBaseURL != "https://links.example.test/root" {
+		t.Fatalf("Branding = %+v", brand)
+	}
+	if cfg.PublicAppName != brand.ProductName {
+		t.Fatalf("PublicAppName = %q, want product default %q", cfg.PublicAppName, brand.ProductName)
+	}
+	if cfg.SMTPFromName != brand.ProductName {
+		t.Fatalf("SMTPFromName = %q, want product default %q", cfg.SMTPFromName, brand.ProductName)
+	}
+}
+
+func TestLoadRejectsInvalidBrandingConfig(t *testing.T) {
+	for _, item := range []struct{ key, value string }{
+		{"TELESRV_BRAND_PRODUCT_NAME", "   "},
+		{"TELESRV_BRAND_PRODUCT_USERNAME", "3bad"},
+		{"TELESRV_BRAND_DESKTOP_APP_NAME", "bad\nname"},
+		{"TELESRV_BRAND_STARS_NAME", "bad\u007fname"},
+	} {
+		t.Run(item.key, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv(item.key, item.value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted %s=%q", item.key, item.value)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidPremiumCatalog(t *testing.T) {
+	for _, value := range []string{
+		"3:90:0",
+		"3:90:750,3:91:760",
+		"121:365:750",
+		"3:36501:750",
+		"3:90:1000000000000001",
+	} {
+		t.Run(value, func(t *testing.T) {
+			disableDefaultConfigFile(t)
+			t.Setenv("TELESRV_PREMIUM_PLANS", value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load accepted TELESRV_PREMIUM_PLANS=%q", value)
+			}
+		})
 	}
 }
 
@@ -549,6 +763,9 @@ TELESRV_POSTGRES_MAX_CONNS=77
 TELESRV_WEBSOCKET_ALLOWED_ORIGINS=https://one.example, https://two.example
 TELESRV_CALL_RING_TIMEOUT=2m
 TELESRV_PUBLIC_BASE_URL=links.example.test/root
+TELESRV_BRAND_PRODUCT_NAME=File Chat
+TELESRV_BRAND_PRODUCT_USERNAME=@File_Chat
+TELESRV_BRAND_DESKTOP_APP_NAME=File Workstation
 TELESRV_PUBLIC_APP_SCHEME=example-chat
 TELESRV_PUBLIC_APP_LINK_BASE=OWPG://Tenant.Example.Test/
 TELESRV_PUBLIC_WEB_BASE_URL=web.example.test/client
@@ -578,6 +795,10 @@ TELESRV_PUBLIC_LINK_WEB_ADDR=127.0.0.1:2401
 	}
 	if cfg.PublicBaseURL != "https://links.example.test/root" {
 		t.Fatalf("PublicBaseURL = %q, want https://links.example.test/root", cfg.PublicBaseURL)
+	}
+	if cfg.Branding.ProductName != "File Chat" || cfg.Branding.ProductUsername != "file_chat" ||
+		cfg.Branding.DesktopAppName != "File Workstation" || cfg.Branding.PublicBaseURL != cfg.PublicBaseURL {
+		t.Fatalf("Branding = %+v", cfg.Branding)
 	}
 	if cfg.PublicAppScheme != "example-chat" {
 		t.Fatalf("PublicAppScheme = %q, want example-chat", cfg.PublicAppScheme)

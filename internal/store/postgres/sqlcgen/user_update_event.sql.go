@@ -192,6 +192,7 @@ SELECT
   COALESCE(m.effect, 0)::bigint AS effect,
   COALESCE(m.reply_markup::text, '{}')::text AS reply_markup_json,
   COALESCE(m.rich_message::text, '{}')::text AS rich_message_json,
+  COALESCE(m.deleted, false)::boolean AS message_deleted,
   COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
   COALESCE(peer_u.access_hash, 0)::bigint AS peer_access_hash,
   COALESCE(peer_u.phone, '')::text AS peer_phone,
@@ -330,6 +331,7 @@ type BatchListDispatchEventsRow struct {
 	Effect                         int64
 	ReplyMarkupJson                string
 	RichMessageJson                string
+	MessageDeleted                 bool
 	PeerUserID                     int64
 	PeerAccessHash                 int64
 	PeerPhone                      string
@@ -466,6 +468,7 @@ func (q *Queries) BatchListDispatchEvents(ctx context.Context, arg BatchListDisp
 			&i.Effect,
 			&i.ReplyMarkupJson,
 			&i.RichMessageJson,
+			&i.MessageDeleted,
 			&i.PeerUserID,
 			&i.PeerAccessHash,
 			&i.PeerPhone,
@@ -846,6 +849,7 @@ SELECT
   COALESCE(m.effect, 0)::bigint AS effect,
   COALESCE(m.reply_markup::text, '{}')::text AS reply_markup_json,
   COALESCE(m.rich_message::text, '{}')::text AS rich_message_json,
+  COALESCE(m.deleted, false)::boolean AS message_deleted,
   COALESCE(peer_u.id, 0)::bigint AS peer_user_id,
   COALESCE(peer_u.access_hash, 0)::bigint AS peer_access_hash,
   COALESCE(peer_u.phone, '')::text AS peer_phone,
@@ -987,6 +991,7 @@ type ListUserUpdateEventsAfterRow struct {
 	Effect                         int64
 	ReplyMarkupJson                string
 	RichMessageJson                string
+	MessageDeleted                 bool
 	PeerUserID                     int64
 	PeerAccessHash                 int64
 	PeerPhone                      string
@@ -1121,6 +1126,7 @@ func (q *Queries) ListUserUpdateEventsAfter(ctx context.Context, arg ListUserUpd
 			&i.Effect,
 			&i.ReplyMarkupJson,
 			&i.RichMessageJson,
+			&i.MessageDeleted,
 			&i.PeerUserID,
 			&i.PeerAccessHash,
 			&i.PeerPhone,

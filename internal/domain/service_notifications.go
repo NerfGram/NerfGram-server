@@ -26,10 +26,12 @@ const (
 const (
 	officialWelcomeMessageTemplate = "🎉 Добро пожаловать в FromGram!\n\n👤 Вы вошли в аккаунт первый раз. Пожалуйста, не выходите из аккаунта, так как код в следующий раз придет только в этот чат."
 
-	officialLoginCodeMessageTemplate = "🔒 Код для входа: %s.\n\n⚠️ Не говорите этот код никому, даже если его просят от имени " + branding.ProductName + "!\n\n❓ Если вы не запрашивали этот код для входа на другом устройстве, просто не обращайте внимание на это сообщение."
-
 	officialNewLoginMessageTemplate = "👤 Новый вход. %s, кто-то вошел в ваш аккаунт %s.\n\n💻 Устройство: %s\n📍 Местоположение: %s\n\n❗️ Если это были не вы, срочно зайдите в Настройки > Устройства и завершите эту сессию."
 )
+
+func officialLoginCodeMessageTemplate() string {
+	return "🔒 Код для входа: %s.\n\n⚠️ Не говорите этот код никому, даже если его просят от имени " + branding.ProductName() + "!\n\n❓ Если вы не запрашивали этот код для входа на другом устройстве, просто не обращайте внимание на это сообщение."
+}
 
 // OfficialWelcomeMessage builds the once-per-account welcome from 777000.
 // Callers must send it only on SignUp (first authorization), never on SignIn.
@@ -60,7 +62,7 @@ func OfficialLoginCodeMessage(userID int64, code string, date int) (Message, err
 	if userID <= 0 || IsSystemUserID(userID) || code == "" || len(code) > 64 || date < 0 || date > math.MaxInt32 {
 		return Message{}, fmt.Errorf("%w: user=%d code_length=%d date=%d", ErrLoginCodeDeliveryInvalid, userID, len(code), date)
 	}
-	body := fmt.Sprintf(officialLoginCodeMessageTemplate, code)
+	body := fmt.Sprintf(officialLoginCodeMessageTemplate(), code)
 	entities := []MessageEntity{
 		mustCustomEmoji(body, "🔒", ServiceEmojiLock),
 		mustBold(body, "Код для входа:"),

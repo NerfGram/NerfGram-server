@@ -147,7 +147,9 @@ func (s *StarsStore) ListTransactions(ctx context.Context, userID int64, query d
 	// keyset：方向过滤先于 LIMIT，多取一条以探测同一视图是否还有下一页。
 	where, order, args := starsTransactionQueryParts("user_id", "amount", userID, query)
 	rows, err := s.db.Query(ctx, `
-SELECT id, peer_type, peer_id, amount, reason, title, description, date
+SELECT id, peer_type, peer_id, amount, reason, title, description, date,
+       COALESCE(premium_payment_intent_id, 0), COALESCE(premium_recipient_user_id, 0),
+       COALESCE(premium_months, 0)
 FROM stars_transactions
 WHERE `+where+`
 ORDER BY id `+order+`
@@ -164,7 +166,8 @@ LIMIT $2`, args...)
 			peerID   int64
 			reason   string
 		)
-		if err := rows.Scan(&t.ID, &peerType, &peerID, &t.Amount, &reason, &t.Title, &t.Description, &t.Date); err != nil {
+		if err := rows.Scan(&t.ID, &peerType, &peerID, &t.Amount, &reason, &t.Title, &t.Description, &t.Date,
+			&t.PaymentID, &t.RecipientUserID, &t.PremiumMonths); err != nil {
 			return domain.StarsTransactionPage{}, fmt.Errorf("scan stars transaction: %w", err)
 		}
 		t.UserID = userID

@@ -53,6 +53,10 @@ func (fakeService) RevokeBotVerification(_ context.Context, req admin.RevokeBotV
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
 
+func (fakeService) AddStickerToSet(_ context.Context, req admin.AddStickerToSetRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
 func (fakeService) BotVerifiers(context.Context, bool, int) ([]domain.BotVerifierSettings, error) {
 	return nil, nil
 }

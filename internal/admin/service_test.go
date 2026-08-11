@@ -352,6 +352,28 @@ func TestGrantPremiumDryRunExecuteAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestGrantPremiumReturnsAndRevokesExactEntitlement(t *testing.T) {
+	ctx := context.Background()
+	users := &fakeUsersService{users: map[int64]domain.User{1001: {ID: 1001, FirstName: "Alice"}}}
+	premium := &fakePremiumService{user: users.users[1001], entitlementID: 77}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Users: users, Premium: premium, Now: fixedNow})
+
+	grant, err := svc.GrantPremium(ctx, GrantPremiumRequest{
+		CommandMeta: CommandMeta{CommandID: "premium-grant-77", Actor: "bot", Reason: "purchase"},
+		UserID:      1001, Months: 1,
+	})
+	if err != nil || grant.Details["entitlement_id"] != int64(77) {
+		t.Fatalf("grant=%+v err=%v", grant, err)
+	}
+	_, err = svc.GrantPremium(ctx, GrantPremiumRequest{
+		CommandMeta: CommandMeta{CommandID: "premium-refund-77", Actor: "bot", Reason: "refund"},
+		UserID:      1001, Months: 0, EntitlementID: 77,
+	})
+	if err != nil || premium.revokeCalls != 1 || premium.lastRevoke.EntitlementID != 77 {
+		t.Fatalf("revokeCalls=%d request=%+v err=%v", premium.revokeCalls, premium.lastRevoke, err)
+	}
+}
+
 func TestGrantStarsDryRunExecuteAndIdempotency(t *testing.T) {
 	ctx := context.Background()
 	users := &fakeUsersService{users: map[int64]domain.User{
@@ -402,6 +424,34 @@ func TestGrantStarsDryRunExecuteAndIdempotency(t *testing.T) {
 	}
 	if !again.AlreadyExecuted || stars.creditCalls != 1 || len(notifier.balances) != 1 {
 		t.Fatalf("again=%+v creditCalls=%d notified=%v, want idempotent replay", again, stars.creditCalls, notifier.balances)
+	}
+}
+
+func TestDebitStarsDryRunExecuteAndIdempotency(t *testing.T) {
+	ctx := context.Background()
+	users := &fakeUsersService{users: map[int64]domain.User{1001: {ID: 1001, Username: "alice"}}}
+	stars := &fakeStarsService{balances: map[int64]domain.StarsBalance{1001: {UserID: 1001, Balance: 1000, Granted: true}}}
+	notifier := &fakeStarsNotifier{}
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Users: users, Stars: stars, StarsNotifier: notifier, Now: fixedNow})
+
+	dry, err := svc.DebitStars(ctx, DebitStarsRequest{
+		CommandMeta: CommandMeta{CommandID: "dry-debit-stars", Actor: "bot", Reason: "refund", DryRun: true},
+		UserID:      1001, Amount: 20,
+	})
+	if err != nil || !dry.DryRun || stars.debitCalls != 0 {
+		t.Fatalf("dry=%+v debitCalls=%d err=%v", dry, stars.debitCalls, err)
+	}
+	req := DebitStarsRequest{
+		CommandMeta: CommandMeta{CommandID: "debit-stars", Actor: "bot", Reason: "refund"},
+		UserID:      1001, Amount: 20,
+	}
+	result, err := svc.DebitStars(ctx, req)
+	if err != nil || stars.debitCalls != 1 || result.Details["updated_balance"] != int64(980) || len(notifier.balances) != 1 {
+		t.Fatalf("result=%+v debitCalls=%d notified=%v err=%v", result, stars.debitCalls, notifier.balances, err)
+	}
+	replay, err := svc.DebitStars(ctx, req)
+	if err != nil || !replay.AlreadyExecuted || stars.debitCalls != 1 || len(notifier.balances) != 1 {
+		t.Fatalf("replay=%+v debitCalls=%d notified=%v err=%v", replay, stars.debitCalls, notifier.balances, err)
 	}
 }
 
@@ -627,6 +677,10 @@ func (f *fakeBotService) CreateBot(_ context.Context, _ int64, name, username st
 func (f *fakeBotService) DeleteBot(_ context.Context, botUserID int64) (domain.User, error) {
 	f.deleteCalls++
 	return domain.User{ID: botUserID, Bot: true, Deleted: true}, nil
+}
+
+func (f *fakeBotService) AdminExportBotToken(_ context.Context, _ int64) (string, error) {
+	return f.token, nil
 }
 
 type fakeRestrictionStore struct {
@@ -858,15 +912,73 @@ func (f *fakeUsersService) UpdateEmojiStatus(_ context.Context, userID int64, st
 	return u, nil
 }
 
+func (f *fakeUsersService) UpdateProfile(_ context.Context, userID int64, update domain.UserProfileUpdate) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	if update.HasFirstName {
+		u.FirstName = update.FirstName
+	}
+	if update.HasLastName {
+		u.LastName = update.LastName
+	}
+	f.users[userID] = u
+	return u, nil
+}
+
+func (f *fakeUsersService) SetPhone(_ context.Context, userID int64, phone string) (domain.User, error) {
+	u, ok := f.users[userID]
+	if !ok {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	u.Phone = phone
+	f.users[userID] = u
+	return u, nil
+}
+
 type fakeStarsService struct {
 	balances    map[int64]domain.StarsBalance
 	creditCalls int
+	debitCalls  int
 	lastUserID  int64
 	lastAmount  int64
 	lastReason  domain.StarsTransactionReason
 	lastPeer    domain.Peer
 	lastTitle   string
 	lastDesc    string
+}
+
+type fakePremiumService struct {
+	user          domain.User
+	entitlementID int64
+	revokeCalls   int
+	lastRevoke    domain.PremiumAdminRevokeRequest
+}
+
+func (f *fakePremiumService) Plan(context.Context, int) (domain.PremiumPlan, error) {
+	return domain.PremiumPlan{}, domain.ErrPremiumPlanUnavailable
+}
+func (f *fakePremiumService) Catalog(context.Context) ([]domain.PremiumPlan, error) { return nil, nil }
+func (f *fakePremiumService) UpsertPlan(context.Context, domain.PremiumPlanUpsertRequest) (domain.PremiumPlan, error) {
+	return domain.PremiumPlan{}, nil
+}
+func (f *fakePremiumService) Entitlements(context.Context, int64, int) ([]domain.PremiumEntitlement, error) {
+	return nil, nil
+}
+func (f *fakePremiumService) Payment(context.Context, int64) (domain.PremiumPaymentDetails, bool, error) {
+	return domain.PremiumPaymentDetails{}, false, nil
+}
+func (f *fakePremiumService) Grant(_ context.Context, req domain.PremiumAdminGrantRequest) (domain.PremiumEntitlement, domain.User, error) {
+	return domain.PremiumEntitlement{ID: f.entitlementID, UserID: req.UserID}, f.user, nil
+}
+func (f *fakePremiumService) Revoke(_ context.Context, req domain.PremiumAdminRevokeRequest) (domain.User, error) {
+	f.revokeCalls++
+	f.lastRevoke = req
+	return f.user, nil
+}
+func (f *fakePremiumService) Refund(context.Context, domain.PremiumRefundRequest) (domain.PremiumPurchaseResult, error) {
+	return domain.PremiumPurchaseResult{}, nil
 }
 
 func (f *fakeStarsService) Credit(_ context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error) {
@@ -886,6 +998,27 @@ func (f *fakeStarsService) Credit(_ context.Context, userID, amount int64, reaso
 	balance := f.balances[userID]
 	balance.UserID = userID
 	balance.Balance += amount
+	f.balances[userID] = balance
+	return balance, nil
+}
+
+func (f *fakeStarsService) Debit(_ context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error) {
+	f.debitCalls++
+	f.lastUserID = userID
+	f.lastAmount = amount
+	f.lastReason = reason
+	f.lastPeer = peer
+	f.lastTitle = title
+	f.lastDesc = desc
+	if f.balances == nil {
+		f.balances = map[int64]domain.StarsBalance{}
+	}
+	balance := f.balances[userID]
+	if balance.Balance < amount {
+		return domain.StarsBalance{}, domain.ErrStarsInsufficient
+	}
+	balance.UserID = userID
+	balance.Balance -= amount
 	f.balances[userID] = balance
 	return balance, nil
 }
@@ -997,6 +1130,17 @@ func (f *fakeChannelsService) AdminSetEmojiStatus(_ context.Context, channelID i
 		return domain.Channel{}, domain.ErrChannelInvalid
 	}
 	ch.EmojiStatus = status
+	f.channels[channelID] = ch
+	return ch, nil
+}
+
+func (f *fakeChannelsService) AdminSetPhoto(_ context.Context, channelID int64, photo domain.Photo) (domain.Channel, error) {
+	ch, ok := f.channels[channelID]
+	if !ok {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	ch.PhotoID = photo.ID
+	ch.PhotoDCID = photo.DCID
 	f.channels[channelID] = ch
 	return ch, nil
 }
@@ -1178,7 +1322,7 @@ func TestImportOfficialStarGiftPublishesThroughRealGiftService(t *testing.T) {
 		SourceJSON:     []byte(`{"id":6003643167683903930,"title":"Party Sparkler"}`),
 		Gift: officialgifts.Gift{
 			ID: 6003643167683903930, Title: "Party Sparkler", Stars: 15, ConvertStars: 13,
-			UpgradeStars: 25, AvailabilityTotal: 400000, DocumentID: 1,
+			UpgradeStars: 25, UpgradeVariants: 8, DocumentID: 1,
 		},
 		BaseDocument: document(1, "gift.json"),
 		Collectible: &officialgifts.CollectibleSet{
@@ -1214,7 +1358,7 @@ func TestImportOfficialStarGiftPublishesThroughRealGiftService(t *testing.T) {
 		t.Fatalf("catalog=%+v err=%v, want one imported gift", catalog, err)
 	}
 	preview, ok, err := giftService.CollectiblePreview(ctx, catalog[0].ID)
-	if err != nil || !ok || len(preview.Models) != 2 || len(preview.Patterns) != 2 {
+	if err != nil || !ok || preview.SupplyTotal != 8 || len(preview.Models) != 2 || len(preview.Patterns) != 2 {
 		t.Fatalf("preview=%+v ok=%v err=%v", preview, ok, err)
 	}
 	model := preview.Models[0].Document
@@ -1751,6 +1895,27 @@ func TestRevokeCollectibleUsernameRejectsVaultAssetWithoutBurn(t *testing.T) {
 	}
 	if usernames.revokeCalls != 0 || burnDry.Details["burn"] != true {
 		t.Fatalf("dry-run burn result=%+v revokeCalls=%d", burnDry, usernames.revokeCalls)
+	}
+}
+
+func TestRevokeCollectibleUsernameChecksExpectedOwner(t *testing.T) {
+	ctx := context.Background()
+	usernames := newFakeCollectibleUsernames()
+	svc := NewService(Dependencies{Commands: newMemoryCommandRepo(), Usernames: usernames, Now: fixedNow})
+	if _, _, err := usernames.Mint(ctx, domain.MintCollectibleUsernameRequest{
+		Username: "durov", Owner: domain.Peer{Type: domain.PeerTypeUser, ID: 1001},
+		Currency: domain.CollectibleCurrencyUSD, Amount: 1, CommandKey: "seed-owned",
+	}); err != nil {
+		t.Fatalf("seed mint: %v", err)
+	}
+	if _, err := svc.RevokeCollectibleUsername(ctx, RevokeCollectibleUsernameRequest{
+		CommandMeta: CommandMeta{CommandID: "wrong-owner-refund", Actor: "bot", Reason: "refund"},
+		Username: "durov", ExpectedOwnerUserID: 1002,
+	}); err == nil || !strings.Contains(err.Error(), CodeCollectibleNotOwned) {
+		t.Fatalf("wrong-owner revoke err=%v, want %s", err, CodeCollectibleNotOwned)
+	}
+	if usernames.revokeCalls != 0 {
+		t.Fatalf("revokeCalls=%d, want no mutation", usernames.revokeCalls)
 	}
 }
 

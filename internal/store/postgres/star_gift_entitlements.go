@@ -20,7 +20,7 @@ func (s *StarGiftLifecycleStore) PrepaidUpgradeTarget(ctx context.Context, owner
 	row := s.db.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
 p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
-p.message,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
+p.message,p.message_entities::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
 JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
 FROM peer_star_gifts p WHERE p.owner_peer_type=$1 AND p.owner_peer_id=$2 AND p.prepaid_upgrade_hash=$3`,
@@ -180,7 +180,7 @@ func lockSavedStarGiftByPrepayHash(ctx context.Context, tx pgx.Tx, owner domain.
 	row := tx.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
 p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
-p.message,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
+p.message,p.message_entities::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
 JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
 FROM peer_star_gifts p WHERE p.owner_peer_type=$1 AND p.owner_peer_id=$2 AND p.prepaid_upgrade_hash=$3 FOR UPDATE`,
@@ -287,7 +287,7 @@ func savedStarGiftByID(ctx context.Context, db interface {
 	row := db.QueryRow(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
 p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
-p.message,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
+p.message,p.message_entities::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
 JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
 FROM peer_star_gifts p WHERE p.id=$1`, savedID)

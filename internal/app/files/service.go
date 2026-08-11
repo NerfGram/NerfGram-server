@@ -48,6 +48,7 @@ const (
 // Service 实现 upload 分片累积、blob 落盘、getFile 下载，并把上传文件组装成 Photo / Document。
 type Service struct {
 	media       store.MediaStore
+	gifCatalog  store.GifCatalogStore
 	blobs       BlobBackend
 	uploadParts UploadPartBackend
 	dc          int
@@ -111,6 +112,12 @@ func WithGIFTranscoder(transcoder GIFTranscoder) Option {
 	}
 }
 
+// WithGifCatalog binds the curated catalog. It is independent of BlobBackend:
+// imported bytes always use the one backend selected for this Service.
+func WithGifCatalog(catalog store.GifCatalogStore) Option {
+	return func(s *Service) { s.gifCatalog = catalog }
+}
+
 // WithUploadPartQuota 覆盖用户级 in-flight 上传分片配额；字段 <=0 表示该维度不限制。
 func WithUploadPartQuota(quota domain.UploadPartQuota) Option {
 	return func(s *Service) {
@@ -122,6 +129,15 @@ func WithUploadPartQuota(quota domain.UploadPartQuota) Option {
 func WithSystemAvatarPath(path string) Option {
 	return func(s *Service) {
 		s.systemAvatarPath = strings.TrimSpace(path)
+	}
+}
+
+// WithUploadPartBackend separates transient upload staging from permanent blob
+// storage. S3 mode uses a local implementation here without making localfs a
+// permanent read/write fallback.
+func WithUploadPartBackend(backend UploadPartBackend) Option {
+	return func(s *Service) {
+		s.uploadParts = backend
 	}
 }
 
@@ -362,6 +378,12 @@ func (s *Service) GetFile(ctx context.Context, req domain.FileDownloadRequest) (
 			return domain.FileChunk{}, false, nil
 		}
 		blob = res.blob
+	}
+	if blob.Backend != domain.MediaBackend(s.blobs.Name()) {
+		return domain.FileChunk{}, false, fmt.Errorf(
+			"blob backend mismatch for %q: stored=%q configured=%q",
+			blob.LocationKey, blob.Backend, s.blobs.Name(),
+		)
 	}
 	if blob.Size > 0 && blob.Size <= blobBytesCacheMaxEntryBytes {
 		cacheLog.byteCacheEligible = true

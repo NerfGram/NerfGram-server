@@ -1,4 +1,4 @@
-import { AtSign, LifeBuoy, Palette, Settings2, Smile } from "lucide-react";
+import { AtSign, LifeBuoy, Mail, Palette, Phone, Settings2, Smile, UserRoundPen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ActionButton } from "./ActionButton";
 import { useI18n } from "../i18n";
@@ -46,6 +46,49 @@ export function UsernameAction({ idKey, id, path, current, onDone }: {
         payload={() => ({ [idKey]: id, username: username.trim().replace(/^@/, "") })}
         onDone={onDone}
       />
+    </div>
+  );
+}
+
+export function ProfileAction({ id, firstName, lastName, onDone }: {
+  id: number;
+  firstName: string;
+  lastName: string;
+  onDone: () => void;
+}) {
+  const { t } = useI18n();
+  const [first, setFirst] = useState(firstName);
+  const [last, setLast] = useState(lastName);
+  useEffect(() => { setFirst(firstName); setLast(lastName); }, [firstName, lastName]);
+  return (
+    <div className="attr-block">
+      <label className="duration-field"><span>{t("attr.firstName")}</span><input value={first} onChange={(event) => setFirst(event.target.value)} maxLength={64} /></label>
+      <label className="duration-field"><span>{t("attr.lastName")}</span><input value={last} onChange={(event) => setLast(event.target.value)} maxLength={64} /></label>
+      <ActionButton label={t("attr.setProfileName")} icon={<UserRoundPen size={15} />} tone="neutral" path="/api/actions/set-account-profile" payload={() => ({ user_id: id, first_name: first.trim(), last_name: last.trim() })} onDone={onDone} />
+    </div>
+  );
+}
+
+export function PhoneAction({ id, current, onDone }: { id: number; current: string; onDone: () => void }) {
+  const { t } = useI18n();
+  const [phone, setPhone] = useState(current);
+  useEffect(() => setPhone(current), [current]);
+  return (
+    <div className="attr-block">
+      <label className="duration-field"><span>{t("attr.phoneNumber")}</span><input value={phone} onChange={(event) => setPhone(event.target.value)} inputMode="tel" /></label>
+      <ActionButton label={t("attr.setPhone")} icon={<Phone size={15} />} tone="warn" path="/api/actions/set-account-phone" payload={() => ({ user_id: id, phone: phone.trim() })} onDone={onDone} />
+    </div>
+  );
+}
+
+export function LoginEmailAction({ id, current, onDone }: { id: number; current: string; onDone: () => void }) {
+  const { t } = useI18n();
+  const [email, setEmail] = useState(current);
+  useEffect(() => setEmail(current), [current]);
+  return (
+    <div className="attr-block">
+      <label className="duration-field"><span>{t("attr.loginEmail")}</span><input value={email} onChange={(event) => setEmail(event.target.value)} type="email" placeholder={t("attr.loginEmailPlaceholder")} /></label>
+      <ActionButton label={t("attr.setLoginEmail")} icon={<Mail size={15} />} tone="neutral" path="/api/actions/set-account-login-email" payload={() => ({ user_id: id, email: email.trim() })} onDone={onDone} />
     </div>
   );
 }

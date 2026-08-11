@@ -34,6 +34,14 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 	if blocked, ok := decoded["premium_purchase_blocked"].(bool); !ok || blocked {
 		t.Fatalf("premium_purchase_blocked = %v, want false (star gift 送礼入口耦合此 flag)", decoded["premium_purchase_blocked"])
 	}
+	if username, ok := decoded["premium_bot_username"].(string); !ok || username != "premiumbot" {
+		t.Fatalf("premium_bot_username = %v, want premiumbot", decoded["premium_bot_username"])
+	}
+	for _, key := range []string{"premium_gift_attach_menu_icon", "premium_gift_text_field_icon"} {
+		if enabled, ok := decoded[key].(bool); !ok || !enabled {
+			t.Fatalf("%s = %v, want true", key, decoded[key])
+		}
+	}
 	// DrKLO 缺省 starsLocked=true；缺 key 时余额不足送礼会误弹「所在国家无法购买星星」。
 	if blocked, ok := decoded["stars_purchase_blocked"].(bool); !ok || blocked {
 		t.Fatalf("stars_purchase_blocked = %v, want false (DrKLO starsPurchaseAvailable 据此解锁充值入口)", decoded["stars_purchase_blocked"])
@@ -65,6 +73,7 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 		"reactions_user_max_premium":                3,
 		"boosts_channel_level_max":                  100,
 		"stargifts_pinned_to_top_limit":             6,
+		"gift_text_length_max":                      domain.MaxPremiumGiftMessageRunes,
 		"about_length_limit_default":                70,
 		"about_length_limit_premium":                140,
 		"bot_verification_description_length_limit": 70,
@@ -103,7 +112,7 @@ func TestAppConfigPremiumKeys(t *testing.T) {
 		}
 	}
 	// 未实现功能族的 key 不得下发（诱导客户端进入未实现路径）。
-	for _, forbidden := range []string{"stories_sent_weekly_limit_default", "premium_bot_username", "premium_invoice_slug"} {
+	for _, forbidden := range []string{"stories_sent_weekly_limit_default", "premium_invoice_slug"} {
 		if _, ok := decoded[forbidden]; ok {
 			t.Errorf("appConfig 不应包含 %q", forbidden)
 		}
@@ -117,6 +126,24 @@ func containsJSONCurrency(values []any, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestAppConfigUsesConfiguredPremiumBotUsername(t *testing.T) {
+	svc := NewService(nil, nil, WithPremiumBotUsername("storefront_bot"))
+	cfg, _, err := svc.GetAppConfig(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("GetAppConfig: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(cfg.JSON, &decoded); err != nil {
+		t.Fatalf("decode app config: %v", err)
+	}
+	if got := decoded["premium_bot_username"]; got != "storefront_bot" {
+		t.Fatalf("premium_bot_username = %v, want storefront_bot", got)
+	}
+	if cfg.Hash == defaultAppConfigHash {
+		t.Fatalf("custom premium bot hash = %d, want deployment-specific hash", cfg.Hash)
+	}
 }
 
 func TestAppConfigOmitsMapboxTokenByDefault(t *testing.T) {

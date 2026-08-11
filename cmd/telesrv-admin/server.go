@@ -19,6 +19,7 @@ import (
 
 	"telesrv/internal/admin"
 	"telesrv/internal/domain"
+	"telesrv/internal/hoststats"
 	"telesrv/internal/store/redisstore"
 )
 
@@ -29,11 +30,12 @@ type server struct {
 	cfg       uiConfig
 	read      *readStore
 	codes     *redisstore.CodeStore
+	hostStats *hoststats.Poller
 	web       fs.FS
 	webServer http.Handler
 }
 
-func newServer(cfg uiConfig, read *readStore, codes *redisstore.CodeStore) (*server, error) {
+func newServer(cfg uiConfig, read *readStore, codes *redisstore.CodeStore, hostStats *hoststats.Poller) (*server, error) {
 	web, err := fs.Sub(webDist, "web/dist")
 	if err != nil {
 		return nil, err
@@ -42,6 +44,7 @@ func newServer(cfg uiConfig, read *readStore, codes *redisstore.CodeStore) (*ser
 		cfg:       cfg,
 		read:      read,
 		codes:     codes,
+		hostStats: hostStats,
 		web:       web,
 		webServer: http.FileServer(http.FS(web)),
 	}, nil
@@ -55,14 +58,24 @@ func (s *server) routes() http.Handler {
 	// itself, so nothing is stranded by protecting it.
 	mux.Handle("POST /api/logout", s.requireAuthAPI(http.HandlerFunc(s.handleAPILogout)))
 	mux.Handle("GET /api/session", s.requireAuthAPI(http.HandlerFunc(s.handleSession)))
+	mux.Handle("GET /api/dashboard", s.requireAuthAPI(http.HandlerFunc(s.handleDashboardAPI)))
 	mux.Handle("GET /api/accounts", s.requireAuthAPI(http.HandlerFunc(s.handleAccountsAPI)))
 	mux.Handle("GET /api/accounts/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleAccountDetailAPI)))
+	mux.Handle("GET /api/accounts/{id}/avatar", s.requireAuthAPI(http.HandlerFunc(s.handleAccountAvatarAPI)))
 	mux.Handle("GET /api/channels", s.requireAuthAPI(http.HandlerFunc(s.handleChannelsAPI)))
 	mux.Handle("GET /api/channels/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleChannelDetailAPI)))
+	mux.Handle("GET /api/channels/{id}/avatar", s.requireAuthAPI(http.HandlerFunc(s.handleChannelAvatarAPI)))
 	mux.Handle("GET /api/bots", s.requireAuthAPI(http.HandlerFunc(s.handleBotsAPI)))
+	mux.Handle("GET /api/broadcasts", s.requireAuthAPI(http.HandlerFunc(s.handleBroadcastsAPI)))
 	mux.Handle("GET /api/bots/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleBotDetailAPI)))
+	mux.Handle("GET /api/premium/plans", s.premiumManage(s.handlePremiumPlansAPI))
 	mux.Handle("GET /api/emoji", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAPI)))
 	mux.Handle("GET /api/emoji/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleEmojiAnimationAPI)))
+	mux.Handle("GET /api/stickers", s.requireAuthAPI(http.HandlerFunc(s.handleStickerSetsAPI)))
+	mux.Handle("GET /api/stickers/{id}/documents", s.requireAuthAPI(http.HandlerFunc(s.handleStickerSetDocumentsAPI)))
+	mux.Handle("GET /api/stickers/documents/{id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleStickerDocumentAnimationAPI)))
+	mux.Handle("GET /api/gif-catalog", s.requireAuthAPI(http.HandlerFunc(s.handleGifCatalogAPI)))
+	mux.Handle("GET /api/gif-catalog/documents/{id}/preview", s.requireAuthAPI(http.HandlerFunc(s.handleGifCatalogPreviewAPI)))
 	mux.Handle("GET /api/messages", s.requireAuthAPI(http.HandlerFunc(s.handleMessagesAPI)))
 	mux.Handle("GET /api/messages/detail", s.requireAuthAPI(http.HandlerFunc(s.handleMessageDetailAPI)))
 	mux.Handle("GET /api/messages/groups", s.requireAuthAPI(http.HandlerFunc(s.handleGroupMessagesAPI)))
@@ -76,8 +89,11 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/gifts/{id}/collectibles/{kind}/{attribute_id}/animation", s.requireAuthAPI(http.HandlerFunc(s.handleStarGiftCollectibleAnimationAPI)))
 	mux.Handle("GET /api/collectible-usernames", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernamesAPI)))
 	mux.Handle("GET /api/collectible-usernames/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleCollectibleUsernameDetailAPI)))
+	mux.Handle("GET /api/collectible-phones", s.requireAuthAPI(http.HandlerFunc(s.handleCollectiblePhonesAPI)))
+	mux.Handle("GET /api/collectible-phones/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleCollectiblePhoneDetailAPI)))
 	mux.Handle("GET /api/account-ratings", s.requireAuthAPI(http.HandlerFunc(s.handleAccountRatingsAPI)))
 	mux.Handle("GET /api/account-ratings/{user_id}", s.requireAuthAPI(http.HandlerFunc(s.handleAccountRatingDetailAPI)))
+	mux.Handle("GET /api/storage/stats", s.requireAuthAPI(http.HandlerFunc(s.handleStorageStatsAPI)))
 	mux.Handle("GET /api/moderation/cases", s.requireAuthAPI(http.HandlerFunc(s.handleModerationCasesAPI)))
 	mux.Handle("GET /api/moderation/cases/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleModerationCaseAPI)))
 	mux.Handle("GET /api/moderation/reports/{id}", s.requireAuthAPI(http.HandlerFunc(s.handleModerationReportAPI)))
@@ -85,21 +101,40 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/moderation/cases/{id}/decide", s.requireAuthAPI(http.HandlerFunc(s.handleDecideModerationCaseAPI)))
 	mux.Handle("POST /api/moderation/cases/{id}/appeals/{appeal_id}/review", s.requireAuthAPI(http.HandlerFunc(s.handleReviewModerationAppealAPI)))
 	mux.Handle("POST /api/actions/set-frozen", s.requireAuthAPI(http.HandlerFunc(s.handleSetAccountFrozenAPI)))
-	mux.Handle("POST /api/actions/grant-premium", s.requireAuthAPI(http.HandlerFunc(s.handleGrantPremiumAPI)))
+	mux.Handle("POST /api/actions/grant-premium", s.premiumManage(s.handleGrantPremiumAPI))
+	mux.Handle("POST /api/actions/upsert-premium-plan", s.premiumManage(s.handleUpsertPremiumPlanAPI))
 	mux.Handle("POST /api/actions/grant-stars", s.requireAuthAPI(http.HandlerFunc(s.handleGrantStarsAPI)))
 	mux.Handle("POST /api/actions/set-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetVerifiedAPI)))
 	mux.Handle("POST /api/actions/set-account-flags", s.requireAuthAPI(http.HandlerFunc(s.handleSetUserFlagsAPI)))
 	mux.Handle("POST /api/actions/set-channel-flags", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelFlagsAPI)))
 	mux.Handle("POST /api/actions/set-support", s.requireAuthAPI(http.HandlerFunc(s.handleSetSupportAPI)))
 	mux.Handle("POST /api/actions/set-account-username", s.requireAuthAPI(http.HandlerFunc(s.handleSetUsernameAPI)))
+	mux.Handle("POST /api/actions/set-account-profile", s.requireAuthAPI(http.HandlerFunc(s.handleSetProfileAPI)))
+	mux.Handle("POST /api/actions/set-account-phone", s.requireAuthAPI(http.HandlerFunc(s.handleSetPhoneAPI)))
+	mux.Handle("POST /api/actions/set-account-login-email", s.requireAuthAPI(http.HandlerFunc(s.handleSetLoginEmailAPI)))
+	mux.Handle("POST /api/actions/set-account-avatar", s.requireAuthAPI(http.HandlerFunc(s.handleSetAccountAvatarAPI)))
 	mux.Handle("POST /api/actions/set-account-color", s.requireAuthAPI(http.HandlerFunc(s.handleSetUserColorAPI)))
 	mux.Handle("POST /api/actions/set-account-emoji-status", s.requireAuthAPI(http.HandlerFunc(s.handleSetUserEmojiStatusAPI)))
 	mux.Handle("POST /api/actions/set-channel-settings", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelSettingsAPI)))
 	mux.Handle("POST /api/actions/set-channel-username", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelUsernameAPI)))
 	mux.Handle("POST /api/actions/set-channel-color", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelColorAPI)))
 	mux.Handle("POST /api/actions/set-channel-emoji-status", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelEmojiStatusAPI)))
+	mux.Handle("POST /api/actions/set-channel-avatar", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelAvatarAPI)))
 	mux.Handle("POST /api/actions/create-bot", s.requireAuthAPI(http.HandlerFunc(s.handleCreateBotAPI)))
+	mux.Handle("POST /api/actions/create-broadcast", s.requireAuthAPI(http.HandlerFunc(s.handleCreateBroadcastAPI)))
+	mux.Handle("POST /api/actions/set-sticker-set-archived", s.requireAuthAPI(http.HandlerFunc(s.handleSetStickerSetArchivedAPI)))
+	mux.Handle("POST /api/actions/set-sticker-set-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetStickerSetSortOrderAPI)))
+	mux.Handle("POST /api/actions/rename-sticker-set", s.requireAuthAPI(http.HandlerFunc(s.handleRenameStickerSetAPI)))
+	mux.Handle("POST /api/actions/delete-sticker-set", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteStickerSetAPI)))
+	mux.Handle("POST /api/actions/create-sticker-set", s.requireAuthAPI(http.HandlerFunc(s.handleCreateStickerSetAPI)))
+	mux.Handle("POST /api/actions/add-sticker-to-set", s.requireAuthAPI(http.HandlerFunc(s.handleAddStickerToSetAPI)))
+	mux.Handle("POST /api/actions/remove-sticker-from-set", s.requireAuthAPI(http.HandlerFunc(s.handleRemoveStickerFromSetAPI)))
+	mux.Handle("POST /api/actions/create-gif-catalog-entry", s.requireAuthAPI(http.HandlerFunc(s.handleCreateGifCatalogEntryAPI)))
+	mux.Handle("POST /api/actions/set-gif-catalog-enabled", s.requireAuthAPI(http.HandlerFunc(s.handleSetGifCatalogEnabledAPI)))
+	mux.Handle("POST /api/actions/set-gif-catalog-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetGifCatalogSortOrderAPI)))
+	mux.Handle("POST /api/actions/delete-gif-catalog-entry", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteGifCatalogEntryAPI)))
 	mux.Handle("POST /api/actions/delete-bot", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteBotAPI)))
+	mux.Handle("POST /api/actions/export-bot-token", s.requireAuthAPI(s.requirePermission(permissionBotTokenRead, http.HandlerFunc(s.handleExportBotTokenAPI))))
 	mux.Handle("POST /api/actions/set-channel-verified", s.requireAuthAPI(http.HandlerFunc(s.handleSetChannelVerifiedAPI)))
 	mux.Handle("POST /api/actions/revoke-sessions", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeSessionsAPI)))
 	mux.Handle("POST /api/actions/delete-messages", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteMessagesAPI)))
@@ -111,6 +146,11 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/actions/set-gift-sort-order", s.requireAuthAPI(http.HandlerFunc(s.handleSetStarGiftSortOrderAPI)))
 	mux.Handle("POST /api/actions/give-gift", s.requireAuthAPI(http.HandlerFunc(s.handleGiveGiftAPI)))
 	mux.Handle("POST /api/actions/mint-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleMintCollectibleUsernameAPI)))
+	mux.Handle("POST /api/actions/mint-collectible-phone", s.requireAuthAPI(http.HandlerFunc(s.handleMintCollectiblePhoneAPI)))
+	mux.Handle("POST /api/actions/update-collectible-phone-price", s.requireAuthAPI(http.HandlerFunc(s.handleUpdateCollectiblePhonePriceAPI)))
+	mux.Handle("POST /api/actions/transfer-collectible-phone", s.requireAuthAPI(http.HandlerFunc(s.handleTransferCollectiblePhoneAPI)))
+	mux.Handle("POST /api/actions/revoke-collectible-phone", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeCollectiblePhoneAPI)))
+	mux.Handle("POST /api/actions/delete-collectible-phone", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteCollectiblePhoneAPI)))
 	mux.Handle("POST /api/actions/transfer-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleTransferCollectibleUsernameAPI)))
 	mux.Handle("POST /api/actions/revoke-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleRevokeCollectibleUsernameAPI)))
 	mux.Handle("POST /api/actions/delete-collectible-username", s.requireAuthAPI(http.HandlerFunc(s.handleDeleteCollectibleUsernameAPI)))
@@ -152,6 +192,44 @@ func (s *server) routes() http.Handler {
 	})
 	mux.HandleFunc("/", s.handleApp)
 	return mux
+}
+
+func (s *server) handleStorageStatsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	stats, err := s.read.StorageStats(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *server) handleDashboardAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	counts, err := s.read.DashboardCounts(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	storage, err := s.read.StorageStats(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	resp := map[string]any{
+		"counts":  counts,
+		"storage": storage,
+	}
+	if s.hostStats != nil {
+		resp["host"] = s.hostStats.Snapshot()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type actorKey struct{}
@@ -334,6 +412,113 @@ func (s *server) handleEmojiAnimationAPI(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (s *server) handleStickerSetsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	rows, err := s.read.ListStickerSets(r.Context(), r.URL.Query().Get("kind"))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rows": rows})
+}
+
+func (s *server) handleStickerSetDocumentsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	setID, err := parseInt64(r.PathValue("id"))
+	if err != nil || setID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid sticker set id")
+		return
+	}
+	ids, err := s.read.StickerSetDocumentIDs(r.Context(), setID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"document_ids": ids})
+}
+
+func (s *server) handleStickerDocumentAnimationAPI(w http.ResponseWriter, r *http.Request) {
+	documentID, err := parseInt64(r.PathValue("id"))
+	if err != nil || documentID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		fmt.Sprintf("%s/v1/stickers/documents/%d/animation", s.cfg.AdminAPIURL, documentID), nil)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AdminAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeAPIError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, domain.MaxStickerMaterialDocumentSize+1))
+	if err != nil || int64(len(raw)) > domain.MaxStickerMaterialDocumentSize {
+		writeAPIError(w, http.StatusBadGateway, "invalid sticker preview response")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		writeAPIError(w, resp.StatusCode, string(raw))
+		return
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (s *server) handleGifCatalogAPI(w http.ResponseWriter, r *http.Request) {
+	s.proxyAdminJSONNoStore(w, r, "/v1/gif-catalog", 1<<20)
+}
+
+func (s *server) handleGifCatalogPreviewAPI(w http.ResponseWriter, r *http.Request) {
+	documentID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || documentID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid document id")
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet,
+		fmt.Sprintf("%s/v1/gif-catalog/documents/%d/preview", s.cfg.AdminAPIURL, documentID), nil)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AdminAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		writeAPIError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, domain.MaxGifCatalogDocumentSize+1))
+	if err != nil || len(raw) > domain.MaxGifCatalogDocumentSize {
+		writeAPIError(w, http.StatusBadGateway, "invalid gif preview response")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		writeAPIError(w, resp.StatusCode, string(raw))
+		return
+	}
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)
@@ -615,6 +800,51 @@ func (s *server) handleAccountDetailAPI(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, detail)
 }
 
+func (s *server) handleAccountAvatarAPI(w http.ResponseWriter, r *http.Request) {
+	s.proxyAvatar(w, r, "accounts")
+}
+
+func (s *server) handleChannelAvatarAPI(w http.ResponseWriter, r *http.Request) {
+	s.proxyAvatar(w, r, "channels")
+}
+
+func (s *server) proxyAvatar(w http.ResponseWriter, r *http.Request, kind string) {
+	id, err := parseInt64(r.PathValue("id"))
+	if err != nil || id <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	apiPath := fmt.Sprintf("/v1/%s/%d/avatar", kind, id)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, s.cfg.AdminAPIURL+apiPath, nil)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.AdminAPIToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil || len(data) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 func (s *server) handleBotsAPI(w http.ResponseWriter, r *http.Request) {
 	if s.read == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
@@ -652,6 +882,36 @@ func (s *server) handleBotsAPI(w http.ResponseWriter, r *http.Request) {
 		"has_more":       hasMore,
 		"next_before_id": nextBeforeID,
 		"listing":        strings.TrimSpace(q) == "",
+	})
+}
+
+func (s *server) handleBroadcastsAPI(w http.ResponseWriter, r *http.Request) {
+	if s.read == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "read store is not configured")
+		return
+	}
+	beforeID, _ := parseInt64(r.URL.Query().Get("before_id"))
+	limit, _ := parseInt(r.URL.Query().Get("limit"))
+	rows, hasMore, err := s.read.ListBroadcasts(r.Context(), beforeID, limit)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	nextBeforeID := "0"
+	if hasMore && len(rows) > 0 {
+		nextBeforeID = strconv.FormatInt(rows[len(rows)-1].ID, 10)
+	}
+	if limit <= 0 {
+		limit = accountListDefaultLimit
+	}
+	if limit > accountListMaxLimit {
+		limit = accountListMaxLimit
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"limit":          limit,
+		"rows":           rows,
+		"has_more":       hasMore,
+		"next_before_id": nextBeforeID,
 	})
 }
 
@@ -697,6 +957,299 @@ func (s *server) handleCreateBotAPI(w http.ResponseWriter, r *http.Request) {
 	writeCommandResultAPI(w, result, err)
 }
 
+type createBroadcastAPIRequest struct {
+	CommandID  string  `json:"command_id"`
+	Reason     string  `json:"reason"`
+	Confirm    bool    `json:"confirm"`
+	Message    string  `json:"message"`
+	TargetMode string  `json:"target_mode"`
+	UserIDs    []int64 `json:"user_ids,omitempty"`
+}
+
+func (s *server) handleCreateBroadcastAPI(w http.ResponseWriter, r *http.Request) {
+	var body createBroadcastAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.CreateBroadcastRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "create-broadcast"),
+		Message:     body.Message,
+		TargetMode:  body.TargetMode,
+		UserIDs:     body.UserIDs,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/broadcasts/create", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setStickerSetArchivedAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	SetID     flexInt64 `json:"set_id"`
+	Archived  bool      `json:"archived"`
+}
+
+func (s *server) handleSetStickerSetArchivedAPI(w http.ResponseWriter, r *http.Request) {
+	var body setStickerSetArchivedAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetStickerSetArchivedRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-sticker-set-archived"),
+		SetID:       body.SetID.Int64(),
+		Archived:    body.Archived,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/set-archived", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setStickerSetSortOrderAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	SetID     flexInt64 `json:"set_id"`
+	SortOrder int       `json:"sort_order"`
+}
+
+func (s *server) handleSetStickerSetSortOrderAPI(w http.ResponseWriter, r *http.Request) {
+	var body setStickerSetSortOrderAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetStickerSetSortOrderRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-sticker-set-sort-order"),
+		SetID:       body.SetID.Int64(),
+		SortOrder:   body.SortOrder,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/set-sort-order", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type renameStickerSetAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	SetID     flexInt64 `json:"set_id"`
+	Title     string    `json:"title"`
+}
+
+func (s *server) handleRenameStickerSetAPI(w http.ResponseWriter, r *http.Request) {
+	var body renameStickerSetAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.RenameStickerSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "rename-sticker-set"),
+		SetID:       body.SetID.Int64(),
+		Title:       body.Title,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/rename", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type deleteStickerSetAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	SetID     flexInt64 `json:"set_id"`
+}
+
+func (s *server) handleDeleteStickerSetAPI(w http.ResponseWriter, r *http.Request) {
+	var body deleteStickerSetAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.DeleteStickerSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "delete-sticker-set"),
+		SetID:       body.SetID.Int64(),
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/delete", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type stickerSetActionMeta struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Title     string `json:"title,omitempty"`
+	ShortName string `json:"short_name,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	SetID     string `json:"set_id,omitempty"`
+	Emoji     string `json:"emoji"`
+	Keywords  string `json:"keywords,omitempty"`
+}
+
+func (s *server) handleCreateStickerSetAPI(w http.ResponseWriter, r *http.Request) {
+	body, header, data, ok := decodeStickerMultipart(w, r, "sticker file is required")
+	if !ok {
+		return
+	}
+	req := admin.CreateStickerSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "create-sticker-set"),
+		Title:       body.Title,
+		ShortName:   body.ShortName,
+		Kind:        body.Kind,
+		Emoji:       body.Emoji,
+		Keywords:    body.Keywords,
+		FileName:    header.Filename,
+	}
+	result, err := s.callAdminMultipart(r.Context(), "/v1/stickers/create", req, header.Filename, data)
+	writeCommandResultAPI(w, result, err)
+}
+
+func (s *server) handleAddStickerToSetAPI(w http.ResponseWriter, r *http.Request) {
+	body, header, data, ok := decodeStickerMultipart(w, r, "sticker file is required")
+	if !ok {
+		return
+	}
+	setID, err := strconv.ParseInt(strings.TrimSpace(body.SetID), 10, 64)
+	if err != nil || setID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid sticker set id")
+		return
+	}
+	req := admin.AddStickerToSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "add-sticker-to-set"),
+		SetID:       setID,
+		Emoji:       body.Emoji,
+		Keywords:    body.Keywords,
+		FileName:    header.Filename,
+	}
+	result, err := s.callAdminMultipart(r.Context(), "/v1/stickers/add", req, header.Filename, data)
+	writeCommandResultAPI(w, result, err)
+}
+
+func decodeStickerMultipart(w http.ResponseWriter, r *http.Request, missingFileMessage string) (stickerSetActionMeta, *multipart.FileHeader, []byte, bool) {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, domain.MaxStickerMaterialDocumentSize+(2<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return stickerSetActionMeta{}, nil, nil, false
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	var body stickerSetActionMeta
+	dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+		return stickerSetActionMeta{}, nil, nil, false
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, missingFileMessage)
+		return stickerSetActionMeta{}, nil, nil, false
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, domain.MaxStickerMaterialDocumentSize+1))
+	if err != nil || len(data) == 0 || int64(len(data)) > domain.MaxStickerMaterialDocumentSize {
+		writeAPIError(w, http.StatusBadRequest, "sticker file is empty or too large")
+		return stickerSetActionMeta{}, nil, nil, false
+	}
+	return body, header, data, true
+}
+
+type removeStickerFromSetAPIRequest struct {
+	CommandID  string    `json:"command_id"`
+	Reason     string    `json:"reason"`
+	Confirm    bool      `json:"confirm"`
+	SetID      flexInt64 `json:"set_id"`
+	DocumentID flexInt64 `json:"document_id"`
+}
+
+func (s *server) handleRemoveStickerFromSetAPI(w http.ResponseWriter, r *http.Request) {
+	var body removeStickerFromSetAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.RemoveStickerFromSetRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "remove-sticker-from-set"),
+		SetID:       body.SetID.Int64(),
+		DocumentID:  body.DocumentID.Int64(),
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/stickers/remove", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type gifCatalogActionMeta struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Title     string `json:"title"`
+}
+
+func (s *server) handleCreateGifCatalogEntryAPI(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, domain.MaxGifCatalogUploadSize+(2<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	var body gifCatalogActionMeta
+	dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "gif file is required")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, domain.MaxGifCatalogUploadSize+1))
+	if err != nil || len(data) == 0 || len(data) > domain.MaxGifCatalogUploadSize {
+		writeAPIError(w, http.StatusBadRequest, "gif file is empty or too large")
+		return
+	}
+	req := admin.CreateGifCatalogEntryRequest{CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "create-gif"), Title: body.Title}
+	result, err := s.callAdminMultipart(r.Context(), "/v1/gif-catalog/create", req, header.Filename, data)
+	writeCommandResultAPI(w, result, err)
+}
+
+type gifCatalogStateAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	ID        int64  `json:"id,string"`
+	Enabled   bool   `json:"enabled,omitempty"`
+	SortOrder int    `json:"sort_order,omitempty"`
+}
+
+func (s *server) handleSetGifCatalogEnabledAPI(w http.ResponseWriter, r *http.Request) {
+	var body gifCatalogStateAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetGifCatalogEnabledRequest{CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-gif-enabled"), ID: body.ID, Enabled: body.Enabled}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gif-catalog/set-enabled", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+func (s *server) handleSetGifCatalogSortOrderAPI(w http.ResponseWriter, r *http.Request) {
+	var body gifCatalogStateAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetGifCatalogSortOrderRequest{CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-gif-sort-order"), ID: body.ID, SortOrder: body.SortOrder}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gif-catalog/set-sort-order", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+func (s *server) handleDeleteGifCatalogEntryAPI(w http.ResponseWriter, r *http.Request) {
+	var body gifCatalogStateAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.DeleteGifCatalogEntryRequest{CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "delete-gif"), ID: body.ID}
+	result, err := s.callAdminAPI(r.Context(), "/v1/gif-catalog/delete", req)
+	writeCommandResultAPI(w, result, err)
+}
+
 type deleteBotAPIRequest struct {
 	CommandID string `json:"command_id"`
 	Reason    string `json:"reason"`
@@ -714,6 +1267,26 @@ func (s *server) handleDeleteBotAPI(w http.ResponseWriter, r *http.Request) {
 		BotUserID:   body.BotUserID,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/bots/delete", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type exportBotTokenAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	BotUserID int64  `json:"bot_user_id"`
+}
+
+func (s *server) handleExportBotTokenAPI(w http.ResponseWriter, r *http.Request) {
+	var body exportBotTokenAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.ExportBotTokenRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "export-bot-token"),
+		BotUserID:   body.BotUserID,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/bots/export-token", req)
 	writeCommandResultAPI(w, result, err)
 }
 
@@ -1076,6 +1649,136 @@ func (s *server) handleSetUsernameAPI(w http.ResponseWriter, r *http.Request) {
 		Username:    body.Username,
 	}
 	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-username", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setProfileAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	UserID    int64  `json:"user_id"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+}
+
+func (s *server) handleSetProfileAPI(w http.ResponseWriter, r *http.Request) {
+	var body setProfileAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetProfileRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-profile"),
+		UserID:      body.UserID,
+		FirstName:   body.FirstName,
+		LastName:    body.LastName,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-profile", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setPhoneAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	UserID    int64  `json:"user_id"`
+	Phone     string `json:"phone"`
+}
+
+func (s *server) handleSetPhoneAPI(w http.ResponseWriter, r *http.Request) {
+	var body setPhoneAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetPhoneRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-phone"),
+		UserID:      body.UserID,
+		Phone:       body.Phone,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-phone", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setLoginEmailAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	UserID    int64  `json:"user_id"`
+	Email     string `json:"email"`
+}
+
+func (s *server) handleSetLoginEmailAPI(w http.ResponseWriter, r *http.Request) {
+	var body setLoginEmailAPIRequest
+	if !decodeAction(w, r, &body) {
+		return
+	}
+	req := admin.SetLoginEmailRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-login-email"),
+		UserID:      body.UserID,
+		Email:       body.Email,
+	}
+	result, err := s.callAdminAPI(r.Context(), "/v1/accounts/set-login-email", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type setAvatarAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	UserID    int64  `json:"user_id,omitempty"`
+	ChannelID int64  `json:"channel_id,omitempty"`
+}
+
+func (s *server) handleSetAccountAvatarAPI(w http.ResponseWriter, r *http.Request) {
+	s.handleSetAvatarAPI(w, r, false)
+}
+
+func (s *server) handleSetChannelAvatarAPI(w http.ResponseWriter, r *http.Request) {
+	s.handleSetAvatarAPI(w, r, true)
+}
+
+func (s *server) handleSetAvatarAPI(w http.ResponseWriter, r *http.Request, channel bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, admin.MaxAccountAvatarBytes+(1<<20))
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid multipart form: "+err.Error())
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	var body setAvatarAPIRequest
+	dec := json.NewDecoder(strings.NewReader(r.FormValue("metadata")))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid metadata: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "avatar file is required")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, admin.MaxAccountAvatarBytes+1))
+	if err != nil || len(data) == 0 || len(data) > admin.MaxAccountAvatarBytes {
+		writeAPIError(w, http.StatusBadRequest, "avatar file is empty or too large")
+		return
+	}
+	if channel {
+		req := admin.SetChannelAvatarRequest{
+			CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-channel-avatar"),
+			ChannelID:   body.ChannelID,
+			FileName:    header.Filename,
+		}
+		result, err := s.callAdminMultipart(r.Context(), "/v1/channels/set-avatar", req, header.Filename, data)
+		writeCommandResultAPI(w, result, err)
+		return
+	}
+	req := admin.SetAccountAvatarRequest{
+		CommandMeta: s.commandMetaFromAPI(r, body.CommandID, body.Reason, body.Confirm, "set-avatar"),
+		UserID:      body.UserID,
+		FileName:    header.Filename,
+	}
+	result, err := s.callAdminMultipart(r.Context(), "/v1/accounts/set-avatar", req, header.Filename, data)
 	writeCommandResultAPI(w, result, err)
 }
 
@@ -1771,6 +2474,106 @@ func (s *server) handleDeleteCollectibleUsernameAPI(w http.ResponseWriter, r *ht
 	writeCommandResultAPI(w, result, err)
 }
 
+type mintCollectiblePhoneAPIRequest struct {
+	CommandID      string                      `json:"command_id"`
+	Reason         string                      `json:"reason"`
+	Confirm        bool                        `json:"confirm"`
+	Phone          string                      `json:"phone"`
+	Tier           domain.CollectiblePhoneTier `json:"tier"`
+	OwnerUserID    flexInt64                   `json:"owner_user_id"`
+	Currency       string                      `json:"currency"`
+	Amount         flexInt64                   `json:"amount"`
+	CryptoCurrency string                      `json:"crypto_currency"`
+	CryptoAmount   flexInt64                   `json:"crypto_amount"`
+	URL            string                      `json:"url"`
+	PurchaseDate   flexUnix                    `json:"purchase_date"`
+}
+
+func (s *server) handleMintCollectiblePhoneAPI(w http.ResponseWriter, r *http.Request) {
+	var b mintCollectiblePhoneAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.MintCollectiblePhoneRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "mint-collectible-phone"), Phone: b.Phone, Tier: b.Tier, OwnerUserID: b.OwnerUserID.Int64(), Currency: b.Currency, Amount: b.Amount.Int64(), CryptoCurrency: b.CryptoCurrency, CryptoAmount: b.CryptoAmount.Int64(), URL: b.URL, PurchaseDate: b.PurchaseDate.Unix()}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/mint", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type updateCollectiblePhonePriceAPIRequest struct {
+	CommandID      string    `json:"command_id"`
+	Reason         string    `json:"reason"`
+	Confirm        bool      `json:"confirm"`
+	Phone          string    `json:"phone"`
+	Currency       string    `json:"currency"`
+	Amount         flexInt64 `json:"amount"`
+	CryptoCurrency string    `json:"crypto_currency"`
+	CryptoAmount   flexInt64 `json:"crypto_amount"`
+}
+
+func (s *server) handleUpdateCollectiblePhonePriceAPI(w http.ResponseWriter, r *http.Request) {
+	var b updateCollectiblePhonePriceAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.UpdateCollectiblePhonePriceRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "update-collectible-phone-price"),
+		Phone: b.Phone, Currency: b.Currency, Amount: b.Amount.Int64(), CryptoCurrency: b.CryptoCurrency, CryptoAmount: b.CryptoAmount.Int64()}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/update-price", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type transferCollectiblePhoneAPIRequest struct {
+	CommandID string    `json:"command_id"`
+	Reason    string    `json:"reason"`
+	Confirm   bool      `json:"confirm"`
+	Phone     string    `json:"phone"`
+	ToUserID  flexInt64 `json:"to_user_id"`
+}
+
+func (s *server) handleTransferCollectiblePhoneAPI(w http.ResponseWriter, r *http.Request) {
+	var b transferCollectiblePhoneAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.TransferCollectiblePhoneRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "transfer-collectible-phone"), Phone: b.Phone, ToUserID: b.ToUserID.Int64()}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/transfer", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type revokeCollectiblePhoneAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Phone     string `json:"phone"`
+	Burn      bool   `json:"burn"`
+}
+
+func (s *server) handleRevokeCollectiblePhoneAPI(w http.ResponseWriter, r *http.Request) {
+	var b revokeCollectiblePhoneAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.RevokeCollectiblePhoneRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "revoke-collectible-phone"), Phone: b.Phone, Burn: b.Burn}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/revoke", req)
+	writeCommandResultAPI(w, result, err)
+}
+
+type deleteCollectiblePhoneAPIRequest struct {
+	CommandID string `json:"command_id"`
+	Reason    string `json:"reason"`
+	Confirm   bool   `json:"confirm"`
+	Phone     string `json:"phone"`
+}
+
+func (s *server) handleDeleteCollectiblePhoneAPI(w http.ResponseWriter, r *http.Request) {
+	var b deleteCollectiblePhoneAPIRequest
+	if !decodeAction(w, r, &b) {
+		return
+	}
+	req := admin.DeleteCollectiblePhoneRequest{CommandMeta: s.commandMetaFromAPI(r, b.CommandID, b.Reason, b.Confirm, "delete-collectible-phone"), Phone: b.Phone}
+	result, err := s.callAdminAPI(r.Context(), "/v1/collectible-phones/delete", req)
+	writeCommandResultAPI(w, result, err)
+}
+
 type recomputeAccountRatingAPIRequest struct {
 	CommandID string    `json:"command_id"`
 	Reason    string    `json:"reason"`
@@ -1885,6 +2688,26 @@ func (s *server) handleCollectibleUsernameDetailAPI(w http.ResponseWriter, r *ht
 		"asset":     detail.Asset,
 		"transfers": detail.Transfers,
 	})
+}
+
+func (s *server) handleCollectiblePhonesAPI(w http.ResponseWriter, r *http.Request) {
+	suffix := "/v1/collectible-phones"
+	if r.URL.RawQuery != "" {
+		suffix += "?" + r.URL.RawQuery
+	}
+	s.proxyAdminJSONNoStore(w, r, suffix, 2<<20)
+}
+func (s *server) handleCollectiblePhoneDetailAPI(w http.ResponseWriter, r *http.Request) {
+	id, err := parseInt64(r.PathValue("id"))
+	if err != nil || id <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	suffix := fmt.Sprintf("/v1/collectible-phones/%d", id)
+	if r.URL.RawQuery != "" {
+		suffix += "?" + r.URL.RawQuery
+	}
+	s.proxyAdminJSONNoStore(w, r, suffix, 2<<20)
 }
 
 // handleAccountRatingsAPI pages the leaderboard. next_before_id is the last

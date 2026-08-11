@@ -44,9 +44,14 @@ func TestHelpGetPremiumPromoReturnsSeededCatalogAcrossExactProfiles(t *testing.T
 		PremiumUntil: int(now.Add(48 * time.Hour).Unix()),
 	}
 	catalog := premiumPromoRPCTestCatalog()
+	premium := &fakePremiumRPCService{plans: []domain.PremiumPlan{{
+		Months: 3, DurationDays: 90, AmountStars: 750, Enabled: true,
+		SortOrder: 10, Label: "3 months", Version: 1,
+	}}}
 	r := New(Config{}, Deps{
 		Users:        staticUsersService{user: user},
 		PremiumPromo: staticPremiumPromoService{catalog: catalog, found: true},
+		Premium:      premium,
 	}, zaptest.NewLogger(t), fixedClock{now: now})
 	ctx := WithUserID(context.Background(), userID)
 
@@ -74,8 +79,14 @@ func TestHelpGetPremiumPromoReturnsSeededCatalogAcrossExactProfiles(t *testing.T
 			if !ok || thumb.Type != "m" || thumb.Size != 1234 {
 				t.Fatalf("thumb = %#v", doc.Thumbs[0])
 			}
+			// premiumSubscriptionOption.currency is ISO 4217 fiat, not XTR.
+			// Stars-only deployments advertise @premiumbot through app config
+			// and keep this vector empty so clients do not render broken glyphs.
 			if len(promo.PeriodOptions) != 0 {
-				t.Fatalf("period options = %+v, want no dead purchase entry", promo.PeriodOptions)
+				t.Fatalf("period options = %+v, want no invalid XTR fiat entries", promo.PeriodOptions)
+			}
+			if len(promo.Users) != 1 {
+				t.Fatalf("promo users = %d, want @premiumbot", len(promo.Users))
 			}
 			if !strings.Contains(promo.StatusText, "2026-07-28") {
 				t.Fatalf("status text = %q, want viewer expiry", promo.StatusText)

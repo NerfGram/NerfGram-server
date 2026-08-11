@@ -1,49 +1,74 @@
-import { ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
 import { Alert, Badge, EmptyRow, Metric, PageFrame, QueryPanel, UsernameCell } from "../components/ui";
 import { ScamFakeBadges } from "../components/flags";
+import { Avatar } from "../components/Avatar";
 import { useI18n } from "../i18n";
 import { displayName, displayPhone, formatDate, formatUnix } from "../lib/format";
 import { accountMetrics } from "../lib/metrics";
 import type { Navigate } from "../routing";
 import type { AccountListResponse } from "../types";
 
+type AccountCursor = { beforeID: number; beforeActiveUS: number };
+
+const firstAccountPage: AccountCursor = { beforeID: 0, beforeActiveUS: 0 };
+
 export function AccountsPage({ navigate }: { navigate: Navigate }) {
   const { t } = useI18n();
   const [q, setQ] = useState("");
   const [limit, setLimit] = useState("50");
   const [data, setData] = useState<AccountListResponse | null>(null);
-  const [cursor, setCursor] = useState({ beforeID: 0, beforeActiveUS: 0 });
+  const [filters, setFilters] = useState({ q: "", limit: "50" });
+  const [cursor, setCursor] = useState<AccountCursor>(firstAccountPage);
+  const [cursorHistory, setCursorHistory] = useState<AccountCursor[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  async function load(next = false) {
+  async function loadPage(target: AccountCursor, requestedFilters = filters, resetHistory = false) {
     setBusy(true);
     setError("");
-    const params = new URLSearchParams({ limit });
-    if (q.trim()) {
-      params.set("q", q.trim());
-    } else if (next) {
-      params.set("before_id", String(cursor.beforeID));
-      params.set("before_active_us", String(cursor.beforeActiveUS));
+    const params = new URLSearchParams({ limit: requestedFilters.limit });
+    if (requestedFilters.q) {
+      params.set("q", requestedFilters.q);
+    } else if (target.beforeID > 0) {
+      params.set("before_id", String(target.beforeID));
+      params.set("before_active_us", String(target.beforeActiveUS));
     }
     try {
       const result = await api.accounts(params);
       setData(result);
-      setCursor({
-        beforeID: result.next_before_id,
-        beforeActiveUS: result.next_before_active_us
-      });
+      setFilters(requestedFilters);
+      setCursor(target);
+      if (resetHistory) setCursorHistory([]);
+      return true;
     } catch (err) {
       setError(errorMessage(err));
+      return false;
     } finally {
       setBusy(false);
     }
   }
 
+  async function search() {
+    const requestedFilters = { q: q.trim(), limit };
+    await loadPage(firstAccountPage, requestedFilters, true);
+  }
+
+  async function nextPage() {
+    if (!data?.listing || !data.has_more) return;
+    const target = { beforeID: data.next_before_id, beforeActiveUS: data.next_before_active_us };
+    if (await loadPage(target)) setCursorHistory((history) => [...history, cursor]);
+  }
+
+  async function previousPage() {
+    const target = cursorHistory[cursorHistory.length - 1];
+    if (!target) return;
+    if (await loadPage(target)) setCursorHistory((history) => history.slice(0, -1));
+  }
+
   useEffect(() => {
-    void load(false);
+    void loadPage(firstAccountPage, { q: "", limit: "50" }, true);
   }, []);
 
   const metrics = accountMetrics(data?.rows ?? []);
@@ -53,7 +78,7 @@ export function AccountsPage({ navigate }: { navigate: Navigate }) {
       title={t("account.pageTitle")}
       eyebrow={data?.listing === false ? t("account.queryResults") : t("account.recentActive")}
       actions={
-        <button className="btn" type="button" onClick={() => load(false)} disabled={busy}>
+        <button className="btn" type="button" onClick={() => loadPage(cursor)} disabled={busy}>
           <RefreshCw size={15} /> {t("common.refresh")}
         </button>
       }
@@ -66,7 +91,7 @@ export function AccountsPage({ navigate }: { navigate: Navigate }) {
         <Metric label={t("account.frozen")} value={String(metrics.frozen)} tone={metrics.frozen > 0 ? "danger" : "neutral"} />
       </div>
       <QueryPanel>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void load(false); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void search(); }}>
           <label className="searchbox">
             <Search size={15} />
             <input value={q} onChange={(event) => setQ(event.target.value)} placeholder={t("account.searchPlaceholder")} />
@@ -78,9 +103,14 @@ export function AccountsPage({ navigate }: { navigate: Navigate }) {
           <button className="btn primary icon-text" type="submit" disabled={busy}>
             {busy ? <Loader2 size={15} className="spin" /> : <Search size={15} />} {t("common.search")}
           </button>
+          {data?.listing && cursorHistory.length > 0 && (
+            <button className="btn icon-text" type="button" onClick={() => previousPage()} disabled={busy}>
+              <ChevronLeft size={15} /> {t("messages.previousPage")}
+            </button>
+          )}
           {data?.listing && data.has_more && (
-            <button className="btn icon-text" type="button" onClick={() => load(true)} disabled={busy}>
-              <ChevronRight size={15} /> {t("common.nextPage")}
+            <button className="btn icon-text" type="button" onClick={() => nextPage()} disabled={busy}>
+              <ChevronRight size={15} /> {t("messages.nextPage")}
             </button>
           )}
         </form>
@@ -108,7 +138,7 @@ export function AccountsPage({ navigate }: { navigate: Navigate }) {
                 <td className="mono">{row.ID}</td>
                 <td>{displayPhone(row.Phone)}</td>
                 <td><UsernameCell username={row.Username} collectibles={row.Collectibles} /></td>
-                <td>{displayName(row)}</td>
+                <td><span className="table-identity"><Avatar id={row.ID} label={displayName(row)} />{displayName(row)}</span></td>
                 <td>{row.DeviceCount}</td>
                 <td>{formatDate(row.LastActiveAt)}</td>
                 <td>{row.PremiumUntil > 0 ? <Badge tone="good">{t("account.premium")} {formatUnix(row.PremiumUntil)}</Badge> : <Badge>{t("common.none")}</Badge>}</td>

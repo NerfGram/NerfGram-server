@@ -13,7 +13,10 @@ import (
 )
 
 // ErrNotAuthorized 表示当前 auth_key 尚未登录。
-var ErrNotAuthorized = errors.New("not authorized")
+var (
+	ErrNotAuthorized       = errors.New("not authorized")
+	ErrSystemUserImmutable = errors.New("system user identity is immutable")
+)
 
 // ProfilePhotoProvider 批量返回用户当前头像（用于把 PhotoID/DCID/Stripped 富化到 domain.User）。
 type ProfilePhotoProvider = userprojection.ProfilePhotoProvider
@@ -26,6 +29,7 @@ type Service struct {
 	photos      ProfilePhotoProvider
 	privacy     userprojection.PrivacyEvaluator
 	freezes     userprojection.AccountFreezeProvider
+	phones      store.CollectiblePhoneStore
 	projector   *userprojection.Projector
 	profileTabs profileTabStore
 }
@@ -74,6 +78,12 @@ func WithProfileTabStore(p profileTabStore) Option {
 	return func(s *Service) { s.profileTabs = p }
 }
 
+// WithCollectiblePhoneStore enables +888 identity aliases and their
+// viewer-specific phone projection without modifying the authentication phone.
+func WithCollectiblePhoneStore(p store.CollectiblePhoneStore) Option {
+	return func(s *Service) { s.phones = p }
+}
+
 const (
 	minUsernameLen      = 5
 	maxUsernameLen      = 32
@@ -97,6 +107,7 @@ func NewService(users store.UserStore, opts ...Option) *Service {
 		userprojection.WithPhotoProvider(s.photos),
 		userprojection.WithPrivacyEvaluator(s.privacy),
 		userprojection.WithAccountFreezeProvider(s.freezes),
+		userprojection.WithCollectiblePhoneProvider(s.phones),
 	)
 	return s
 }
@@ -302,6 +313,37 @@ func (s *Service) UpdateProfile(ctx context.Context, userID int64, update domain
 	return u, nil
 }
 
+// SetPhone force-sets the authoritative phone for the trusted admin path. It
+// remains a non-PTS profile mutation because updateUserPhone and updateUser
+// carry no pts/pts_count in every admitted exact layer.
+func (s *Service) SetPhone(ctx context.Context, userID int64, phone string) (domain.User, error) {
+	self, err := s.loadSelf(ctx, userID)
+	if err != nil {
+		return domain.User{}, err
+	}
+	if self.Bot || domain.IsSystemUserID(self.ID) {
+		return domain.User{}, domain.ErrPhoneChangeForbidden
+	}
+	phone = domain.NormalizePhone(strings.TrimSpace(phone))
+	if !domain.ValidPhone(phone) {
+		return domain.User{}, domain.ErrPhoneNumberInvalid
+	}
+	if phone == self.Phone {
+		return s.projectOne(ctx, self.ID, self)
+	}
+	if existing, found, err := s.users.ByPhone(ctx, phone); err != nil {
+		return domain.User{}, err
+	} else if found && existing.ID != self.ID {
+		return domain.User{}, domain.ErrPhoneNumberOccupied
+	}
+	u, err := s.users.UpdatePhone(ctx, self.ID, phone)
+	if err != nil {
+		return domain.User{}, err
+	}
+	s.refreshCachedUsers(ctx, u)
+	return s.projectOne(ctx, self.ID, u)
+}
+
 // UpdateLastSeen records the latest visible account activity time.
 func (s *Service) UpdateLastSeen(ctx context.Context, userID int64, lastSeenAt int) error {
 	if userID == 0 {
@@ -368,6 +410,9 @@ func (s *Service) GrantPremium(ctx context.Context, userID int64, months int) (d
 func (s *Service) SetVerified(ctx context.Context, userID int64, verified bool) (domain.User, error) {
 	if userID == 0 {
 		return domain.User{}, ErrNotAuthorized
+	}
+	if domain.IsSystemUserID(userID) && !verified {
+		return domain.User{}, ErrSystemUserImmutable
 	}
 	u, found, err := s.users.ByID(ctx, userID)
 	if err != nil {
@@ -603,11 +648,12 @@ func (s *Service) ResolveUsername(ctx context.Context, currentUserID int64, user
 		return domain.User{}, false, err
 	}
 	username = normalizeUsername(username)
+	_, reservedSystemUsername := domain.SystemUserByUsername(username)
 	// Resolution covers both the editable username slot (5..32) and
 	// Fragment-style collectible usernames (4..32). Keep the stricter
 	// validUsername check on create/update paths; only lookup accepts the
 	// collectible lower bound.
-	if !domain.ValidCollectibleUsername(username) {
+	if !reservedSystemUsername && !domain.ValidCollectibleUsername(username) {
 		return domain.User{}, false, domain.ErrUsernameInvalid
 	}
 	u, found, err := s.users.ByUsername(ctx, username)
@@ -634,11 +680,24 @@ func (s *Service) ResolvePhone(ctx context.Context, currentUserID int64, phone s
 		return domain.User{}, false, domain.ErrPhoneNotOccupied
 	}
 	u, found, err := s.users.ByPhone(ctx, phone)
+	collectibleExclusive := false
+	if err != nil {
+		return u, false, err
+	}
+	if !found && s.phones != nil && domain.ValidCollectiblePhone(phone) {
+		asset, assetErr := s.phones.CollectiblePhone(ctx, phone)
+		if assetErr == nil && asset.Owned() {
+			u, found, err = s.loadBaseUserByID(ctx, asset.OwnerUserID)
+			collectibleExclusive = asset.AlwaysVisible()
+		} else if assetErr != nil && !errors.Is(assetErr, domain.ErrCollectiblePhoneNotFound) {
+			return domain.User{}, false, assetErr
+		}
+	}
 	if err != nil || !found {
 		return u, found, err
 	}
 	s.putCachedUsers(ctx, u)
-	if s.privacy != nil && u.ID != currentUserID {
+	if s.privacy != nil && u.ID != currentUserID && !collectibleExclusive {
 		allowed := false
 		var err error
 		if batch, ok := s.privacy.(userprojection.BatchPrivacyEvaluator); ok {
@@ -762,6 +821,15 @@ func (s *Service) dropCachedUsers(ctx context.Context, userIDs ...int64) {
 		return
 	}
 	_ = s.cache.Delete(ctx, userIDs)
+}
+
+// InvalidateUsers drops viewer-independent user snapshots after an aggregate
+// transaction updates users without passing through this service.
+func (s *Service) InvalidateUsers(ctx context.Context, userIDs ...int64) {
+	if s == nil {
+		return
+	}
+	s.dropCachedUsers(ctx, userIDs...)
 }
 
 func uniqueUserIDs(ids []int64, limit int) []int64 {

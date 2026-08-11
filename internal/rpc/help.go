@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/iamxvbaba/td/tg"
@@ -9,8 +10,8 @@ import (
 	"github.com/iamxvbaba/td/tlprofile"
 	"telesrv/internal/branding"
 	androidcompat "telesrv/internal/compat/android"
-	ioscompat "telesrv/internal/compat/ios"
 	"telesrv/internal/compat/tdesktop"
+	"telesrv/internal/domain"
 )
 
 // registerHelp 注册 help.* RPC handler（DC 配置、最近 DC）。
@@ -26,20 +27,13 @@ func (r *Router) registerHelp(d *tlprofile.Dispatcher) {
 		}, nil
 	})
 	registerRPC[*tg.HelpGetInviteTextRequest](d, tlprofile.SemanticMethodHelpGetInviteText, func(ctx context.Context, layerRequest *tg.HelpGetInviteTextRequest) (any, error) {
-		return &tg.HelpInviteText{Message: "Join me on " + branding.ProductName + "."}, nil
+		return &tg.HelpInviteText{Message: "Join me on " + branding.ProductName() + "."}, nil
 	})
 	registerRPC[*tg.HelpSaveAppLogRequest](d, tlprofile.SemanticMethodHelpSaveAppLog, func(ctx context.Context, _ *tg.HelpSaveAppLogRequest) (any, error) {
 		return r.onHelpSaveAppLog(ctx)
 	})
 	registerRPC[*tg.HelpGetAppUpdateRequest](d, tlprofile.SemanticMethodHelpGetAppUpdate, func(ctx context.Context, layerRequest *tg.HelpGetAppUpdateRequest) (any, error) {
-		source := layerRequest.
-			Source
-		_ = source
-
-		if _, _, err := r.currentUserID(ctx); err != nil {
-			return nil, internalErr()
-		}
-		return ioscompat.NoAppUpdate(), nil
+		return r.onHelpGetAppUpdate(ctx, layerRequest.Source)
 	})
 	registerRPC[*tg.HelpGetAppConfigRequest](d, tlprofile.SemanticMethodHelpGetAppConfig, func(ctx context.Context, layerRequest *tg.HelpGetAppConfigRequest) (any, error) {
 		hash := layerRequest.
@@ -137,7 +131,7 @@ func (r *Router) onHelpSaveAppLog(ctx context.Context) (bool, error) {
 }
 
 func (r *Router) onHelpGetConfig(ctx context.Context) (*tg.Config, error) {
-	config := tdesktop.BuildConfig(r.cfg.DC, r.cfg.IP, r.cfg.Port, r.clock.Now(), r.cfg.PublicBaseURL)
+	config := tdesktop.BuildConfig(r.cfg.DC, r.cfg.IP, r.cfg.Port, r.clock.Now(), r.cfg.PublicBaseURL, r.cfg.UpdatePublicURL)
 	userID, authorized, err := r.currentUserID(ctx)
 	if err != nil {
 		return nil, internalErr()
@@ -180,13 +174,12 @@ func (r *Router) onHelpDismissSuggestion(ctx context.Context, req *tg.HelpDismis
 	return androidcompat.DismissSuggestion(req.Suggestion), nil
 }
 
-// onHelpGetPremiumPromo returns the viewer-specific Premium status plus the
-// immutable, startup-seeded video catalog. Period options intentionally remain
-// empty: telesrv has no subscription purchase backend and must not advertise
-// dead payment URLs. All six TL fields are mandatory.
+// onHelpGetPremiumPromo returns the viewer-specific Premium status, the
+// immutable startup-seeded video catalog, and the configured Stars storefront
+// bot. All six TL fields are mandatory.
 func (r *Router) onHelpGetPremiumPromo(ctx context.Context) (*tg.HelpPremiumPromo, error) {
 	promo := &tg.HelpPremiumPromo{
-		StatusText:     branding.PremiumName + " is not active on this account.",
+		StatusText:     branding.PremiumName() + " is not active on this account.",
 		StatusEntities: []tg.MessageEntityClass{},
 		VideoSections:  []string{},
 		Videos:         []tg.DocumentClass{},
@@ -215,7 +208,24 @@ func (r *Router) onHelpGetPremiumPromo(ctx context.Context) (*tg.HelpPremiumProm
 	}
 	if u.PremiumActiveAt(r.clock.Now().Unix()) {
 		until := time.Unix(int64(u.PremiumUntil), 0)
-		promo.StatusText = branding.PremiumName + " is active until " + until.Format("2006-01-02") + "."
+		promo.StatusText = branding.PremiumName() + " is active until " + until.Format("2006-01-02") + "."
+	}
+	if r.deps.Premium != nil {
+		username := strings.TrimPrefix(r.deps.Premium.BotUsername(), "@")
+		// premiumSubscriptionOption.currency is an ISO 4217 fiat currency. XTR
+		// belongs to invoice/payment forms and is not valid here; advertising it
+		// made official clients render duplicate Star glyphs and missing-symbol
+		// boxes. This deployment is Stars-only, so the promo page deliberately
+		// leaves period_options empty and follows the documented
+		// premium_bot_username flow. The bot renders the live Stars catalog.
+		botID := r.deps.Premium.BotUserID()
+		botUsers := r.domainUsersForIDs(ctx, userID, []int64{botID})
+		if len(botUsers) == 0 && botID == domain.PremiumBotConfiguredUserID() {
+			bot := domain.PremiumBotUser()
+			bot.Username = username
+			botUsers = []domain.User{bot}
+		}
+		promo.Users = tgUsersForViewer(userID, botUsers)
 	}
 	if r.deps.PremiumPromo != nil {
 		catalog, found, err := r.deps.PremiumPromo.PremiumPromo(ctx)

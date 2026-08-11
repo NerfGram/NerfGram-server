@@ -31,7 +31,18 @@ type captureDialogs struct {
 		peer         domain.Peer
 		topMessageID int
 	}
+	invalidatedDialogs []struct {
+		userID int64
+		peer   domain.Peer
+	}
 	reorderNoChange bool
+}
+
+func (s *captureDialogs) InvalidateDialog(userID int64, peer domain.Peer) {
+	s.invalidatedDialogs = append(s.invalidatedDialogs, struct {
+		userID int64
+		peer   domain.Peer
+	}{userID: userID, peer: peer})
 }
 
 func (s *captureDialogs) GetDialogsHash(_ context.Context, _ int64, filter domain.DialogFilter) (domain.DialogHashCheck, error) {

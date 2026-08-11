@@ -484,7 +484,7 @@ SELECT u.id, u.gift_id, u.collectible_revision_id, u.source_saved_gift_id, u.tit
        u.offer_min_stars, u.craft_chance_permille, u.last_sale_date,
        u.last_sale_currency, u.last_sale_amount,
        r.issued, r.supply_total, sg.from_user_id, u.original_owner_peer_type, u.original_owner_peer_id,
-       sg.gift_date, sg.message, sg.name_hidden,
+	       sg.gift_date, sg.message, sg.message_entities::text, sg.name_hidden,
        m.id, m.name, m.rarity_kind, COALESCE(m.rarity_permille,0), m.crafted, md.id, md.access_hash, md.file_reference, md.date,
        md.mime_type, md.size, md.dc_id, md.attributes::text, md.thumbs::text,
        p.id, p.name, p.rarity_kind, COALESCE(p.rarity_permille,0), pd.id, pd.access_hash, pd.file_reference, pd.date,
@@ -513,6 +513,7 @@ func scanUniqueStarGift(row rowScanner) (domain.UniqueStarGift, error) {
 	unique.Model.Document = &domain.Document{}
 	unique.Pattern.Document = &domain.Document{}
 	var modelAttrs, modelThumbs, patternAttrs, patternThumbs string
+	var originalMessageEntitiesJSON string
 	if err := row.Scan(&unique.ID, &unique.GiftID, &unique.CollectibleRevisionID, &unique.SourceSavedGiftID,
 		&unique.Title, &unique.Slug, &unique.Num, &ownerType, &unique.Owner.ID, &unique.KeepOriginalDetails,
 		&unique.CreatedAt, &unique.RequirePremium, &unique.ResaleTonOnly, &unique.ThemeAvailable,
@@ -524,7 +525,7 @@ func scanUniqueStarGift(row rowScanner) (domain.UniqueStarGift, error) {
 		&lastSaleCurrency, &lastSaleAmount,
 		&unique.AvailabilityIssued, &unique.AvailabilityTotal,
 		&unique.OriginalFromUserID, &originalOwnerType, &unique.OriginalOwner.ID, &unique.OriginalDate,
-		&unique.OriginalMessage, &unique.OriginalNameHidden,
+		&unique.OriginalMessage, &originalMessageEntitiesJSON, &unique.OriginalNameHidden,
 		&unique.Model.ID, &unique.Model.Name, &unique.Model.RarityKind, &unique.Model.RarityPermille, &unique.Model.Crafted,
 		&unique.Model.Document.ID, &unique.Model.Document.AccessHash, &unique.Model.Document.FileReference,
 		&unique.Model.Document.Date, &unique.Model.Document.MimeType, &unique.Model.Document.Size,
@@ -543,6 +544,11 @@ func scanUniqueStarGift(row rowScanner) (domain.UniqueStarGift, error) {
 	unique.ReleasedBy.Type = domain.PeerType(releasedByType)
 	unique.ThemePeer.Type = domain.PeerType(themePeerType)
 	unique.Host.Type = domain.PeerType(hostPeerType)
+	entities, err := decodeMessageEntities(originalMessageEntitiesJSON)
+	if err != nil {
+		return domain.UniqueStarGift{}, fmt.Errorf("decode unique star gift original message entities: %w", err)
+	}
+	unique.OriginalMessageEntities = entities
 	if listingCurrency != "" && listingAmount > 0 {
 		unique.ResellAmount = &domain.StarGiftAmount{Currency: domain.StarGiftCurrency(listingCurrency), Amount: listingAmount}
 	}
@@ -552,7 +558,6 @@ func scanUniqueStarGift(row rowScanner) (domain.UniqueStarGift, error) {
 	unique.Model.CollectibleRevisionID = unique.CollectibleRevisionID
 	unique.Pattern.CollectibleRevisionID = unique.CollectibleRevisionID
 	unique.Backdrop.CollectibleRevisionID = unique.CollectibleRevisionID
-	var err error
 	if unique.Model.Document.Attributes, err = decodeDocumentAttributes(modelAttrs); err != nil {
 		return domain.UniqueStarGift{}, err
 	}

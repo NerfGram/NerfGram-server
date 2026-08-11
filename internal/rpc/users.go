@@ -379,17 +379,21 @@ func (r *Router) buildUserFullProjection(ctx context.Context, currentUserID int6
 			full.SetStargiftsCount(n)
 		}
 	}
-	// 屏蔽 premium 礼物赠送：telesrv 未实现 payments.getPremiumGiftCodeOptions，
-	// DrKLO GiftSheet 对个人送礼时总会渲染一个「Gift Premium」区段（fillItems:918），
-	// premiumTiers 永远空 → 卡死成三个 flicker 占位骨架。设 disallow_premium_gifts=true
-	// 会让该区段整体隐藏（GiftSheet:918 gate），而 star gift 礼物墙不受影响。
-	// 仅对「他人视角」下发：送礼给自己时该区段本就被 !self 排除（无占位），故 self 投影
-	// 保持干净，避免用户自己的礼物隐私设置里「接收 premium 礼物」被显示为关闭。
-	// 务必只设这一个 flag——四个 disallow 全置会触发 GiftSheet:788 整个送礼弹窗自动 dismiss。
-	if u.ID != currentUserID {
-		var disallow tg.DisallowedGiftsSettings
-		disallow.SetDisallowPremiumGifts(true)
-		full.SetDisallowedGifts(disallow)
+	if svc, ok := r.accountSettingsSvc(); ok {
+		settings, err := svc.GetAccountSettings(ctx, u.ID)
+		if err != nil {
+			return tg.UserFull{}, internalErr()
+		}
+		gifts := settings.GlobalPrivacy.DisallowedGifts
+		if !gifts.Zero() {
+			full.SetDisallowedGifts(tg.DisallowedGiftsSettings{
+				DisallowUnlimitedStargifts:    gifts.UnlimitedStargifts,
+				DisallowLimitedStargifts:      gifts.LimitedStargifts,
+				DisallowUniqueStargifts:       gifts.UniqueStargifts,
+				DisallowPremiumGifts:          gifts.PremiumGifts,
+				DisallowStargiftsFromChannels: gifts.StargiftsFromChannel,
+			})
+		}
 	}
 	// 生日（account.updateBirthday）：落 userFull.birthday，按 PrivacyKeyBirthday 对他人裁剪，
 	// 本人恒可见。

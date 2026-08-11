@@ -194,6 +194,23 @@ func TestTGStarsTransactionsPaidMessage(t *testing.T) {
 }
 
 // deps.Stars==nil 兜底：返回合法的空 starsStatus（余额 0），不崩。
+func TestTGStarsTransactionsDoesNotPromiseMissingUniqueGiftPayload(t *testing.T) {
+	out := tgStarsTransactions([]domain.StarsTransaction{{
+		ID: 2, UserID: 42, Peer: domain.Peer{Type: domain.PeerTypeUser, ID: 50},
+		Amount: -25, Date: 1700002003, Reason: domain.StarsReasonGiftUpgrade,
+		Title: "Star gift upgrade",
+	}})
+	if len(out) != 1 {
+		t.Fatalf("gift-upgrade transactions = %d, want 1", len(out))
+	}
+	if out[0].StargiftUpgrade {
+		t.Fatal("stargift_upgrade advertised without the required stargift payload")
+	}
+	if out[0].Title != "Star gift upgrade" {
+		t.Fatalf("gift-upgrade title = %q", out[0].Title)
+	}
+}
+
 func TestOnPaymentsGetStarsStatusNilDeps(t *testing.T) {
 	r := New(Config{}, Deps{}, zaptest.NewLogger(t), clock.System)
 	ctx := WithUserID(context.Background(), 1000000001)

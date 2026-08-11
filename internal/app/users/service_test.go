@@ -436,6 +436,9 @@ func TestServiceSetVerifiedRefreshesBaseCache(t *testing.T) {
 	if cleared.Verified {
 		t.Fatalf("cleared verified = true, want false")
 	}
+	if _, err := svc.SetVerified(ctx, domain.PremiumBotConfiguredUserID(), false); !errors.Is(err, ErrSystemUserImmutable) {
+		t.Fatalf("clear Premium bot verified err=%v, want ErrSystemUserImmutable", err)
+	}
 }
 
 func TestServiceRefreshesBaseCacheAfterColorUpdate(t *testing.T) {

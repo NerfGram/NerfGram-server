@@ -1,20 +1,28 @@
-import { ArrowLeft, BadgeCheck, Trash2 } from "lucide-react";
+import { ArrowLeft, BadgeCheck, ImagePlus, KeyRound, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
 import { ActionButton } from "../components/ActionButton";
+import { Avatar } from "../components/Avatar";
+import { AvatarModal } from "../components/AvatarModal";
+import { CopyBotTokenModal } from "../components/CopyBotTokenModal";
 import { Alert, AuditTable, Badge, LoadingSurface, PageFrame, SectionHead, SplitLayout, Summary } from "../components/ui";
 import { ScamFakeActions, ScamFakeBadges } from "../components/flags";
-import { ColorAction, EmojiStatusAction, UsernameAction } from "../components/attributes";
+import { ColorAction, EmojiStatusAction, ProfileAction, UsernameAction } from "../components/attributes";
 import { useI18n } from "../i18n";
 import { displayUsername, formatDate } from "../lib/format";
 import type { Navigate } from "../routing";
 import type { BotDetail } from "../types";
+import { permissionBotTokenRead, useCan } from "../permissions";
 
 export function BotDetailPage({ id, navigate }: { id: number; navigate: Navigate }) {
   const { t } = useI18n();
   const [detail, setDetail] = useState<BotDetail | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [avatarOpen, setAvatarOpen] = useState(false);
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [avatarRefresh, setAvatarRefresh] = useState(0);
+  const canReadToken = useCan(permissionBotTokenRead);
 
   async function load() {
     setBusy(true);
@@ -40,6 +48,7 @@ export function BotDetailPage({ id, navigate }: { id: number; navigate: Navigate
   }
 
   const bot = detail.Bot;
+  const botName = `${bot.FirstName} ${bot.LastName}`.trim();
   return (
     <PageFrame
       title={t("bots.detailTitle", { id: bot.ID })}
@@ -50,9 +59,12 @@ export function BotDetailPage({ id, navigate }: { id: number; navigate: Navigate
         main={
           <div className="stacked-sections">
             <section className="entity-head">
-              <div>
-                <div className="entity-title">{bot.FirstName || t("bots.unnamed")}</div>
+              <div className="entity-identity">
+                <Avatar id={bot.ID} label={botName || bot.Username} size={64} refreshKey={avatarRefresh} />
+                <div>
+                <div className="entity-title">{botName || t("bots.unnamed")}</div>
                 <div className="entity-subtitle">{displayUsername(bot.Username) || t("account.noUsername")}</div>
+                </div>
               </div>
               <div className="entity-badges">
                 <Badge tone={bot.System ? "warn" : "neutral"}>{bot.System ? t("bots.system") : t("bots.user")}</Badge>
@@ -90,6 +102,8 @@ export function BotDetailPage({ id, navigate }: { id: number; navigate: Navigate
             </div>
             <ScamFakeActions idKey="user_id" id={bot.ID} path="/api/actions/set-account-flags" scam={bot.Scam} fake={bot.Fake} onDone={load} />
             <div className="dock-title">{t("attr.attributes")}</div>
+            {!bot.System && <button className="btn icon-text" type="button" onClick={() => setAvatarOpen(true)}><ImagePlus size={15} /> {t("avatar.change")}</button>}
+            {!bot.System && <ProfileAction id={bot.ID} firstName={bot.FirstName} lastName={bot.LastName} onDone={load} />}
             <UsernameAction idKey="user_id" id={bot.ID} path="/api/actions/set-account-username" current={bot.Username} onDone={load} />
             <ColorAction idKey="user_id" id={bot.ID} path="/api/actions/set-account-color" onDone={load} />
             <EmojiStatusAction idKey="user_id" id={bot.ID} path="/api/actions/set-account-emoji-status" onDone={load} />
@@ -97,6 +111,7 @@ export function BotDetailPage({ id, navigate }: { id: number; navigate: Navigate
               <p className="bot-create-note">{t("bots.systemHint")}</p>
             ) : (
               <div className="danger-zone">
+                {canReadToken && <button className="btn icon-text" type="button" onClick={() => setTokenOpen(true)}><KeyRound size={15} /> {t("bots.copyToken")}</button>}
                 <ActionButton
                   label={t("bots.delete")}
                   icon={<Trash2 size={15} />}
@@ -111,6 +126,8 @@ export function BotDetailPage({ id, navigate }: { id: number; navigate: Navigate
           </section>
         }
       />
+      {avatarOpen && <AvatarModal kind="user" id={bot.ID} onClose={() => setAvatarOpen(false)} onDone={() => { setAvatarRefresh((value) => value + 1); void load(); }} />}
+      {tokenOpen && <CopyBotTokenModal botID={bot.ID} onClose={() => setTokenOpen(false)} />}
     </PageFrame>
   );
 }

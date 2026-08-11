@@ -74,6 +74,7 @@ export type AccountDetail = {
   Fake: boolean;
   Support: boolean;
   Bot: boolean;
+  LoginEmail: string;
   StarsBalance: number;
   StarsGranted: boolean;
   Fake: boolean;
@@ -81,6 +82,26 @@ export type AccountDetail = {
   HasRestriction: boolean;
   Authorizations: AuthorizationRow[];
   AuditLogs: AuditLogRow[];
+};
+
+export type PremiumPlan = {
+  Months: number;
+  DurationDays: number;
+  AmountStars: number;
+  FiatCurrency: string;
+  FiatAmount: number;
+  StoreProduct: string;
+  StoreQuantity: number;
+  Enabled: boolean;
+  SortOrder: number;
+  Label: string;
+  ManagedBy: "config" | "admin";
+  Version: number;
+  UpdatedAt: number;
+};
+
+export type PremiumPlansResponse = {
+  plans: PremiumPlan[] | null;
 };
 
 export type ChannelRow = {
@@ -127,6 +148,7 @@ export type BotRow = {
   ID: number;
   Username: string;
   FirstName: string;
+  LastName: string;
   Verified: boolean;
   Scam: boolean;
   Fake: boolean;
@@ -258,6 +280,7 @@ export type OfficialStarGiftRow = {
   convert_stars: string;
   upgrade_stars: string;
   availability_total: number;
+  upgrade_variants: number;
   limited: boolean;
   sold_out: boolean;
   model_count: number;
@@ -446,6 +469,34 @@ export type CollectibleUsernameDetail = {
   asset: CollectibleUsernameRow;
   transfers: CollectibleUsernameTransferRow[] | null;
 };
+
+export type CollectiblePhoneTier = "standard" | "exclusive";
+export type CollectiblePhoneStatus = "vault" | "owned" | "burned";
+export type CollectiblePhoneRow = {
+  id: string;
+  phone: string;
+  tier: CollectiblePhoneTier;
+  status: CollectiblePhoneStatus;
+  owner_user_id: string;
+  purchase_date: number;
+  currency: string;
+  amount: string;
+  crypto_currency: string;
+  crypto_amount: string;
+  url: string;
+  original_owner_user_id: string;
+  transfer_count: number;
+  version: string;
+  created_at?: string;
+  updated_at?: string;
+};
+export type CollectiblePhoneTransfer = {
+  id: string; collectible_id: string; kind: CollectibleUsernameTransferKind;
+  from_user_id: string; to_user_id: string; currency: string; amount: string;
+  actor: string; reason: string; command_key: string; created_at?: string;
+};
+export type CollectiblePhoneListResponse = { assets: CollectiblePhoneRow[] | null };
+export type CollectiblePhoneDetail = { asset: CollectiblePhoneRow; transfers: CollectiblePhoneTransfer[] | null };
 
 export type AccountRatingRow = {
   UserID: string;
@@ -752,6 +803,71 @@ export type CommandResult = {
   error?: string;
 };
 
+export type StorageBackendRow = {
+  Backend: string;
+  PhysicalBytes: string;
+  LogicalBytes: string;
+  ObjectCount: string;
+  ReferenceCount: string;
+};
+
+export type StorageStatsResponse = {
+  PhysicalBytes: string;
+  LogicalBytes: string;
+  ObjectCount: string;
+  ReferenceCount: string;
+  DocumentCount: string;
+  PhotoCount: string;
+  Backends: StorageBackendRow[] | null;
+};
+
+export type DashboardCounts = {
+  Users: number;
+  OnlineUsers: number;
+  Bots: number;
+  BroadcastChannels: number;
+  Supergroups: number;
+  StickerSets: number;
+  EmojiSets: number;
+  Gifs: number;
+  PendingReports: number;
+  PendingVerifications: number;
+};
+
+export type HostStatsSnapshot = {
+  CPUPercent: number;
+  MemUsedBytes: number;
+  MemTotalBytes: number;
+  DiskFreeBytes: number;
+  DiskTotalBytes: number;
+  Ready: boolean;
+};
+
+export type DashboardResponse = {
+  counts: DashboardCounts;
+  storage: StorageStatsResponse;
+  host?: HostStatsSnapshot;
+};
+
+export type StickerSetRow = {
+  // Telegram snowflake ids exceed JavaScript's safe-integer range, so the BFF
+  // returns them as decimal strings.
+  ID: string;
+  ShortName: string;
+  Title: string;
+  Count: number;
+  Kind: string;
+  SystemKey: string;
+  Official: boolean;
+  Archived: boolean;
+  Installed: boolean;
+  SortOrder: number;
+  CreatedAt: string;
+  CoverDocumentID: string;
+};
+
+export type StickerSetListResponse = { rows: StickerSetRow[] };
+
 export type AccountListResponse = {
   query: string;
   limit: number;
@@ -780,6 +896,39 @@ export type BotListResponse = {
   next_before_id: number;
   listing: boolean;
 };
+
+export type BroadcastRow = {
+  ID: string;
+  Message: string;
+  TargetMode: "all" | "selected";
+  TargetCount: string;
+  MaterializedCount: string;
+  SentCount: string;
+  FailedCount: string;
+  EnumerationDone: boolean;
+  CreatedBy: string;
+  CreatedAt: string;
+};
+
+export type BroadcastListResponse = {
+  limit: number;
+  rows: BroadcastRow[];
+  has_more: boolean;
+  next_before_id: string;
+};
+
+export type GifCatalogRow = {
+  ID: string;
+  Title: string;
+  DocumentID: string;
+  Enabled: boolean;
+  SortOrder: number;
+  CreatedBy: string;
+  SourceFilename: string;
+  CreatedAt: string;
+};
+
+export type GifCatalogListResponse = { rows: GifCatalogRow[]; limit: number };
 
 export type EmojiRow = {
   DocumentID: string;

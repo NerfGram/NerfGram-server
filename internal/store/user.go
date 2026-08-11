@@ -20,6 +20,7 @@ type UserStore interface {
 	Search(ctx context.Context, currentUserID int64, query, phoneQuery string, limit int) (domain.UserSearchResult, error)
 	UpdateProfile(ctx context.Context, userID int64, firstName, lastName, about string) (domain.User, error)
 	UpdateUsername(ctx context.Context, userID int64, username string) (domain.User, error)
+	UpdatePhone(ctx context.Context, userID int64, phone string) (domain.User, error)
 	UpdateLastSeen(ctx context.Context, userID int64, lastSeenAt int) error
 	// Create 创建用户并返回分配了 ID 的副本。
 	Create(ctx context.Context, u domain.User) (domain.User, error)

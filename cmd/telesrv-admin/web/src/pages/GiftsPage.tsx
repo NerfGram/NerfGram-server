@@ -194,7 +194,7 @@ export function GiftsPage() {
     setConvertStars(String(gift.convert_stars));
     setIncludeCollectible(gift.can_upgrade);
 		setUpgradeStars(gift.upgrade_stars);
-    setSupplyTotal(String(gift.availability_total || 1));
+		setSupplyTotal(String(gift.availability_total > 0 ? gift.availability_total : Math.max(gift.upgrade_variants, 1)));
     setSlugPrefix(`official-${gift.source_gift_id}`);
     setPreview(null);
   }

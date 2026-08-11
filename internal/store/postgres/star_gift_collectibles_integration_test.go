@@ -776,10 +776,7 @@ func collectibleTestPatternDocumentPtr(id int64, name string) *domain.Document {
 }
 
 func collectibleTestBlob(id int64, suffix string) domain.FileBlob {
-	return domain.FileBlob{
-		LocationKey: fmt.Sprintf("doc:%d", id), Backend: domain.MediaBackendLocalFS,
-		ObjectKey: "collectible-integration-" + suffix, Size: 4, SHA256: make([]byte, 32), MimeType: "application/x-tgsticker",
-	}
+	return postgresTestBlob(fmt.Sprintf("doc:%d", id), "collectible-integration-"+suffix, 4, "application/x-tgsticker")
 }
 
 func collectibleTestBlobPtr(id int64, suffix string) *domain.FileBlob {

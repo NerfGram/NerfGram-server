@@ -42,6 +42,216 @@ const (
 	botVerificationListMaxLimit     = 200
 )
 
+type StorageBackendRow struct {
+	Backend        string
+	PhysicalBytes  int64 `json:"PhysicalBytes,string"`
+	LogicalBytes   int64 `json:"LogicalBytes,string"`
+	ObjectCount    int64 `json:"ObjectCount,string"`
+	ReferenceCount int64 `json:"ReferenceCount,string"`
+}
+
+type StorageStatsRow struct {
+	PhysicalBytes  int64 `json:"PhysicalBytes,string"`
+	LogicalBytes   int64 `json:"LogicalBytes,string"`
+	ObjectCount    int64 `json:"ObjectCount,string"`
+	ReferenceCount int64 `json:"ReferenceCount,string"`
+	DocumentCount  int64 `json:"DocumentCount,string"`
+	PhotoCount     int64 `json:"PhotoCount,string"`
+	Backends       []StorageBackendRow
+}
+
+type BroadcastRow struct {
+	ID                int64 `json:"ID,string"`
+	Message           string
+	TargetMode        string
+	TargetCount       int64 `json:"TargetCount,string"`
+	MaterializedCount int64 `json:"MaterializedCount,string"`
+	SentCount         int64 `json:"SentCount,string"`
+	FailedCount       int64 `json:"FailedCount,string"`
+	EnumerationDone   bool
+	CreatedBy         string
+	CreatedAt         time.Time
+}
+
+func (s *readStore) ListBroadcasts(ctx context.Context, beforeID int64, limit int) ([]BroadcastRow, bool, error) {
+	if limit <= 0 {
+		limit = accountListDefaultLimit
+	}
+	if limit > accountListMaxLimit {
+		limit = accountListMaxLimit
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT id, message, target_mode, target_count, materialized_count,
+       sent_count, failed_count, enumeration_done, created_by, created_at
+FROM broadcasts
+WHERE $1::bigint = 0 OR id < $1
+ORDER BY id DESC
+LIMIT $2`, beforeID, limit+1)
+	if err != nil {
+		return nil, false, fmt.Errorf("list broadcasts: %w", err)
+	}
+	defer rows.Close()
+	out := make([]BroadcastRow, 0, limit+1)
+	for rows.Next() {
+		var item BroadcastRow
+		if err := rows.Scan(&item.ID, &item.Message, &item.TargetMode, &item.TargetCount, &item.MaterializedCount,
+			&item.SentCount, &item.FailedCount, &item.EnumerationDone, &item.CreatedBy, &item.CreatedAt); err != nil {
+			return nil, false, fmt.Errorf("scan broadcast: %w", err)
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate broadcasts: %w", err)
+	}
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return out, hasMore, nil
+}
+
+var systemAccountIDs = []int64{
+	domain.OfficialSystemUserID,
+	domain.BotFatherUserID,
+	domain.StickersBotUserID,
+	domain.ChatBotUserID,
+}
+
+func (s *readStore) CountAccounts(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FROM users
+WHERE NOT is_bot
+  AND deleted_at IS NULL
+  AND id <> ALL($1::bigint[])`, systemAccountIDs).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count accounts: %w", err)
+	}
+	return n, nil
+}
+
+// CountOnlineAccounts uses last_seen_at as the DB-side proxy for the live
+// server's in-process presence tracker. The server persists that field while a
+// session stays online, using the same five-minute window clients expect.
+func (s *readStore) CountOnlineAccounts(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*)
+FROM users
+WHERE NOT is_bot
+  AND deleted_at IS NULL
+  AND id <> ALL($1::bigint[])
+  AND last_seen_at > extract(epoch FROM now() - interval '5 minutes')::bigint`,
+		systemAccountIDs).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count online accounts: %w", err)
+	}
+	return n, nil
+}
+
+type DashboardCounts struct {
+	Users                int64
+	OnlineUsers          int64
+	Bots                 int64
+	BroadcastChannels    int64
+	Supergroups          int64
+	StickerSets          int64
+	EmojiSets            int64
+	Gifs                 int64
+	PendingReports       int64
+	PendingVerifications int64
+}
+
+func (s *readStore) DashboardCounts(ctx context.Context) (DashboardCounts, error) {
+	var out DashboardCounts
+	var err error
+	if out.Users, err = s.CountAccounts(ctx); err != nil {
+		return out, err
+	}
+	if out.OnlineUsers, err = s.CountOnlineAccounts(ctx); err != nil {
+		return out, err
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FROM users WHERE is_bot AND deleted_at IS NULL`).Scan(&out.Bots); err != nil {
+		return out, fmt.Errorf("count bots: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE broadcast), count(*) FILTER (WHERE megagroup)
+FROM channels WHERE NOT deleted AND NOT monoforum`).Scan(&out.BroadcastChannels, &out.Supergroups); err != nil {
+		return out, fmt.Errorf("count channels: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FILTER (WHERE set_kind = 'stickers'), count(*) FILTER (WHERE set_kind = 'emoji')
+FROM sticker_sets WHERE deleted = false`).Scan(&out.StickerSets, &out.EmojiSets); err != nil {
+		return out, fmt.Errorf("count sticker sets: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(DISTINCT document_id) FROM user_sticker_collections WHERE kind = 'gif'`).Scan(&out.Gifs); err != nil {
+		return out, fmt.Errorf("count gifs: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FROM moderation_cases WHERE status NOT IN ('resolved', 'dismissed')`).Scan(&out.PendingReports); err != nil {
+		return out, fmt.Errorf("count pending moderation cases: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+SELECT count(*) FROM verification_applications WHERE status IN ('submitted', 'in_review')`).Scan(&out.PendingVerifications); err != nil {
+		return out, fmt.Errorf("count pending verification applications: %w", err)
+	}
+	return out, nil
+}
+
+// StorageStats is deliberately read-only and derives physical usage from
+// content-addressed object keys. It does not claim that an unreferenced object
+// is safe to delete; the complete media-reference graph is not yet available.
+func (s *readStore) StorageStats(ctx context.Context) (StorageStatsRow, error) {
+	rows, err := s.pool.Query(ctx, `
+WITH objects AS (
+    SELECT backend, object_key,
+           MIN(size)::bigint AS min_size,
+           MAX(size)::bigint AS max_size,
+           COUNT(*)::bigint AS reference_count
+    FROM file_blobs
+    GROUP BY backend, object_key
+)
+SELECT backend,
+       COALESCE(SUM(max_size), 0)::bigint AS physical_bytes,
+       COALESCE(SUM(max_size * reference_count), 0)::bigint AS logical_bytes,
+       COUNT(*)::bigint AS object_count,
+       COALESCE(SUM(reference_count), 0)::bigint AS reference_count,
+       COALESCE(bool_and(min_size = max_size), true) AS sizes_consistent
+FROM objects
+GROUP BY backend
+ORDER BY backend`)
+	if err != nil {
+		return StorageStatsRow{}, fmt.Errorf("query storage backend stats: %w", err)
+	}
+	defer rows.Close()
+	stats := StorageStatsRow{Backends: make([]StorageBackendRow, 0, 2)}
+	for rows.Next() {
+		var item StorageBackendRow
+		var consistent bool
+		if err := rows.Scan(&item.Backend, &item.PhysicalBytes, &item.LogicalBytes, &item.ObjectCount, &item.ReferenceCount, &consistent); err != nil {
+			return StorageStatsRow{}, fmt.Errorf("scan storage backend stats: %w", err)
+		}
+		if !consistent {
+			return StorageStatsRow{}, fmt.Errorf("file_blobs contains inconsistent sizes for shared %s object keys", item.Backend)
+		}
+		stats.PhysicalBytes += item.PhysicalBytes
+		stats.LogicalBytes += item.LogicalBytes
+		stats.ObjectCount += item.ObjectCount
+		stats.ReferenceCount += item.ReferenceCount
+		stats.Backends = append(stats.Backends, item)
+	}
+	if err := rows.Err(); err != nil {
+		return StorageStatsRow{}, fmt.Errorf("iterate storage backend stats: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*)::bigint FROM documents`).Scan(&stats.DocumentCount); err != nil {
+		return StorageStatsRow{}, fmt.Errorf("count storage documents: %w", err)
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT count(*)::bigint FROM photos`).Scan(&stats.PhotoCount); err != nil {
+		return StorageStatsRow{}, fmt.Errorf("count storage photos: %w", err)
+	}
+	return stats, nil
+}
+
 // errReadNotFound reports a detail row that does not exist, so the API layer can
 // answer 404 without importing the driver's sentinel.
 var errReadNotFound = errors.New("read row not found")
@@ -121,6 +331,7 @@ type AccountDetail struct {
 	Fake           bool
 	Support        bool
 	Bot            bool
+	LoginEmail     string
 	StarsBalance   int64
 	StarsGranted   bool
 	Restriction    RestrictionRow
@@ -311,6 +522,7 @@ type BotRow struct {
 	ID          int64
 	Username    string
 	FirstName   string
+	LastName    string
 	Verified    bool
 	Scam        bool
 	Fake        bool
@@ -339,7 +551,7 @@ func (s *readStore) ListBots(ctx context.Context, beforeID int64, limit int) ([]
 		limit = accountListMaxLimit
 	}
 	rows, err := s.pool.Query(ctx, `
-SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.verified, u.scam, u.fake,
+SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.last_name, u.verified, u.scam, u.fake,
 	COALESCE(b.owner_user_id, 0), u.created_at, u.updated_at
 FROM users u
 LEFT JOIN bots b ON b.bot_user_id = u.id
@@ -354,7 +566,7 @@ LIMIT $2`, beforeID, limit+1)
 	out := make([]BotRow, 0, limit+1)
 	for rows.Next() {
 		var item BotRow
-		if err := rows.Scan(&item.ID, &item.Username, &item.FirstName, &item.Verified, &item.Scam, &item.Fake, &item.OwnerUserID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Username, &item.FirstName, &item.LastName, &item.Verified, &item.Scam, &item.Fake, &item.OwnerUserID, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, false, err
 		}
 		item.System = domain.IsSystemUserID(item.ID)
@@ -381,7 +593,7 @@ func (s *readStore) SearchBots(ctx context.Context, q string) ([]BotRow, error) 
 	}
 	username := strings.ToLower(strings.TrimPrefix(q, "@"))
 	rows, err := s.pool.Query(ctx, `
-SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.verified, u.scam, u.fake,
+SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.last_name, u.verified, u.scam, u.fake,
 	COALESCE(b.owner_user_id, 0), u.created_at, u.updated_at
 FROM users u
 LEFT JOIN bots b ON b.bot_user_id = u.id
@@ -396,7 +608,7 @@ LIMIT $3`, id, username, accountSearchLimit)
 	out := make([]BotRow, 0)
 	for rows.Next() {
 		var item BotRow
-		if err := rows.Scan(&item.ID, &item.Username, &item.FirstName, &item.Verified, &item.Scam, &item.Fake, &item.OwnerUserID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Username, &item.FirstName, &item.LastName, &item.Verified, &item.Scam, &item.Fake, &item.OwnerUserID, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.System = domain.IsSystemUserID(item.ID)
@@ -408,14 +620,14 @@ LIMIT $3`, id, username, accountSearchLimit)
 func (s *readStore) BotDetail(ctx context.Context, botUserID int64) (BotDetail, error) {
 	var out BotDetail
 	err := s.pool.QueryRow(ctx, `
-SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.about, u.verified, u.scam, u.fake,
+SELECT u.id, COALESCE(NULLIF(u.username, ''), p.username_lower, ''), u.first_name, u.last_name, u.about, u.verified, u.scam, u.fake,
 	COALESCE(b.owner_user_id, 0), COALESCE(b.description, ''),
 	u.created_at, u.updated_at
 FROM users u
 LEFT JOIN bots b ON b.bot_user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id AND p.editable
 WHERE u.id = $1 AND u.is_bot AND u.deleted_at IS NULL`, botUserID).Scan(
-		&out.Bot.ID, &out.Bot.Username, &out.Bot.FirstName, &out.About, &out.Bot.Verified, &out.Bot.Scam, &out.Bot.Fake,
+		&out.Bot.ID, &out.Bot.Username, &out.Bot.FirstName, &out.Bot.LastName, &out.About, &out.Bot.Verified, &out.Bot.Scam, &out.Bot.Fake,
 		&out.Bot.OwnerUserID, &out.Description, &out.Bot.CreatedAt, &out.Bot.UpdatedAt,
 	)
 	if err != nil {
@@ -635,16 +847,18 @@ SELECT u.id, u.phone, u.username, u.first_name, u.last_name, u.created_at, u.upd
 	COALESCE(r.frozen, false), COALESCE(r.reason, ''),
 	COALESCE(EXTRACT(EPOCH FROM u.premium_expires_at), 0)::bigint,
 	COALESCE(sb.balance, 0)::bigint, COALESCE(sb.granted, false),
+	COALESCE(ap.login_email, ''),
 	COALESCE(NULLIF(u.username, ''), p.username_lower, '') AS display_username,
 	`+accountCollectibleUsernamesColumn+` AS collectibles
 FROM users u
 LEFT JOIN account_restrictions r ON r.user_id = u.id
 LEFT JOIN stars_balances sb ON sb.user_id = u.id
+LEFT JOIN account_passwords ap ON ap.user_id = u.id
 LEFT JOIN peer_usernames p ON p.peer_type = 'user' AND p.peer_id = u.id AND p.editable
 WHERE u.id = $1`, userID).Scan(
 		&out.Account.ID, &out.Account.Phone, &out.Account.Username, &out.Account.FirstName, &out.Account.LastName,
 		&out.Account.CreatedAt, &out.Account.UpdatedAt, &out.About, &out.LastSeenAt, &out.Verified, &out.Scam, &out.Fake, &out.Support, &out.Bot,
-		&out.Account.Frozen, &out.Account.Reason, &out.Account.PremiumUntil, &out.StarsBalance, &out.StarsGranted, &out.Account.Username,
+		&out.Account.Frozen, &out.Account.Reason, &out.Account.PremiumUntil, &out.StarsBalance, &out.StarsGranted, &out.LoginEmail, &out.Account.Username,
 		&out.Account.Collectibles,
 	)
 	if err != nil {
@@ -1045,6 +1259,92 @@ func prettyJSON(raw []byte) string {
 		return string(raw)
 	}
 	return string(out)
+}
+
+type StickerSetRow struct {
+	// ID must round-trip through JSON as a string: these are Telegram-style
+	// snowflake ids, well past JS's 2^53 safe-integer limit.
+	ID        int64 `json:"ID,string"`
+	ShortName string
+	Title     string
+	Count     int
+	Kind      string
+	SystemKey string
+	Official  bool
+	Archived  bool
+	Installed bool
+	SortOrder int
+	CreatedAt time.Time
+	// CoverDocumentID is the first document in the set, used as a small
+	// thumbnail in the admin list. It is extracted from jsonb as text so it
+	// never passes through a JavaScript number.
+	CoverDocumentID string
+}
+
+// ListStickerSets lists non-system sticker/emoji sets. An empty kind lists all
+// non-system kinds; "system" packs stay hidden because dice/default/internal
+// resources are not hand-edited from this page.
+func (s *readStore) ListStickerSets(ctx context.Context, kind string) ([]StickerSetRow, error) {
+	kind = strings.TrimSpace(kind)
+	switch kind {
+	case "", string(domain.StickerSetKindStickers), string(domain.StickerSetKindEmoji), string(domain.StickerSetKindMasks):
+	default:
+		return nil, fmt.Errorf("invalid sticker set kind")
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT id, short_name, title, count, set_kind, system_key, official, archived, installed, sort_order, created_at,
+       COALESCE(document_ids->>0, '')
+FROM sticker_sets
+WHERE deleted = false AND set_kind <> 'system'
+  AND ($1 = '' OR set_kind = $1)
+ORDER BY set_kind, sort_order, id`, kind)
+	if err != nil {
+		return nil, fmt.Errorf("list sticker sets: %w", err)
+	}
+	defer rows.Close()
+	out := make([]StickerSetRow, 0)
+	for rows.Next() {
+		var item StickerSetRow
+		if err := rows.Scan(
+			&item.ID, &item.ShortName, &item.Title, &item.Count, &item.Kind, &item.SystemKey,
+			&item.Official, &item.Archived, &item.Installed, &item.SortOrder, &item.CreatedAt,
+			&item.CoverDocumentID,
+		); err != nil {
+			return nil, fmt.Errorf("scan sticker set: %w", err)
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sticker sets: %w", err)
+	}
+	return out, nil
+}
+
+// StickerSetDocumentIDs returns document ids as strings, not int64, so the
+// browser cannot silently round 18-19 digit Telegram document ids.
+func (s *readStore) StickerSetDocumentIDs(ctx context.Context, setID int64) ([]string, error) {
+	var raw string
+	err := s.pool.QueryRow(ctx, `
+SELECT document_ids::text
+FROM sticker_sets
+WHERE id = $1 AND deleted = false`, setID).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("sticker set documents: %w", err)
+	}
+	var ids []int64
+	if raw != "" && raw != "[]" {
+		if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+			return nil, fmt.Errorf("decode sticker set documents: %w", err)
+		}
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = strconv.FormatInt(id, 10)
+	}
+	return out, nil
 }
 
 // EmojiRow is a custom-emoji document projection for the admin emoji browser.

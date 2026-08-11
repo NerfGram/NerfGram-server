@@ -9,19 +9,25 @@ import { Badge } from "./ui";
 export function UserPicker({
   label,
   value,
-  onChange
+  onChange,
+  variant = "panel"
 }: {
   label: string;
   value: AccountRow | null;
   onChange: (row: AccountRow | null) => void;
+  variant?: "panel" | "dropdown";
 }) {
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<AccountRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [open, setOpen] = useState(false);
 
-  async function search() {
+  async function search(showResults = false) {
+    if (showResults && variant === "dropdown") {
+      setOpen(true);
+    }
     setBusy(true);
     setError("");
     const params = new URLSearchParams({ limit: "20" });
@@ -39,15 +45,22 @@ export function UserPicker({
   }
 
   useEffect(() => {
-    void search();
+    void search(false);
   }, []);
 
   return (
-    <div className="entity-picker">
+    <div
+      className={`entity-picker ${variant === "dropdown" ? "entity-picker-dropdown" : ""}`}
+      onBlur={(event) => {
+        if (variant === "dropdown" && !event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setOpen(false);
+        }
+      }}
+    >
       <div className="picker-head">
         <span>{label}</span>
         {value ? (
-          <button className="link-button" type="button" onClick={() => onChange(null)}>
+          <button className="link-button" type="button" onClick={() => { onChange(null); setOpen(true); }}>
             <X size={13} /> {t("common.clear")}
           </button>
         ) : null}
@@ -62,31 +75,32 @@ export function UserPicker({
           <span>{displayUsername(value.Username) || displayPhone(value.Phone) || "-"}</span>
         </div>
       ) : null}
-      <div className="picker-search">
+      {(!value || variant !== "dropdown") && <div className="picker-search">
         <Search size={15} />
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
+          onFocus={() => { if (variant === "dropdown") setOpen(true); }}
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
-              void search();
+              void search(true);
             }
           }}
           placeholder={t("picker.userPlaceholder")}
         />
-        <button className="btn compact-btn" type="button" onClick={search} disabled={busy}>
+        <button className="btn compact-btn" type="button" onClick={() => void search(true)} disabled={busy}>
           {busy ? <Loader2 size={14} className="spin" /> : t("common.search")}
         </button>
-      </div>
+      </div>}
       {error && <div className="picker-error">{error}</div>}
-      <div className="picker-results">
+      {(variant !== "dropdown" || open) && <div className="picker-results">
         {rows.map((row) => (
           <button
             key={row.ID}
             className={`picker-row ${value?.ID === row.ID ? "selected" : ""}`}
             type="button"
-            onClick={() => onChange(row)}
+            onClick={() => { onChange(row); setOpen(false); }}
           >
             <span className="mono">{row.ID}</span>
             <strong>{displayName(row)}</strong>
@@ -95,7 +109,7 @@ export function UserPicker({
           </button>
         ))}
         {rows.length === 0 && !busy ? <div className="picker-empty">{t("common.noResults")}</div> : null}
-      </div>
+      </div>}
     </div>
   );
 }

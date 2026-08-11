@@ -91,3 +91,48 @@ func TestPinnedDialogsLimitTiers(t *testing.T) {
 		}
 	}
 }
+
+func TestPremiumGiftMessageValidatesUTF16EntityBounds(t *testing.T) {
+	valid := PremiumGiftMessage{
+		Text: "A😀B",
+		// A=1 UTF-16 unit, 😀=2 units.
+		Entities: []MessageEntity{{Type: MessageEntityBold, Offset: 1, Length: 2}},
+	}
+	if !valid.Valid() {
+		t.Fatal("valid UTF-16 entity was rejected")
+	}
+	for _, invalid := range []PremiumGiftMessage{
+		{Text: "A😀B", Entities: []MessageEntity{{Type: MessageEntityBold, Offset: 1, Length: 4}}},
+		{Text: "A😀B", Entities: []MessageEntity{{Type: MessageEntityBold, Offset: 2, Length: 1}}},
+		{Text: "hello", Entities: []MessageEntity{{Type: MessageEntityBold, Offset: -1, Length: 1}}},
+		{Text: "hello", Entities: []MessageEntity{{Type: MessageEntityBold, Offset: 0, Length: 0}}},
+		{Text: "hello", Entities: []MessageEntity{{Type: MessageEntityBold, Offset: 6, Length: 1}}},
+		{Text: "hello", Entities: []MessageEntity{{Type: MessageEntityURL, Offset: 0, Length: 5}}},
+		{Text: "hello", Entities: []MessageEntity{{Type: MessageEntityCustomEmoji, Offset: 0, Length: 5}}},
+	} {
+		if invalid.Valid() {
+			t.Fatalf("invalid entity bounds accepted: %+v", invalid)
+		}
+	}
+}
+
+func TestPremiumPlanBounds(t *testing.T) {
+	base := PremiumPlan{
+		Months: 3, DurationDays: 90, AmountStars: 750, Enabled: true,
+		Label: "3 months", Version: 1,
+	}
+	if !base.Valid() {
+		t.Fatal("normal Premium plan is invalid")
+	}
+	for _, mutate := range []func(*PremiumPlan){
+		func(p *PremiumPlan) { p.Months = MaxPremiumPlanMonths + 1 },
+		func(p *PremiumPlan) { p.DurationDays = MaxPremiumPlanDurationDays + 1 },
+		func(p *PremiumPlan) { p.AmountStars = MaxPremiumPlanAmountStars + 1 },
+	} {
+		plan := base
+		mutate(&plan)
+		if plan.Valid() {
+			t.Fatalf("out-of-range Premium plan accepted: %+v", plan)
+		}
+	}
+}

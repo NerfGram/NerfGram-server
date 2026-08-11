@@ -86,7 +86,7 @@ func (s *MessageStore) DeliverSystemInboxMessage(ctx context.Context, msg domain
 		return domain.Message{}, fmt.Errorf("create system inbox private message: %w", err)
 	}
 
-	boxID, err := s.nextLoginCodeBoxID(ctx, qtx, msg.OwnerUserID)
+	boxID, err := s.nextIncomingSystemBoxID(ctx, qtx, msg.OwnerUserID)
 	if err != nil {
 		return domain.Message{}, fmt.Errorf("allocate system inbox box id: %w", err)
 	}

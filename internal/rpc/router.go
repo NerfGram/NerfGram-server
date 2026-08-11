@@ -89,6 +89,9 @@ type Config struct {
 	RtmpIngestURL string
 	// PublicBaseURL 是所有客户端可见 telesrv 链接的公开根 URL。
 	PublicBaseURL string
+	// UpdatePublicURL is advertised as help.getConfig.autoupdate_url_prefix.
+	// Empty keeps the native desktop updater disabled.
+	UpdatePublicURL string
 	// PublicAppScheme/PublicAppLinkBase 控制客户端 deep link；base 为空时
 	// 保持 <scheme>://<route>，非空时生成 <base>/<route>。
 	PublicAppScheme   string

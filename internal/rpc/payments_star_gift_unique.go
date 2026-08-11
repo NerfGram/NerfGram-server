@@ -237,9 +237,13 @@ func (r *Router) onPaymentsGetStarGiftUpgradePreview(ctx context.Context, giftID
 	if err != nil {
 		return nil, internalErr()
 	}
-	if !found || preview.Issued >= preview.SupplyTotal {
+	if !found {
 		return nil, starGiftInvalidErr()
 	}
+	// UpgradePreview is descriptive metadata, not the atomic mint gate. A gift
+	// message can remain open while another user takes the final serial; rejecting
+	// the preview as STARGIFT_INVALID leaves every client on a generic error sheet.
+	// The later form/upgrade transaction still enforces issued < supply_total.
 	return &tg.PaymentsStarGiftUpgradePreview{
 		SampleAttributes: tgStarGiftPreviewAttributes(preview),
 		Prices:           []tg.StarGiftUpgradePrice{},
@@ -287,7 +291,7 @@ func (r *Router) onPaymentsGetUniqueStarGift(ctx context.Context, slug string) (
 		if unique.KeepOriginalDetails && !unique.OriginalNameHidden && unique.OriginalFromUserID != 0 && unique.OriginalFromUserID != unique.Owner.ID {
 			ids = append(ids, unique.OriginalFromUserID)
 		}
-		out.Users = tgUsersForViewer(viewerUserID, r.domainUsersForIDs(ctx, viewerUserID, ids))
+		out.Users = r.tgUsersForViewer(viewerUserID, r.domainUsersForIDs(ctx, viewerUserID, ids))
 	case domain.PeerTypeChannel:
 		out.Chats = r.tgChatsForChannelIDs(ctx, viewerUserID, []int64{unique.Owner.ID})
 	}
@@ -377,7 +381,7 @@ func tgUniqueStarGift(unique domain.UniqueStarGift) *tg.StarGiftUnique {
 			original.SetSenderID(&tg.PeerUser{UserID: unique.OriginalFromUserID})
 		}
 		if unique.OriginalMessage != "" {
-			original.SetMessage(tg.TextWithEntities{Text: unique.OriginalMessage})
+			original.SetMessage(tg.TextWithEntities{Text: unique.OriginalMessage, Entities: tgMessageEntities(unique.OriginalMessageEntities)})
 		}
 		attributes = append(attributes, original)
 	}

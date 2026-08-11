@@ -5,12 +5,15 @@ import { AccountRatingsPage } from "./AccountRatingsPage";
 import { AccountsPage } from "./AccountsPage";
 import { CollectibleUsernameDetailPage } from "./CollectibleUsernameDetailPage";
 import { CollectibleUsernamesPage } from "./CollectibleUsernamesPage";
+import { CollectiblePhonesPage } from "./CollectiblePhonesPage";
 import { ChannelDetailPage } from "./ChannelDetailPage";
 import { ChannelsPage } from "./ChannelsPage";
 import { BotDetailPage } from "./BotDetailPage";
 import { BotsPage } from "./BotsPage";
+import { BroadcastsPage } from "./BroadcastsPage";
 import { EmojiPage } from "./EmojiPage";
 import { CodesPage } from "./CodesPage";
+import { GifCatalogPage } from "./GifCatalogPage";
 import { Dashboard } from "./Dashboard";
 import { GroupMessageDetailPage } from "./GroupMessageDetailPage";
 import { GroupMessagesPage } from "./GroupMessagesPage";
@@ -20,13 +23,17 @@ import { GiftsPage } from "./GiftsPage";
 import { GiveGiftsPage } from "./GiveGiftsPage";
 import { ModerationCaseDetailPage } from "./ModerationCaseDetailPage";
 import { ModerationCasesPage } from "./ModerationCasesPage";
+import { PremiumPlansPage } from "./PremiumPlansPage";
 import { BotVerificationPage } from "./BotVerificationPage";
 import { BotVerificationRequestPage } from "./BotVerificationRequestPage";
 import { VerificationDetailPage } from "./VerificationDetailPage";
 import { VerificationPage } from "./VerificationPage";
+import { StoragePage } from "./StoragePage";
+import { StickerSetsPage } from "./StickerSetsPage";
 import {
   PermissionGate,
   permissionBotVerificationReview,
+  permissionPremiumManage,
   permissionVerificationReview
 } from "../permissions";
 
@@ -82,8 +89,21 @@ export function Routes({ route, navigate }: { route: RouteState; navigate: Navig
   if (route.path === "/collectible-usernames") {
     return <CollectibleUsernamesPage navigate={navigate} />;
   }
+  if (route.path === "/collectible-phones") {
+    return <CollectiblePhonesPage />;
+  }
   if (route.path === "/account-ratings") {
     return <AccountRatingsPage navigate={navigate} />;
+  }
+  if (route.path === "/storage") {
+    return <StoragePage />;
+  }
+  if (route.path === "/monetization" || route.path === "/premium") {
+    return (
+      <PermissionGate permission={permissionPremiumManage}>
+        <PremiumPlansPage />
+      </PermissionGate>
+    );
   }
   if (accountID) {
     return <AccountDetailPage id={Number(accountID)} navigate={navigate} />;
@@ -106,6 +126,9 @@ export function Routes({ route, navigate }: { route: RouteState; navigate: Navig
   if (route.path === "/bots") {
     return <BotsPage navigate={navigate} />;
   }
+  if (route.path === "/broadcasts") {
+    return <BroadcastsPage />;
+  }
   if (route.path === "/moderation") {
     return <ModerationCasesPage navigate={navigate} />;
   }
@@ -114,6 +137,12 @@ export function Routes({ route, navigate }: { route: RouteState; navigate: Navig
   }
   if (route.path === "/codes") {
     return <CodesPage />;
+  }
+  if (route.path === "/stickers") {
+    return <StickerSetsPage kind="stickers" />;
+  }
+  if (route.path === "/gif-catalog") {
+    return <GifCatalogPage />;
   }
 	if (route.path === "/gifts") {
 		return <GiftsPage />;

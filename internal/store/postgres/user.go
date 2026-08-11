@@ -274,6 +274,23 @@ func (s *UserStore) UpdateUsername(ctx context.Context, userID int64, username s
 	return userFromModel(row), nil
 }
 
+// UpdatePhone is the non-PTS admin profile write. updateUserPhone has no
+// pts/pts_count, so this path relies on the users phone unique index without
+// manufacturing a durable difference event.
+func (s *UserStore) UpdatePhone(ctx context.Context, userID int64, phone string) (domain.User, error) {
+	row, err := s.q.UpdateUserPhone(ctx, sqlcgen.UpdateUserPhoneParams{ID: userID, Phone: phone})
+	if err != nil {
+		if isUniqueConstraint(err, "users_phone_unique_idx") {
+			return domain.User{}, domain.ErrPhoneNumberOccupied
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.User{}, domain.ErrUserNotFound
+		}
+		return domain.User{}, fmt.Errorf("update user phone: %w", err)
+	}
+	return userFromModel(row), nil
+}
+
 func (s *UserStore) UpdateLastSeen(ctx context.Context, userID int64, lastSeenAt int) error {
 	if lastSeenAt <= 0 {
 		return nil

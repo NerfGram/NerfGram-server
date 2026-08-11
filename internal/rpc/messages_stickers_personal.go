@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/iamxvbaba/td/tg"
+	"go.uber.org/zap"
 
 	"telesrv/internal/domain"
 )
@@ -123,6 +124,24 @@ func (r *Router) onMessagesSaveGif(ctx context.Context, req *tg.MessagesSaveGifR
 	}
 	r.pushStickerCollectionUpdate(ctx, userID, &tg.UpdateSavedGifs{})
 	return true, nil
+}
+
+// autoSaveSentGif mirrors the server-side recent/saved-GIF behaviour clients
+// rely on after sending an inline GIF. It is non-PTS and best-effort because
+// the ordinary message transaction has already committed.
+func (r *Router) autoSaveSentGif(ctx context.Context, userID int64, media *domain.MessageMedia) {
+	if media == nil || media.Kind != domain.MessageMediaKindDocument || media.Document == nil || !media.Document.IsGif() {
+		return
+	}
+	svc, ok := r.stickerCollectionSvc()
+	if !ok {
+		return
+	}
+	if err := svc.SaveStickerCollectionItem(ctx, userID, domain.StickerCollectionGif, media.Document.ID, false, int(r.clock.Now().Unix())); err != nil {
+		r.log.Warn("auto-save sent gif", zap.Int64("user_id", userID), zap.Int64("document_id", media.Document.ID), zap.Error(err))
+		return
+	}
+	r.pushStickerCollectionUpdate(ctx, userID, &tg.UpdateSavedGifs{})
 }
 
 func (r *Router) onMessagesClearRecentStickers(ctx context.Context, req *tg.MessagesClearRecentStickersRequest) (bool, error) {

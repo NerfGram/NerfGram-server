@@ -10,6 +10,63 @@ import (
 	"telesrv/internal/store/memory"
 )
 
+type fakeCollectiblePhones map[int64]domain.CollectiblePhone
+
+func (f fakeCollectiblePhones) OwnedCollectiblePhones(_ context.Context, ids []int64) (map[int64]domain.CollectiblePhone, error) {
+	out := make(map[int64]domain.CollectiblePhone)
+	for _, id := range ids {
+		if phone, ok := f[id]; ok {
+			out[id] = phone
+		}
+	}
+	return out, nil
+}
+
+func TestProjectorCollectiblePhonePrivacyAndExclusiveOverride(t *testing.T) {
+	ctx := context.Background()
+	const viewerID int64 = 8101
+	const standardID int64 = 8102
+	const exclusiveID int64 = 8103
+	contacts := memory.NewContactStore()
+	rules := memory.NewPrivacyStore()
+	privacy := privacyapp.NewService(rules, contacts)
+	for _, ownerID := range []int64{standardID, exclusiveID} {
+		if _, err := privacy.SetRules(ctx, ownerID, domain.PrivacyKeyPhoneNumber, []domain.PrivacyRule{{Kind: domain.PrivacyRuleDisallowAll}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	phones := fakeCollectiblePhones{
+		standardID:  {Phone: "8881111", Tier: domain.CollectiblePhoneTierStandard, Status: domain.CollectibleUsernameStatusOwned, OwnerUserID: standardID},
+		exclusiveID: {Phone: "8882222", Tier: domain.CollectiblePhoneTierExclusive, Status: domain.CollectibleUsernameStatusOwned, OwnerUserID: exclusiveID},
+	}
+	p := New(WithContactStore(contacts), WithPrivacyEvaluator(privacy), WithCollectiblePhoneProvider(phones))
+	base := []domain.User{{ID: standardID, Phone: "155501"}, {ID: exclusiveID, Phone: "155502"}}
+	projected, err := p.ForViewer(ctx, viewerID, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projectionUser(t, projected, standardID).Phone; got != "" {
+		t.Fatalf("standard stranger phone=%q, want hidden", got)
+	}
+	if got := projectionUser(t, projected, exclusiveID).Phone; got != "8882222" {
+		t.Fatalf("exclusive stranger phone=%q", got)
+	}
+	self, err := p.ForViewer(ctx, standardID, base[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := self[0].Phone; got != "8881111" {
+		t.Fatalf("standard self phone=%q", got)
+	}
+	fanout, err := p.ForViewers(ctx, []int64{viewerID}, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := projectionUser(t, fanout[viewerID], exclusiveID).Phone; got != "8882222" {
+		t.Fatalf("fanout exclusive phone=%q", got)
+	}
+}
+
 func TestProjectorCombinesProfilePhotosAndViewerContacts(t *testing.T) {
 	ctx := context.Background()
 	const viewerID int64 = 1001

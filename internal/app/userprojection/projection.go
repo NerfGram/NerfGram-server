@@ -31,6 +31,12 @@ type AccountFreezeProvider interface {
 	AccountFreezes(ctx context.Context, userIDs []int64) (map[int64]domain.AccountFreeze, error)
 }
 
+// CollectiblePhoneProvider returns the live collectible number attached to each
+// user. It is batched because user vectors are projected on every hot RPC path.
+type CollectiblePhoneProvider interface {
+	OwnedCollectiblePhones(ctx context.Context, userIDs []int64) (map[int64]domain.CollectiblePhone, error)
+}
+
 // BatchPrivacyEvaluator 批量评估多 owner 对单 viewer 的可见性，消除 projectBatch / fan-out
 // 投影里 per-user 3×CanSee 的 N+1。可选：实现了它的 evaluator（privacy.Service）会被
 // projectBatch 优先用批量预取，否则回退逐 CanSee。结果必须与逐 CanSee 字节等价。
@@ -60,6 +66,7 @@ type Projector struct {
 	photos   ProfilePhotoProvider
 	privacy  PrivacyEvaluator
 	freezes  AccountFreezeProvider
+	phones   CollectiblePhoneProvider
 }
 
 // Option configures a Projector.
@@ -85,6 +92,10 @@ func WithAccountFreezeProvider(provider AccountFreezeProvider) Option {
 	return func(p *Projector) { p.freezes = provider }
 }
 
+func WithCollectiblePhoneProvider(provider CollectiblePhoneProvider) Option {
+	return func(p *Projector) { p.phones = provider }
+}
+
 // New creates a user projector.
 func New(opts ...Option) *Projector {
 	p := &Projector{}
@@ -100,7 +111,7 @@ func (p *Projector) ForViewer(ctx context.Context, viewerUserID int64, users []d
 	if p == nil {
 		return users, nil
 	}
-	return projectBatch(ctx, p.contacts, p.photos, p.privacy, p.freezes, viewerUserID, users)
+	return projectBatch(ctx, p.contacts, p.photos, p.privacy, p.freezes, p.phones, viewerUserID, users)
 }
 
 // One applies ForViewer to a single user.
@@ -145,11 +156,12 @@ func (p *Projector) ForViewers(ctx context.Context, viewerUserIDs []int64, users
 
 	// 三组预取互不依赖（共享头像、反向联系人覆盖、privacy 矩阵），并发执行收敛成一波。
 	var (
-		profileRefs      map[int64]domain.ProfilePhotoRef
-		fallbackRefs     map[int64]domain.ProfilePhotoRef
-		contactsByViewer map[int64]map[int64]domain.Contact
-		matrix           map[int64]map[int64]map[domain.PrivacyKey]bool
-		freezes          map[int64]domain.AccountFreeze
+		profileRefs       map[int64]domain.ProfilePhotoRef
+		fallbackRefs      map[int64]domain.ProfilePhotoRef
+		contactsByViewer  map[int64]map[int64]domain.Contact
+		matrix            map[int64]map[int64]map[domain.PrivacyKey]bool
+		freezes           map[int64]domain.AccountFreeze
+		collectiblePhones map[int64]domain.CollectiblePhone
 	)
 	g, gctx := errgroup.WithContext(ctx)
 	// 1) 共享头像：profile/fallback 一次批量，跨全部 viewer 复用；personal photo v1 跳过（见 doc）。
@@ -180,6 +192,13 @@ func (p *Projector) ForViewers(ctx context.Context, viewerUserIDs []int64, users
 			return err
 		})
 	}
+	if p.phones != nil && len(ids) > 0 {
+		g.Go(func() error {
+			var err error
+			collectiblePhones, err = p.phones.OwnedCollectiblePhones(gctx, ids)
+			return err
+		})
+	}
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
@@ -205,6 +224,7 @@ func (p *Projector) ForViewers(ctx context.Context, viewerUserIDs []int64, users
 			if viewer != 0 && u.ID != viewer && u.ID != domain.OfficialSystemUserID && !u.Bot {
 				contact, found := contactsByViewer[viewer][u.ID]
 				pj = applyContactProjection(pj, contact, found)
+				pj = applyCollectiblePhone(pj, collectiblePhones[u.ID])
 				var vis map[domain.PrivacyKey]bool
 				if matrix != nil {
 					vis = matrix[u.ID][viewer]
@@ -216,6 +236,10 @@ func (p *Projector) ForViewers(ctx context.Context, viewerUserIDs []int64, users
 					return nil, perr
 				}
 			}
+			if viewer == 0 || u.ID == viewer || u.ID == domain.OfficialSystemUserID || u.Bot {
+				pj = applyCollectiblePhone(pj, collectiblePhones[u.ID])
+			}
+			pj = reapplyExclusiveCollectiblePhone(pj, collectiblePhones[u.ID])
 			pj = applyAccountFreezeProjection(pj, viewer, freezes[u.ID])
 			cache[u.ID] = pj
 			projected[i] = pj
@@ -382,7 +406,7 @@ func One(ctx context.Context, contacts store.ContactStore, viewerUserID int64, u
 	return projected[0], nil
 }
 
-func projectBatch(ctx context.Context, contacts store.ContactStore, photos ProfilePhotoProvider, privacy PrivacyEvaluator, freezesProvider AccountFreezeProvider, viewerUserID int64, users []domain.User) ([]domain.User, error) {
+func projectBatch(ctx context.Context, contacts store.ContactStore, photos ProfilePhotoProvider, privacy PrivacyEvaluator, freezesProvider AccountFreezeProvider, phoneProvider CollectiblePhoneProvider, viewerUserID int64, users []domain.User) ([]domain.User, error) {
 	if len(users) == 0 {
 		return users, nil
 	}
@@ -391,12 +415,13 @@ func projectBatch(ctx context.Context, contacts store.ContactStore, photos Profi
 	out = sanitizeDeletedUsers(out)
 	ids := uniqueUserIDs(out)
 	var (
-		profileRefs  = map[int64]domain.ProfilePhotoRef{}
-		fallbackRefs = map[int64]domain.ProfilePhotoRef{}
-		personalRefs = map[int64]domain.ProfilePhotoRef{}
-		contactsByID map[int64]domain.Contact
-		visibility   map[int64]map[domain.PrivacyKey]bool
-		freezes      map[int64]domain.AccountFreeze
+		profileRefs       = map[int64]domain.ProfilePhotoRef{}
+		fallbackRefs      = map[int64]domain.ProfilePhotoRef{}
+		personalRefs      = map[int64]domain.ProfilePhotoRef{}
+		contactsByID      map[int64]domain.Contact
+		visibility        map[int64]map[domain.PrivacyKey]bool
+		freezes           map[int64]domain.AccountFreeze
+		collectiblePhones map[int64]domain.CollectiblePhone
 	)
 	// 这些预取查询互不依赖（头像 profile/fallback、联系人 GetMany/PersonalPhotos、privacy 可见性），
 	// 并发执行把 ~6 次串行 round-trip 收敛成一波；每个 goroutine 只写自己那一个变量，组装循环在
@@ -469,6 +494,13 @@ func projectBatch(ctx context.Context, contacts store.ContactStore, photos Profi
 			return nil
 		})
 	}
+	if phoneProvider != nil && len(ids) > 0 {
+		g.Go(func() error {
+			var err error
+			collectiblePhones, err = phoneProvider.OwnedCollectiblePhones(gctx, ids)
+			return err
+		})
+	}
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
@@ -492,6 +524,7 @@ func projectBatch(ctx context.Context, contacts store.ContactStore, photos Profi
 		if viewerUserID != 0 && u.ID != viewerUserID && u.ID != domain.OfficialSystemUserID && !u.Bot {
 			contact, found := contactsByID[u.ID]
 			projected = applyContactProjection(projected, contact, found)
+			projected = applyCollectiblePhone(projected, collectiblePhones[u.ID])
 			hasKnownContactPhone := found && contact.Phone != ""
 			var err error
 			projected, err = applyPrivacy(ctx, privacy, viewerUserID, projected, hasKnownContactPhone, visibility[u.ID], profileRefs, fallbackRefs, personalRefs)
@@ -499,11 +532,29 @@ func projectBatch(ctx context.Context, contacts store.ContactStore, photos Profi
 				return nil, err
 			}
 		}
+		if viewerUserID == 0 || u.ID == viewerUserID || u.ID == domain.OfficialSystemUserID || u.Bot {
+			projected = applyCollectiblePhone(projected, collectiblePhones[u.ID])
+		}
+		projected = reapplyExclusiveCollectiblePhone(projected, collectiblePhones[u.ID])
 		projected = applyAccountFreezeProjection(projected, viewerUserID, freezes[u.ID])
 		cache[u.ID] = projected
 		out[i] = projected
 	}
 	return out, nil
+}
+
+func applyCollectiblePhone(user domain.User, phone domain.CollectiblePhone) domain.User {
+	if !user.Deleted && !user.Bot && phone.Owned() && phone.OwnerUserID == user.ID {
+		user.Phone = phone.Phone
+	}
+	return user
+}
+
+func reapplyExclusiveCollectiblePhone(user domain.User, phone domain.CollectiblePhone) domain.User {
+	if phone.AlwaysVisible() && !user.Deleted && !user.Bot && phone.OwnerUserID == user.ID {
+		user.Phone = phone.Phone
+	}
+	return user
 }
 
 func applyAccountFreezeProjection(user domain.User, viewerUserID int64, freeze domain.AccountFreeze) domain.User {

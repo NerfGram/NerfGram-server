@@ -8,6 +8,8 @@ import type {
   AdminSession,
   BotDetail,
   BotListResponse,
+  BroadcastListResponse,
+	GifCatalogListResponse,
   BotVerificationCountsResponse,
   BotVerifierListResponse,
   ChannelDetail,
@@ -19,7 +21,10 @@ import type {
   ChannelListResponse,
   CollectibleUsernameDetail,
   CollectibleUsernameListResponse,
+  CollectiblePhoneListResponse,
+  CollectiblePhoneDetail,
   CommandResult,
+  DashboardResponse,
   GroupMessageDetail,
   GroupMessageListResponse,
   MessageDetail,
@@ -28,8 +33,11 @@ import type {
   ModerationCaseRow,
   ModerationReport,
   OfficialStarGiftListResponse,
+  PremiumPlansResponse,
   StarGiftCollectiblePreview,
   StarGiftListResponse,
+  StickerSetListResponse,
+  StorageStatsResponse,
   VerificationApplicationDetail,
   VerificationApplicationListResponse,
   VerificationCountsResponse
@@ -154,14 +162,22 @@ export const api = {
   channel: (id: number) => request<ChannelDetail>(`/api/channels/${id}`),
   bots: (params: URLSearchParams) => request<BotListResponse>(`/api/bots?${params.toString()}`),
   bot: (id: number) => request<BotDetail>(`/api/bots/${id}`),
+  broadcasts: (params: URLSearchParams) => request<BroadcastListResponse>(`/api/broadcasts?${params.toString()}`),
+  premiumPlans: () => request<PremiumPlansResponse>("/api/premium/plans"),
   collectibleUsernames: (params: URLSearchParams) =>
     request<CollectibleUsernameListResponse>(`/api/collectible-usernames?${params.toString()}`),
   collectibleUsername: (id: string) =>
     request<CollectibleUsernameDetail>(`/api/collectible-usernames/${encodeURIComponent(id)}`),
+  collectiblePhones: (params: URLSearchParams) =>
+    request<CollectiblePhoneListResponse>(`/api/collectible-phones?${params.toString()}`),
+  collectiblePhone: (id: string) =>
+    request<CollectiblePhoneDetail>(`/api/collectible-phones/${encodeURIComponent(id)}`),
   accountRatings: (params: URLSearchParams) =>
     request<AccountRatingListResponse>(`/api/account-ratings?${params.toString()}`),
   accountRating: (userID: string) =>
     request<AccountRatingDetail>(`/api/account-ratings/${encodeURIComponent(userID)}`),
+  dashboard: () => request<DashboardResponse>("/api/dashboard"),
+  storageStats: () => request<StorageStatsResponse>("/api/storage/stats"),
   verificationApplications: (params: URLSearchParams) =>
     request<VerificationApplicationListResponse>(`/api/verification/applications?${params.toString()}`),
   // The application id is an int64 decimal string end to end, so it is never
@@ -227,6 +243,16 @@ export const api = {
 	importGift: (form: FormData) => request<CommandResult>("/api/actions/import-gift", { method: "POST", body: form }),
 	importOfficialGift: (payload: Record<string, unknown>) => request<CommandResult>("/api/actions/import-official-gift", { method: "POST", body: JSON.stringify(payload) }),
 	publishGiftCollectibles: (giftID: string, form: FormData) => request<CommandResult>(`/api/actions/publish-gift-collectibles?gift_id=${encodeURIComponent(giftID)}`, { method: "POST", body: form }),
+	gifCatalog: () => request<GifCatalogListResponse>("/api/gif-catalog"),
+	stickerSets: (kind: "stickers" | "emoji") => request<StickerSetListResponse>(`/api/stickers?kind=${encodeURIComponent(kind)}`),
+	stickerSetDocuments: (setID: string) => request<{ document_ids: string[] }>(`/api/stickers/${encodeURIComponent(setID)}/documents`),
+	stickerDocumentAnimationURL: (documentID: string) => `/api/stickers/documents/${encodeURIComponent(documentID)}/animation`,
+	gifCatalogDocumentPreviewURL: (documentID: string) => `/api/gif-catalog/documents/${encodeURIComponent(documentID)}/preview`,
+	createStickerSet: (form: FormData) => request<CommandResult>("/api/actions/create-sticker-set", { method: "POST", body: form }),
+	addStickerToSet: (form: FormData) => request<CommandResult>("/api/actions/add-sticker-to-set", { method: "POST", body: form }),
+	createGifCatalogEntry: (form: FormData) => request<CommandResult>("/api/actions/create-gif-catalog-entry", { method: "POST", body: form }),
+	setAccountAvatar: (form: FormData) => request<CommandResult>("/api/actions/set-account-avatar", { method: "POST", body: form }),
+	setChannelAvatar: (form: FormData) => request<CommandResult>("/api/actions/set-channel-avatar", { method: "POST", body: form }),
   action: (path: string, payload: Record<string, unknown>) => request<CommandResult>(path, {
     method: "POST",
     body: JSON.stringify(payload)

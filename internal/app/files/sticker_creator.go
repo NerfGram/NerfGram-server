@@ -62,6 +62,21 @@ func (s *Service) CreateStickerSet(ctx context.Context, req domain.CreateSticker
 	if req.CreatorUserID <= 0 {
 		return domain.StickerSet{}, nil, domain.ErrStickerSetCreatorInvalid
 	}
+	return s.createStickerSet(ctx, req)
+}
+
+// AdminCreateStickerSet creates an unowned pack for console-managed sticker or
+// custom-emoji catalog entries. A short name is required because suggestion
+// needs a real user id suffix, which unowned packs deliberately do not have.
+func (s *Service) AdminCreateStickerSet(ctx context.Context, req domain.CreateStickerSetRequest) (domain.StickerSet, []domain.Document, error) {
+	req.CreatorUserID = 0
+	if strings.TrimSpace(req.ShortName) == "" {
+		return domain.StickerSet{}, nil, domain.ErrStickerSetShortNameInvalid
+	}
+	return s.createStickerSet(ctx, req)
+}
+
+func (s *Service) createStickerSet(ctx context.Context, req domain.CreateStickerSetRequest) (domain.StickerSet, []domain.Document, error) {
 	title := strings.TrimSpace(req.Title)
 	if err := validateStickerSetTitle(title); err != nil {
 		return domain.StickerSet{}, nil, err

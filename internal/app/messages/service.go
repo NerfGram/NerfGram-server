@@ -17,6 +17,7 @@ type Service struct {
 	photos       userprojection.ProfilePhotoProvider
 	privacy      userprojection.PrivacyEvaluator
 	freezes      userprojection.AccountFreezeProvider
+	phones       userprojection.CollectiblePhoneProvider
 	versions     store.ReadModelVersionStore
 	projector    *userprojection.Projector
 	botResponder BotResponder
@@ -37,7 +38,7 @@ type BotResponder interface {
 	// HandlesBot 报告 botUserID 是否为该 responder 负责的内置 bot。
 	HandlesBot(botUserID int64) bool
 	// OnPrivateMessage 处理一条投递给内置 bot 的消息；msg 为 bot 视角收件 box 行。
-	OnPrivateMessage(ctx context.Context, botUserID int64, msg domain.Message)
+	OnPrivateMessage(ctx context.Context, botUserID int64, msg domain.Message, session domain.ClientSessionMetadata)
 }
 
 // Option adjusts optional message service dependencies.
@@ -60,6 +61,10 @@ func WithPrivacyEvaluator(p userprojection.PrivacyEvaluator) Option {
 
 func WithAccountFreezeProvider(p userprojection.AccountFreezeProvider) Option {
 	return func(s *Service) { s.freezes = p }
+}
+
+func WithCollectiblePhoneProvider(p userprojection.CollectiblePhoneProvider) Option {
+	return func(s *Service) { s.phones = p }
 }
 
 // WithBotResponder 启用服务端内置 bot（BotFather）对私聊消息的自动应答。
@@ -91,6 +96,7 @@ func NewService(messages store.MessageStore, dialogs store.DialogStore, opts ...
 		userprojection.WithPhotoProvider(s.photos),
 		userprojection.WithPrivacyEvaluator(s.privacy),
 		userprojection.WithAccountFreezeProvider(s.freezes),
+		userprojection.WithCollectiblePhoneProvider(s.phones),
 	)
 	return s
 }
@@ -140,7 +146,7 @@ func (s *Service) SendPrivateText(ctx context.Context, userID int64, req domain.
 	// 兜错，不回传失败。bot 自己发出的消息不触发（SenderUserID 不会是内置 bot
 	// 的对话对象集合里关心的方向——hook 只看收件人）。
 	if err == nil && !res.Duplicate && req.BusinessAutomationKind == "" && s.botResponder != nil && s.botResponder.HandlesBot(req.RecipientUserID) {
-		s.botResponder.OnPrivateMessage(ctx, req.RecipientUserID, res.RecipientMessage)
+		s.botResponder.OnPrivateMessage(ctx, req.RecipientUserID, res.RecipientMessage, req.OriginClientSession)
 	}
 	return res, err
 }

@@ -115,20 +115,24 @@ const (
 	StarsReasonPaidMedia     StarsTransactionReason = "paid_media"   // 付费媒体解锁
 	StarsReasonPaidMessage   StarsTransactionReason = "paid_message" // 频道 Direct Message 花费
 	StarsReasonSuggestedPost StarsTransactionReason = "suggested_post"
-	StarsReasonSubscription StarsTransactionReason = "subscription" // paid invite / channel subscription
-	StarsReasonAdjust       StarsTransactionReason = "adjust" // 兜底/人工调整
+	StarsReasonSubscription  StarsTransactionReason = "subscription" // paid invite / channel subscription
+	StarsReasonPremium       StarsTransactionReason = "premium"
+	StarsReasonAdjust        StarsTransactionReason = "adjust" // 兜底/人工调整
 )
 
 // StarsTransaction 是一条账本流水。amount 带符号：贷记 > 0（含 refund/收取），借记 < 0。
 type StarsTransaction struct {
-	ID          int64 // 单调递增账本 id（keyset 游标）
-	UserID      int64 // 账本归属
-	Peer        Peer  // 对手方（grant/topup 等无对手时为零 Peer）
-	Amount      int64 // 带符号金额
-	Date        int   // Unix 秒
-	Reason      StarsTransactionReason
-	Title       string // 可选，投影到 tg.StarsTransaction.Title
-	Description string // 可选，投影到 tg.StarsTransaction.Description
+	ID              int64 // 单调递增账本 id（keyset 游标）
+	UserID          int64 // 账本归属
+	Peer            Peer  // 对手方（grant/topup 等无对手时为零 Peer）
+	Amount          int64 // 带符号金额
+	Date            int   // Unix 秒
+	Reason          StarsTransactionReason
+	Title           string // 可选，投影到 tg.StarsTransaction.Title
+	Description     string // 可选，投影到 tg.StarsTransaction.Description
+	PaymentID       int64
+	RecipientUserID int64
+	PremiumMonths   int
 }
 
 // IsCredit 报告该流水是否为入账（贷记），投影到 tg.StarsTransaction.Refund。

@@ -567,6 +567,32 @@ WHERE target_user_id=$1 AND pts=$2 AND event_type='user_emoji_status'`, resaleBu
 	}); !errors.Is(err, domain.ErrStarGiftCollectibleInvalid) {
 		t.Fatalf("duplicate official identities err = %v", err)
 	}
+	// The first input survives a successful craft. An on-chain gift address
+	// identifies the immutable NFT payload, so it must never be retained while
+	// the server swaps that input to a crafted model. TDesktop applies the same
+	// first-slot guard before sending the RPC; keep the store authoritative for
+	// older clients and direct callers.
+	if _, err := pool.Exec(ctx, `UPDATE unique_star_gifts SET gift_address=$2 WHERE id=$1`,
+		transferred.Unique.ID, "EQCraftBaseMustStayImmutable"); err != nil {
+		t.Fatalf("mark first craft input addressed: %v", err)
+	}
+	addressedReq := domain.StarGiftCraftRequest{UserID: owner.ID,
+		Refs: []domain.SavedStarGiftRef{
+			{Owner: ownerPeer, MsgID: transferred.Saved.MsgID},
+			{Owner: ownerPeer, Slug: secondUpgrade.Unique.Slug},
+		}, CommandKey: "craft-addressed-" + suffix, Date: now + 147,
+	}
+	if _, err := lifecycle.CraftStarGift(ctx, addressedReq); !errors.Is(err, domain.ErrStarGiftCraftUnavailable) {
+		t.Fatalf("craft accepted addressed first input: %v", err)
+	}
+	var addressedBurned bool
+	if err := pool.QueryRow(ctx, `SELECT burned FROM unique_star_gifts WHERE id=$1`, transferred.Unique.ID).
+		Scan(&addressedBurned); err != nil || addressedBurned {
+		t.Fatalf("addressed craft guard mutated input: burned=%v err=%v", addressedBurned, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE unique_star_gifts SET gift_address='' WHERE id=$1`, transferred.Unique.ID); err != nil {
+		t.Fatalf("restore first craft input address: %v", err)
+	}
 	crafted, err := lifecycle.CraftStarGift(ctx, domain.StarGiftCraftRequest{UserID: owner.ID,
 		Refs: []domain.SavedStarGiftRef{
 			{Owner: ownerPeer, MsgID: transferred.Saved.MsgID},
@@ -592,7 +618,8 @@ WHERE target_user_id=$1 AND pts=$2 AND event_type='user_emoji_status'`, resaleBu
 	burnedInputEdit := craftedSourceEditForUserAndGift(crafted, owner.ID, secondUpgrade.Unique.ID)
 	burnedInputAction := starGiftUniqueActionFromEdit(burnedInputEdit)
 	if craftedInputAction == nil || !craftedInputAction.Gift.Crafted || craftedInputAction.Gift.Burned ||
-		craftedInputAction.Gift.CraftChancePermille != 0 || !craftedInputAction.Saved || craftedInputAction.CanCraftAt != 0 {
+		craftedInputAction.Gift.CraftChancePermille != 0 || craftedInputAction.Gift.OfferMinStars != 0 ||
+		!craftedInputAction.Saved || craftedInputAction.CanCraftAt != 0 {
 		t.Fatalf("crafted input message projection = %+v", craftedInputAction)
 	}
 	if burnedInputAction == nil || !burnedInputAction.Gift.Burned || burnedInputAction.Gift.CraftChancePermille != 0 ||

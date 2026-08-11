@@ -1,12 +1,18 @@
 package admin
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"io"
 	"math"
+	"net/http"
 	"net/url"
 	"reflect"
 	"sort"
@@ -21,17 +27,25 @@ import (
 const (
 	ActionSetAccountFrozen        = "account.set_frozen"
 	ActionGrantPremium            = "account.grant_premium"
+	ActionRefundPremium           = "account.refund_premium"
+	ActionUpsertPremiumPlan       = "premium.plan.upsert"
 	ActionGrantStars              = "account.grant_stars"
+	ActionDebitStars              = "account.debit_stars"
 	ActionSetVerified             = "account.set_verified"
 	ActionSetUserFlags            = "account.set_flags"
 	ActionSetSupport              = "account.set_support"
 	ActionSetUsername             = "account.set_username"
+	ActionSetProfile              = "account.set_profile"
+	ActionSetPhone                = "account.set_phone"
+	ActionSetLoginEmail           = "account.set_login_email"
+	ActionSetAccountAvatar        = "account.set_avatar"
 	ActionSetUserColor            = "account.set_color"
 	ActionSetUserEmojiStatus      = "account.set_emoji_status"
 	ActionSetChannelUsername      = "channel.set_username"
 	ActionSetChannelSettings      = "channel.set_settings"
 	ActionSetChannelColor         = "channel.set_color"
 	ActionSetChannelEmojiStatus   = "channel.set_emoji_status"
+	ActionSetChannelAvatar        = "channel.set_avatar"
 	ActionSetChannelVerified      = "channel.set_verified"
 	ActionSetChannelFlags         = "channel.set_flags"
 	ActionRevokeSessions          = "account.revoke_sessions"
@@ -44,12 +58,30 @@ const (
 	ActionSetStarGiftSortOrder    = "gifts.set_sort_order"
 	ActionGiveGift                = "gifts.give"
 	ActionCreateBot               = "bot.create"
+	ActionCreateBroadcast         = "broadcast.create"
+	ActionSetStickerSetArchived   = "stickers.set_archived"
+	ActionSetStickerSetSortOrder  = "stickers.set_sort_order"
+	ActionRenameStickerSet        = "stickers.rename"
+	ActionDeleteStickerSet        = "stickers.delete"
+	ActionCreateStickerSet        = "stickers.create"
+	ActionAddStickerToSet         = "stickers.add_sticker"
+	ActionRemoveStickerFromSet    = "stickers.remove_sticker"
+	ActionCreateGifCatalogEntry   = "gif_catalog.create"
+	ActionSetGifCatalogEnabled    = "gif_catalog.set_enabled"
+	ActionSetGifCatalogSortOrder  = "gif_catalog.set_sort_order"
+	ActionDeleteGifCatalogEntry   = "gif_catalog.delete"
 	ActionDeleteBot               = "bot.delete"
+	ActionExportBotToken          = "bot.export_token"
 	// Collectible (Fragment-style) username lifecycle.
 	ActionMintCollectibleUsername     = "usernames.collectible.mint"
 	ActionTransferCollectibleUsername = "usernames.collectible.transfer"
 	ActionRevokeCollectibleUsername   = "usernames.collectible.revoke"
 	ActionDeleteCollectibleUsername   = "usernames.collectible.delete"
+	ActionMintCollectiblePhone        = "phones.collectible.mint"
+	ActionUpdateCollectiblePhonePrice = "phones.collectible.update_price"
+	ActionTransferCollectiblePhone    = "phones.collectible.transfer"
+	ActionRevokeCollectiblePhone      = "phones.collectible.revoke"
+	ActionDeleteCollectiblePhone      = "phones.collectible.delete"
 	// Composite account rating.
 	ActionRecomputeAccountRating = "rating.recompute"
 	ActionAdjustAccountRating    = "rating.adjust"
@@ -197,10 +229,36 @@ type UsersService interface {
 	UpdateUsername(ctx context.Context, userID int64, username string) (domain.User, error)
 	UpdateColor(ctx context.Context, userID int64, forProfile bool, color domain.PeerColor) (domain.User, error)
 	UpdateEmojiStatus(ctx context.Context, userID int64, status domain.UserEmojiStatus) (domain.User, error)
+	UpdateProfile(ctx context.Context, userID int64, update domain.UserProfileUpdate) (domain.User, error)
+	SetPhone(ctx context.Context, userID int64, phone string) (domain.User, error)
+}
+
+type AccountService interface {
+	ValidLoginEmail(email string) bool
+	SetLoginEmail(ctx context.Context, userID int64, email string) error
+	ClearLoginEmail(ctx context.Context, userID int64) error
+	LoginEmail(ctx context.Context, userID int64) (string, bool, error)
 }
 
 type StarsService interface {
 	Credit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
+	Debit(ctx context.Context, userID, amount int64, reason domain.StarsTransactionReason, peer domain.Peer, title, desc string) (domain.StarsBalance, error)
+}
+
+type BroadcastService interface {
+	Preview(ctx context.Context, message string, mode domain.BroadcastTargetMode, selectedUserIDs []int64) (int64, error)
+	Create(ctx context.Context, message string, mode domain.BroadcastTargetMode, selectedUserIDs []int64, createdBy string) (domain.Broadcast, error)
+}
+
+type PremiumService interface {
+	Plan(ctx context.Context, months int) (domain.PremiumPlan, error)
+	Catalog(ctx context.Context) ([]domain.PremiumPlan, error)
+	UpsertPlan(ctx context.Context, req domain.PremiumPlanUpsertRequest) (domain.PremiumPlan, error)
+	Entitlements(ctx context.Context, userID int64, limit int) ([]domain.PremiumEntitlement, error)
+	Payment(ctx context.Context, paymentIntentID int64) (domain.PremiumPaymentDetails, bool, error)
+	Grant(ctx context.Context, req domain.PremiumAdminGrantRequest) (domain.PremiumEntitlement, domain.User, error)
+	Revoke(ctx context.Context, req domain.PremiumAdminRevokeRequest) (domain.User, error)
+	Refund(ctx context.Context, req domain.PremiumRefundRequest) (domain.PremiumPurchaseResult, error)
 }
 
 type StarsNotifier interface {
@@ -227,6 +285,7 @@ type ChannelsService interface {
 	AdminSetUsername(ctx context.Context, channelID int64, username string) (domain.Channel, error)
 	AdminSetColor(ctx context.Context, channelID int64, forProfile bool, color domain.ChannelPeerColor) (domain.Channel, error)
 	AdminSetEmojiStatus(ctx context.Context, channelID int64, status domain.ChannelEmojiStatus) (domain.Channel, error)
+	AdminSetPhoto(ctx context.Context, channelID int64, photo domain.Photo) (domain.Channel, error)
 }
 
 type ChannelNotifier interface {
@@ -260,18 +319,54 @@ type OfficialGiftsSource interface {
 	Bundle(ctx context.Context, giftID int64, includeCollectible bool) (officialgifts.Bundle, error)
 }
 
+type AvatarResolver interface {
+	CurrentProfilePhotoKind(ctx context.Context, ownerType domain.PeerType, ownerID int64, kind domain.ProfilePhotoKind) (domain.Photo, bool, error)
+	GetPhoto(ctx context.Context, id int64) (domain.Photo, bool, error)
+	GetFile(ctx context.Context, req domain.FileDownloadRequest) (domain.FileChunk, bool, error)
+	ValidateAvatarUpload(data []byte) bool
+	CreateAvatarFromBytes(ctx context.Context, data []byte) (domain.Photo, error)
+	SetCurrentProfilePhotoKind(ctx context.Context, ownerType domain.PeerType, ownerID int64, kind domain.ProfilePhotoKind, photoID int64, date int) (domain.Photo, bool, error)
+}
+
 // BotService creates bot accounts on behalf of the admin. It mirrors the
 // owner-scoped /newbot flow: a bot is a users row (is_bot=true) plus a bots row
 // owned by ownerUserID, and the returned token is shown once to the operator.
 type BotService interface {
 	CreateBot(ctx context.Context, ownerUserID int64, name, username string) (domain.User, string, error)
 	DeleteBot(ctx context.Context, botUserID int64) (domain.User, error)
+	AdminExportBotToken(ctx context.Context, botUserID int64) (string, error)
 }
 
 // EmojiService renders custom-emoji document animations for the admin emoji
 // browser (Lottie JSON, TGS transparently decompressed).
 type EmojiService interface {
 	DocumentAnimationJSON(ctx context.Context, documentID int64) ([]byte, bool, error)
+}
+
+// StickerSetsService is the admin-console management surface over sticker and
+// custom-emoji packs. These methods deliberately do not require creator
+// ownership, so seed-imported and operator-created packs can both be managed.
+type StickerSetsService interface {
+	AdminSetStickerSetArchived(ctx context.Context, setID int64, archived bool) (bool, error)
+	AdminSetStickerSetSortOrder(ctx context.Context, setID int64, order int) (bool, error)
+	AdminRenameStickerSet(ctx context.Context, setID int64, title string) (domain.StickerSet, error)
+	AdminDeleteStickerSet(ctx context.Context, setID int64) (domain.StickerSetKind, error)
+	ValidateStickerMaterialUpload(fileName string, data []byte) (mimeType string, ok bool)
+	AdminUploadStickerMaterial(ctx context.Context, fileName string, data []byte) (domain.Document, error)
+	AdminCreateStickerSet(ctx context.Context, req domain.CreateStickerSetRequest) (domain.StickerSet, []domain.Document, error)
+	AdminAddStickerToSet(ctx context.Context, setID int64, item domain.StickerSetItemInput) (domain.StickerSet, []domain.Document, error)
+	AdminRemoveStickerFromSet(ctx context.Context, setID int64, documentID int64) (domain.StickerSet, []domain.Document, error)
+}
+
+type GifCatalogService interface {
+	ValidateGifUpload(fileName string, data []byte) (string, bool)
+	AdminUploadGifMaterial(ctx context.Context, fileName string, data []byte) (domain.Document, error)
+	AdminCreateGifCatalogEntry(ctx context.Context, title string, documentID int64) (domain.GifCatalogEntry, error)
+	AdminListGifCatalog(ctx context.Context) ([]domain.GifCatalogEntry, error)
+	AdminSetGifCatalogEnabled(ctx context.Context, id int64, enabled bool) (bool, error)
+	AdminSetGifCatalogSortOrder(ctx context.Context, id int64, order int) (bool, error)
+	AdminDeleteGifCatalogEntry(ctx context.Context, id int64) (bool, error)
+	GetFile(ctx context.Context, req domain.FileDownloadRequest) (domain.FileChunk, bool, error)
 }
 
 type ModerationService interface {
@@ -297,6 +392,18 @@ type CollectibleUsernamesService interface {
 	Collectible(ctx context.Context, username string) (domain.CollectibleUsername, error)
 	List(ctx context.Context, filter domain.CollectibleUsernameFilter) ([]domain.CollectibleUsername, error)
 	Transfers(ctx context.Context, collectibleID int64, limit int) ([]domain.CollectibleUsernameTransfer, error)
+}
+
+type CollectiblePhonesService interface {
+	MintCollectiblePhone(context.Context, domain.MintCollectiblePhoneRequest) (domain.CollectiblePhone, bool, error)
+	UpdateCollectiblePhonePrice(context.Context, domain.UpdateCollectiblePhonePriceRequest) (domain.CollectiblePhone, bool, error)
+	TransferCollectiblePhone(context.Context, domain.TransferCollectiblePhoneRequest) (domain.CollectiblePhone, bool, error)
+	RevokeCollectiblePhone(context.Context, domain.RevokeCollectiblePhoneRequest) (domain.CollectiblePhone, bool, error)
+	DeleteCollectiblePhone(context.Context, domain.DeleteCollectiblePhoneRequest) (bool, error)
+	CollectiblePhone(context.Context, string) (domain.CollectiblePhone, error)
+	CollectiblePhoneByID(context.Context, int64) (domain.CollectiblePhone, error)
+	ListCollectiblePhones(context.Context, domain.CollectiblePhoneFilter) ([]domain.CollectiblePhone, error)
+	CollectiblePhoneTransfers(context.Context, int64, int) ([]domain.CollectiblePhoneTransfer, error)
 }
 
 // collectibleUsernameByIDLookup is the optional by-identity read. Stores that
@@ -331,7 +438,10 @@ type Dependencies struct {
 	Auth                   AuthService
 	Revoker                AuthKeyRevoker
 	Users                  UsersService
+	Account                AccountService
+	Photos                 AvatarResolver
 	Stars                  StarsService
+	Premium                PremiumService
 	StarsNotifier          StarsNotifier
 	UserNotifier           UserNotifier
 	UserModerationNotifier UserModerationNotifier
@@ -343,9 +453,13 @@ type Dependencies struct {
 	GiftGranter            GiftGranter
 	OfficialGifts          OfficialGiftsSource
 	Bots                   BotService
+	Broadcast              BroadcastService
 	Emoji                  EmojiService
+	StickerSets            StickerSetsService
+	GifCatalog             GifCatalogService
 	Moderation             ModerationService
 	Usernames              CollectibleUsernamesService
+	CollectiblePhones      CollectiblePhonesService
 	Rating                 AccountRatingService
 	Verification           VerificationService
 	// BotVerification is the third-party mechanism, wired separately from
@@ -360,7 +474,10 @@ type Service struct {
 	auth                   AuthService
 	revoker                AuthKeyRevoker
 	users                  UsersService
+	account                AccountService
+	photos                 AvatarResolver
 	stars                  StarsService
+	premium                PremiumService
 	starsNotifier          StarsNotifier
 	userNotifier           UserNotifier
 	userModerationNotifier UserModerationNotifier
@@ -372,9 +489,13 @@ type Service struct {
 	giftGranter            GiftGranter
 	officialGifts          OfficialGiftsSource
 	bots                   BotService
+	broadcast              BroadcastService
 	emoji                  EmojiService
+	stickerSets            StickerSetsService
+	gifCatalog             GifCatalogService
 	moderation             ModerationService
 	usernames              CollectibleUsernamesService
+	collectiblePhones      CollectiblePhonesService
 	rating                 AccountRatingService
 	verification           VerificationService
 	botVerification        BotVerificationService
@@ -402,8 +523,17 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	if deps.Users != nil {
 		s.users = deps.Users
 	}
+	if deps.Account != nil {
+		s.account = deps.Account
+	}
+	if deps.Photos != nil {
+		s.photos = deps.Photos
+	}
 	if deps.Stars != nil {
 		s.stars = deps.Stars
+	}
+	if deps.Premium != nil {
+		s.premium = deps.Premium
 	}
 	if deps.StarsNotifier != nil {
 		s.starsNotifier = deps.StarsNotifier
@@ -438,14 +568,26 @@ func (s *Service) Configure(deps Dependencies) *Service {
 	if deps.Bots != nil {
 		s.bots = deps.Bots
 	}
+	if deps.Broadcast != nil {
+		s.broadcast = deps.Broadcast
+	}
 	if deps.Emoji != nil {
 		s.emoji = deps.Emoji
+	}
+	if deps.StickerSets != nil {
+		s.stickerSets = deps.StickerSets
+	}
+	if deps.GifCatalog != nil {
+		s.gifCatalog = deps.GifCatalog
 	}
 	if deps.Moderation != nil {
 		s.moderation = deps.Moderation
 	}
 	if deps.Usernames != nil {
 		s.usernames = deps.Usernames
+	}
+	if deps.CollectiblePhones != nil {
+		s.collectiblePhones = deps.CollectiblePhones
 	}
 	if deps.Rating != nil {
 		s.rating = deps.Rating
@@ -726,11 +868,38 @@ type SetAccountFrozenRequest struct {
 
 type GrantPremiumRequest struct {
 	CommandMeta
-	UserID int64 `json:"user_id"`
-	Months int   `json:"months"`
+	UserID        int64 `json:"user_id"`
+	Months        int   `json:"months"`
+	EntitlementID int64 `json:"entitlement_id,omitempty"`
+}
+
+type RefundPremiumRequest struct {
+	CommandMeta
+	PaymentIntentID int64 `json:"payment_intent_id"`
+}
+
+type UpsertPremiumPlanRequest struct {
+	CommandMeta
+	Months          int    `json:"months"`
+	DurationDays    int    `json:"duration_days"`
+	AmountStars     int64  `json:"amount_stars"`
+	FiatCurrency    string `json:"fiat_currency"`
+	FiatAmount      int64  `json:"fiat_amount"`
+	StoreProduct    string `json:"store_product"`
+	StoreQuantity   int    `json:"store_quantity"`
+	Enabled         bool   `json:"enabled"`
+	SortOrder       int    `json:"sort_order"`
+	Label           string `json:"label"`
+	ExpectedVersion int64  `json:"expected_version"`
 }
 
 type GrantStarsRequest struct {
+	CommandMeta
+	UserID int64 `json:"user_id"`
+	Amount int64 `json:"amount"`
+}
+
+type DebitStarsRequest struct {
 	CommandMeta
 	UserID int64 `json:"user_id"`
 	Amount int64 `json:"amount"`
@@ -772,6 +941,41 @@ type SetUsernameRequest struct {
 	CommandMeta
 	UserID   int64  `json:"user_id"`
 	Username string `json:"username"`
+}
+
+type SetProfileRequest struct {
+	CommandMeta
+	UserID    int64  `json:"user_id"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+}
+
+type SetPhoneRequest struct {
+	CommandMeta
+	UserID int64  `json:"user_id"`
+	Phone  string `json:"phone"`
+}
+
+type SetLoginEmailRequest struct {
+	CommandMeta
+	UserID int64  `json:"user_id"`
+	Email  string `json:"email"`
+}
+
+type SetAccountAvatarRequest struct {
+	CommandMeta
+	UserID        int64  `json:"user_id"`
+	FileName      string `json:"file_name"`
+	ContentSHA256 string `json:"content_sha256"`
+	Data          []byte `json:"-"`
+}
+
+type SetChannelAvatarRequest struct {
+	CommandMeta
+	ChannelID     int64  `json:"channel_id"`
+	FileName      string `json:"file_name"`
+	ContentSHA256 string `json:"content_sha256"`
+	Data          []byte `json:"-"`
 }
 
 type SetChannelUsernameRequest struct {
@@ -835,7 +1039,95 @@ type CreateBotRequest struct {
 	Username    string `json:"username"`
 }
 
+type CreateBroadcastRequest struct {
+	CommandMeta
+	Message    string  `json:"message"`
+	TargetMode string  `json:"target_mode"`
+	UserIDs    []int64 `json:"user_ids,omitempty"`
+}
+
+type SetStickerSetArchivedRequest struct {
+	CommandMeta
+	SetID    int64 `json:"set_id,string"`
+	Archived bool  `json:"archived"`
+}
+
+type SetStickerSetSortOrderRequest struct {
+	CommandMeta
+	SetID     int64 `json:"set_id,string"`
+	SortOrder int   `json:"sort_order"`
+}
+
+type RenameStickerSetRequest struct {
+	CommandMeta
+	SetID int64  `json:"set_id,string"`
+	Title string `json:"title"`
+}
+
+type DeleteStickerSetRequest struct {
+	CommandMeta
+	SetID int64 `json:"set_id,string"`
+}
+
+type CreateStickerSetRequest struct {
+	CommandMeta
+	Title         string `json:"title"`
+	ShortName     string `json:"short_name"`
+	Kind          string `json:"kind"`
+	Emoji         string `json:"emoji"`
+	Keywords      string `json:"keywords,omitempty"`
+	FileName      string `json:"file_name"`
+	ContentSHA256 string `json:"content_sha256,omitempty"`
+	Data          []byte `json:"-"`
+}
+
+type AddStickerToSetRequest struct {
+	CommandMeta
+	SetID         int64  `json:"set_id,string"`
+	Emoji         string `json:"emoji"`
+	Keywords      string `json:"keywords,omitempty"`
+	FileName      string `json:"file_name"`
+	ContentSHA256 string `json:"content_sha256,omitempty"`
+	Data          []byte `json:"-"`
+}
+
+type RemoveStickerFromSetRequest struct {
+	CommandMeta
+	SetID      int64 `json:"set_id,string"`
+	DocumentID int64 `json:"document_id,string"`
+}
+
+type CreateGifCatalogEntryRequest struct {
+	CommandMeta
+	Title         string `json:"title"`
+	FileName      string `json:"file_name"`
+	Data          []byte `json:"-"`
+	ContentSHA256 string `json:"content_sha256,omitempty"`
+}
+
+type SetGifCatalogEnabledRequest struct {
+	CommandMeta
+	ID      int64 `json:"id,string"`
+	Enabled bool  `json:"enabled"`
+}
+
+type SetGifCatalogSortOrderRequest struct {
+	CommandMeta
+	ID        int64 `json:"id,string"`
+	SortOrder int   `json:"sort_order"`
+}
+
+type DeleteGifCatalogEntryRequest struct {
+	CommandMeta
+	ID int64 `json:"id,string"`
+}
+
 type DeleteBotRequest struct {
+	CommandMeta
+	BotUserID int64 `json:"bot_user_id"`
+}
+
+type ExportBotTokenRequest struct {
 	CommandMeta
 	BotUserID int64 `json:"bot_user_id"`
 }
@@ -873,8 +1165,9 @@ type TransferCollectibleUsernameRequest struct {
 // permanently when Burn is set.
 type RevokeCollectibleUsernameRequest struct {
 	CommandMeta
-	Username string `json:"username"`
-	Burn     bool   `json:"burn"`
+	Username            string `json:"username"`
+	ExpectedOwnerUserID int64  `json:"expected_owner_user_id,string,omitempty"`
+	Burn                bool   `json:"burn"`
 }
 
 // DeleteCollectibleUsernameRequest erases a collectible asset entirely. Unlike a
@@ -883,6 +1176,43 @@ type RevokeCollectibleUsernameRequest struct {
 type DeleteCollectibleUsernameRequest struct {
 	CommandMeta
 	Username string `json:"username"`
+}
+
+type MintCollectiblePhoneRequest struct {
+	CommandMeta
+	Phone          string                      `json:"phone"`
+	Tier           domain.CollectiblePhoneTier `json:"tier"`
+	OwnerUserID    int64                       `json:"owner_user_id,string,omitempty"`
+	Currency       string                      `json:"currency"`
+	Amount         int64                       `json:"amount,string"`
+	CryptoCurrency string                      `json:"crypto_currency,omitempty"`
+	CryptoAmount   int64                       `json:"crypto_amount,string,omitempty"`
+	URL            string                      `json:"url,omitempty"`
+	PurchaseDate   int64                       `json:"purchase_date,omitempty"`
+}
+
+type UpdateCollectiblePhonePriceRequest struct {
+	CommandMeta
+	Phone          string `json:"phone"`
+	Currency       string `json:"currency"`
+	Amount         int64  `json:"amount,string"`
+	CryptoCurrency string `json:"crypto_currency"`
+	CryptoAmount   int64  `json:"crypto_amount,string"`
+}
+
+type TransferCollectiblePhoneRequest struct {
+	CommandMeta
+	Phone    string `json:"phone"`
+	ToUserID int64  `json:"to_user_id,string"`
+}
+type RevokeCollectiblePhoneRequest struct {
+	CommandMeta
+	Phone string `json:"phone"`
+	Burn  bool   `json:"burn"`
+}
+type DeleteCollectiblePhoneRequest struct {
+	CommandMeta
+	Phone string `json:"phone"`
 }
 
 // RecomputeAccountRatingRequest forces one user's composite rating to be
@@ -1136,8 +1466,14 @@ func (s *Service) GrantPremium(ctx context.Context, req GrantPremiumRequest) (Co
 	if req.Months < 0 || req.Months > maxPremiumMonths {
 		return CommandResult{}, fmt.Errorf("months must be between 0 and %d", maxPremiumMonths)
 	}
+	if req.EntitlementID < 0 || (req.Months > 0 && req.EntitlementID != 0) {
+		return CommandResult{}, fmt.Errorf("entitlement_id is only valid when months is 0")
+	}
 	if s == nil || s.users == nil {
 		return CommandResult{}, fmt.Errorf("admin user dependency is not configured")
+	}
+	if req.EntitlementID > 0 && s.premium == nil {
+		return CommandResult{}, fmt.Errorf("exact premium entitlement revoke is not configured")
 	}
 	return s.runCommand(ctx, req.CommandMeta, ActionGrantPremium, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
 		u, found, err := s.users.AdminUser(ctx, req.UserID)
@@ -1151,10 +1487,40 @@ func (s *Service) GrantPremium(ctx context.Context, req GrantPremiumRequest) (Co
 			return CommandResult{}, domain.ErrPremiumBotUnsupported
 		}
 		details := premiumCommandDetails(u, req.Months, s.now())
+		if req.EntitlementID > 0 {
+			details["entitlement_id"] = req.EntitlementID
+		}
 		if req.DryRun {
 			return CommandResult{Message: "dry-run completed", Details: details}, nil
 		}
-		updated, err := s.users.GrantPremium(ctx, req.UserID, req.Months)
+		var updated domain.User
+		if s.premium != nil {
+			actorID := premiumAdminActorID(req.Actor)
+			if req.Months == 0 {
+				updated, err = s.premium.Revoke(ctx, domain.PremiumAdminRevokeRequest{
+					UserID: req.UserID, ActorUserID: actorID, Date: int(s.now().Unix()),
+					Reason: req.Reason, CommandKey: strings.TrimSpace(req.CommandID), EntitlementID: req.EntitlementID,
+				})
+			} else {
+				durationDays := req.Months * 30
+				if plan, planErr := s.premium.Plan(ctx, req.Months); planErr == nil {
+					durationDays = plan.DurationDays
+				} else if !errors.Is(planErr, domain.ErrPremiumPlanUnavailable) {
+					return CommandResult{}, planErr
+				}
+				var entitlement domain.PremiumEntitlement
+				entitlement, updated, err = s.premium.Grant(ctx, domain.PremiumAdminGrantRequest{
+					UserID: req.UserID, ActorUserID: actorID, Months: req.Months,
+					DurationDays: durationDays, Date: int(s.now().Unix()),
+					Reason: req.Reason, CommandKey: strings.TrimSpace(req.CommandID),
+				})
+				if err == nil {
+					details["entitlement_id"] = entitlement.ID
+				}
+			}
+		} else {
+			updated, err = s.users.GrantPremium(ctx, req.UserID, req.Months)
+		}
 		if err != nil {
 			return CommandResult{}, err
 		}
@@ -1169,6 +1535,127 @@ func (s *Service) GrantPremium(ctx context.Context, req GrantPremiumRequest) (Co
 		}
 		return CommandResult{Message: msg, Details: details}, nil
 	})
+}
+
+func (s *Service) RefundPremium(ctx context.Context, req RefundPremiumRequest) (CommandResult, error) {
+	if req.PaymentIntentID <= 0 {
+		return CommandResult{}, fmt.Errorf("payment_intent_id is required")
+	}
+	if s == nil || s.premium == nil {
+		return CommandResult{}, fmt.Errorf("admin premium dependency is not configured")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionRefundPremium, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"payment_intent_id": req.PaymentIntentID}
+		if req.DryRun {
+			return CommandResult{Message: "dry-run completed", Details: details}, nil
+		}
+		result, err := s.premium.Refund(ctx, domain.PremiumRefundRequest{
+			PaymentIntentID: req.PaymentIntentID,
+			ActorUserID:     premiumAdminActorID(req.Actor),
+			Date:            int(s.now().Unix()),
+			Reason:          req.Reason,
+			CommandKey:      strings.TrimSpace(req.CommandID),
+		})
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details["buyer_user_id"] = result.Form.BuyerUserID
+		details["recipient_user_id"] = result.Form.RecipientUserID
+		details["amount_stars"] = result.Form.AmountStars
+		details["months"] = result.Form.Months
+		details["updated_premium_until"] = result.User.PremiumUntil
+		details["updated_stars_balance"] = result.Balance.Balance
+		if err := s.notifyUserChanged(ctx, result.User); err != nil {
+			details["user_notify_error"] = err.Error()
+		}
+		if err := s.notifyStarsBalanceChanged(ctx, result.Balance); err != nil {
+			details["stars_notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "premium payment refunded", Details: details}, nil
+	})
+}
+
+func (s *Service) PremiumEntitlements(
+	ctx context.Context,
+	userID int64,
+	limit int,
+) ([]domain.PremiumEntitlement, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.premium == nil {
+		return nil, fmt.Errorf("admin premium dependency is not configured")
+	}
+	return s.premium.Entitlements(ctx, userID, limit)
+}
+
+func (s *Service) PremiumPayment(
+	ctx context.Context,
+	paymentIntentID int64,
+) (domain.PremiumPaymentDetails, bool, error) {
+	if paymentIntentID <= 0 {
+		return domain.PremiumPaymentDetails{}, false, fmt.Errorf("payment_intent_id is required")
+	}
+	if s == nil || s.premium == nil {
+		return domain.PremiumPaymentDetails{}, false, fmt.Errorf("admin premium dependency is not configured")
+	}
+	return s.premium.Payment(ctx, paymentIntentID)
+}
+
+func (s *Service) PremiumPlans(ctx context.Context) ([]domain.PremiumPlan, error) {
+	if s == nil || s.premium == nil {
+		return nil, fmt.Errorf("admin premium dependency is not configured")
+	}
+	return s.premium.Catalog(ctx)
+}
+
+func (s *Service) UpsertPremiumPlan(
+	ctx context.Context,
+	req UpsertPremiumPlanRequest,
+) (CommandResult, error) {
+	req.Label = strings.TrimSpace(req.Label)
+	if s == nil || s.premium == nil {
+		return CommandResult{}, fmt.Errorf("admin premium dependency is not configured")
+	}
+	validation := domain.PremiumPlanUpsertRequest{
+		Months: req.Months, DurationDays: req.DurationDays, AmountStars: req.AmountStars,
+		FiatCurrency: req.FiatCurrency, FiatAmount: req.FiatAmount,
+		StoreProduct: req.StoreProduct, StoreQuantity: req.StoreQuantity,
+		Enabled: req.Enabled, SortOrder: req.SortOrder, Label: req.Label,
+		ExpectedVersion: req.ExpectedVersion, ActorUserID: 1, Date: 1,
+		Reason: strings.TrimSpace(req.Reason), CommandKey: strings.TrimSpace(req.CommandID),
+	}
+	if !validation.Valid() {
+		return CommandResult{}, domain.ErrPremiumPlanInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionUpsertPremiumPlan, 0, domain.Peer{}, req,
+		func() (CommandResult, error) {
+			details := map[string]any{
+				"months": req.Months, "duration_days": req.DurationDays,
+				"amount_stars": req.AmountStars, "enabled": req.Enabled,
+				"fiat_currency": req.FiatCurrency, "fiat_amount": req.FiatAmount,
+				"store_product": req.StoreProduct, "store_quantity": req.StoreQuantity,
+				"sort_order": req.SortOrder, "label": req.Label,
+				"expected_version": req.ExpectedVersion,
+			}
+			if req.DryRun {
+				return CommandResult{Message: "premium plan validated", Details: details}, nil
+			}
+			updated, err := s.premium.UpsertPlan(ctx, domain.PremiumPlanUpsertRequest{
+				Months: req.Months, DurationDays: req.DurationDays, AmountStars: req.AmountStars,
+				FiatCurrency: req.FiatCurrency, FiatAmount: req.FiatAmount,
+				StoreProduct: req.StoreProduct, StoreQuantity: req.StoreQuantity,
+				Enabled: req.Enabled, SortOrder: req.SortOrder, Label: req.Label,
+				ExpectedVersion: req.ExpectedVersion,
+				ActorUserID:     premiumAdminActorID(req.Actor), Date: int(s.now().Unix()),
+				Reason: req.Reason, CommandKey: req.CommandID,
+			})
+			if err != nil {
+				return CommandResult{Details: details}, err
+			}
+			details["plan"] = updated
+			return CommandResult{Message: "premium plan saved", Details: details}, nil
+		})
 }
 
 func (s *Service) GrantStars(ctx context.Context, req GrantStarsRequest) (CommandResult, error) {
@@ -1211,9 +1698,46 @@ func (s *Service) GrantStars(ctx context.Context, req GrantStarsRequest) (Comman
 	})
 }
 
+func (s *Service) DebitStars(ctx context.Context, req DebitStarsRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if req.Amount <= 0 || req.Amount > maxStarsGrant {
+		return CommandResult{}, fmt.Errorf("amount must be between 1 and %d", maxStarsGrant)
+	}
+	if s == nil || s.users == nil || s.stars == nil {
+		return CommandResult{}, fmt.Errorf("admin stars dependencies are not configured")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionDebitStars, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		details := map[string]any{"amount": req.Amount, "username": u.Username, "phone": u.Phone, "would_debit": true}
+		if req.DryRun {
+			return CommandResult{Message: "dry-run completed", Details: details}, nil
+		}
+		balance, err := s.stars.Debit(ctx, req.UserID, req.Amount, domain.StarsReasonAdjust, domain.Peer{}, "Admin Stars debit", req.Reason)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details["updated_balance"] = balance.Balance
+		if err := s.notifyStarsBalanceChanged(ctx, balance); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "stars debited", Details: details}, nil
+	})
+}
+
 func (s *Service) SetVerified(ctx context.Context, req SetVerifiedRequest) (CommandResult, error) {
 	if req.UserID <= 0 {
 		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if domain.IsSystemUserID(req.UserID) && !req.Verified {
+		return CommandResult{}, fmt.Errorf("system user verification cannot be removed")
 	}
 	if s == nil || s.users == nil {
 		return CommandResult{}, fmt.Errorf("admin user dependency is not configured")
@@ -1479,6 +2003,193 @@ func (s *Service) SetUsername(ctx context.Context, req SetUsernameRequest) (Comm
 	})
 }
 
+func (s *Service) SetProfile(ctx context.Context, req SetProfileRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if domain.IsSystemUserID(req.UserID) {
+		return CommandResult{}, fmt.Errorf("system user profile cannot be changed")
+	}
+	if s == nil || s.users == nil {
+		return CommandResult{}, fmt.Errorf("admin user dependency is not configured")
+	}
+	req.FirstName = strings.TrimSpace(req.FirstName)
+	req.LastName = strings.TrimSpace(req.LastName)
+	return s.runCommand(ctx, req.CommandMeta, ActionSetProfile, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		details := map[string]any{
+			"previous_first_name": u.FirstName,
+			"previous_last_name":  u.LastName,
+			"new_first_name":      req.FirstName,
+			"new_last_name":       req.LastName,
+			"would_change":        u.FirstName != req.FirstName || u.LastName != req.LastName,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "profile update validated", Details: details}, nil
+		}
+		updated, err := s.users.UpdateProfile(ctx, req.UserID, domain.UserProfileUpdate{
+			FirstName: req.FirstName, HasFirstName: true,
+			LastName: req.LastName, HasLastName: true,
+		})
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		if err := s.notifyUserChanged(ctx, updated); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "profile updated", Details: details}, nil
+	})
+}
+
+func (s *Service) SetPhone(ctx context.Context, req SetPhoneRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.users == nil {
+		return CommandResult{}, fmt.Errorf("admin user dependency is not configured")
+	}
+	req.Phone = domain.NormalizePhone(req.Phone)
+	if !domain.ValidPhone(req.Phone) {
+		return CommandResult{}, domain.ErrPhoneNumberInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetPhone, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		if u.Bot || domain.IsSystemUserID(u.ID) {
+			return CommandResult{}, domain.ErrPhoneChangeForbidden
+		}
+		details := map[string]any{
+			"previous_phone": u.Phone,
+			"new_phone":      req.Phone,
+			"would_change":   u.Phone != req.Phone,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "phone update validated", Details: details}, nil
+		}
+		updated, err := s.users.SetPhone(ctx, req.UserID, req.Phone)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["changed"] = u.Phone != updated.Phone
+		if err := s.notifyUserChanged(ctx, updated); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "phone updated", Details: details}, nil
+	})
+}
+
+func (s *Service) SetLoginEmail(ctx context.Context, req SetLoginEmailRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if s == nil || s.users == nil || s.account == nil {
+		return CommandResult{}, fmt.Errorf("admin account dependencies are not configured")
+	}
+	req.Email = strings.TrimSpace(req.Email)
+	if req.Email != "" && !s.account.ValidLoginEmail(req.Email) {
+		return CommandResult{}, domain.ErrEmailInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetLoginEmail, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		if u.Bot || domain.IsSystemUserID(u.ID) {
+			return CommandResult{}, domain.ErrEmailInvalid
+		}
+		previous, _, err := s.account.LoginEmail(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{
+			"previous_login_email": previous,
+			"new_login_email":      req.Email,
+			"would_change":         !strings.EqualFold(previous, req.Email),
+		}
+		if req.DryRun {
+			return CommandResult{Message: "login email update validated", Details: details}, nil
+		}
+		if req.Email == "" {
+			err = s.account.ClearLoginEmail(ctx, req.UserID)
+		} else {
+			err = s.account.SetLoginEmail(ctx, req.UserID, req.Email)
+		}
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		message := "login email updated"
+		if req.Email == "" {
+			message = "login email cleared"
+		}
+		return CommandResult{Message: message, Details: details}, nil
+	})
+}
+
+const MaxAccountAvatarBytes = 4 << 20
+
+func (s *Service) SetAccountAvatar(ctx context.Context, req SetAccountAvatarRequest) (CommandResult, error) {
+	if req.UserID <= 0 {
+		return CommandResult{}, fmt.Errorf("user_id is required")
+	}
+	if domain.IsSystemUserID(req.UserID) {
+		return CommandResult{}, fmt.Errorf("system user avatar cannot be changed")
+	}
+	if s == nil || s.users == nil || s.photos == nil {
+		return CommandResult{}, fmt.Errorf("admin avatar dependencies are not configured")
+	}
+	if len(req.Data) == 0 || len(req.Data) > MaxAccountAvatarBytes || !s.photos.ValidateAvatarUpload(req.Data) {
+		return CommandResult{}, domain.ErrPhotoInvalid
+	}
+	digest := sha256.Sum256(req.Data)
+	req.ContentSHA256 = hex.EncodeToString(digest[:])
+	return s.runCommand(ctx, req.CommandMeta, ActionSetAccountAvatar, req.UserID, domain.Peer{}, req, func() (CommandResult, error) {
+		u, found, err := s.users.AdminUser(ctx, req.UserID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if !found {
+			return CommandResult{}, domain.ErrUserNotFound
+		}
+		details := map[string]any{
+			"file_name":      req.FileName,
+			"bytes":          len(req.Data),
+			"content_sha256": req.ContentSHA256,
+			"bot":            u.Bot,
+		}
+		if req.DryRun {
+			return CommandResult{Message: "avatar update validated", Details: details}, nil
+		}
+		photo, err := s.photos.CreateAvatarFromBytes(ctx, req.Data)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		if _, found, err := s.photos.SetCurrentProfilePhotoKind(ctx, domain.PeerTypeUser, req.UserID, domain.ProfilePhotoKindProfile, photo.ID, int(s.now().Unix())); err != nil {
+			return CommandResult{Details: details}, err
+		} else if !found {
+			return CommandResult{Details: details}, domain.ErrPhotoInvalid
+		}
+		details["photo_id"] = strconv.FormatInt(photo.ID, 10)
+		if err := s.notifyUserChanged(ctx, u); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "avatar updated", Details: details}, nil
+	})
+}
+
 // SetUserColor force-sets or clears a user's name/profile color.
 func (s *Service) SetUserColor(ctx context.Context, req SetUserColorRequest) (CommandResult, error) {
 	if req.UserID <= 0 {
@@ -1575,6 +2286,44 @@ func (s *Service) CreateBot(ctx context.Context, req CreateBotRequest) (CommandR
 	})
 }
 
+// CreateBroadcast records only the durable campaign. Recipient enumeration and
+// delivery are handled by the bounded background worker.
+func (s *Service) CreateBroadcast(ctx context.Context, req CreateBroadcastRequest) (CommandResult, error) {
+	if s == nil || s.broadcast == nil {
+		return CommandResult{}, fmt.Errorf("admin broadcast dependency is not configured")
+	}
+	mode := domain.BroadcastTargetMode(strings.TrimSpace(req.TargetMode))
+	return s.runCommand(ctx, req.CommandMeta, ActionCreateBroadcast, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		count, err := s.broadcast.Preview(ctx, req.Message, mode, req.UserIDs)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{
+			"target_mode":     string(mode),
+			"recipient_count": count,
+			"message_preview": truncateBroadcastPreview(req.Message),
+		}
+		if req.DryRun {
+			return CommandResult{Message: "broadcast validated", Details: details}, nil
+		}
+		created, err := s.broadcast.Create(ctx, req.Message, mode, req.UserIDs, req.Actor)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["broadcast_id"] = created.ID
+		details["recipient_count"] = created.TargetCount
+		return CommandResult{Message: "broadcast created", Details: details}, nil
+	})
+}
+
+func truncateBroadcastPreview(message string) string {
+	runes := []rune(strings.TrimSpace(message))
+	if len(runes) <= 120 {
+		return string(runes)
+	}
+	return string(runes[:120]) + "…"
+}
+
 // DeleteBot permanently removes a user-created bot. The dry-run stage verifies
 // the target is a non-system bot; the confirm stage tombstones the account and
 // invalidates its token. System bots are rejected outright.
@@ -1613,6 +2362,36 @@ func (s *Service) DeleteBot(ctx context.Context, req DeleteBotRequest) (CommandR
 			details["notify_error"] = err.Error()
 		}
 		return CommandResult{Message: "bot deleted", Details: details}, nil
+	})
+}
+
+// ExportBotToken returns the current token only to this request. The secret is
+// merged into the HTTP response after the persisted command result is encoded,
+// so audit rows and completed-command replay never contain it.
+func (s *Service) ExportBotToken(ctx context.Context, req ExportBotTokenRequest) (CommandResult, error) {
+	if s == nil || s.bots == nil {
+		return CommandResult{}, fmt.Errorf("admin bot dependency is not configured")
+	}
+	if req.BotUserID <= 0 {
+		return CommandResult{}, fmt.Errorf("bot_user_id is required")
+	}
+	if domain.IsSystemUserID(req.BotUserID) {
+		return CommandResult{}, fmt.Errorf("system bots have no exportable token")
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionExportBotToken, req.BotUserID, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"bot_user_id": req.BotUserID}
+		if req.DryRun {
+			return CommandResult{Message: "token export validated", Details: details}, nil
+		}
+		token, err := s.bots.AdminExportBotToken(ctx, req.BotUserID)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		return CommandResult{
+			Message:          "token exported",
+			Details:          details,
+			transientDetails: map[string]any{"token": token},
+		}, nil
 	})
 }
 
@@ -1771,6 +2550,9 @@ func (s *Service) RevokeCollectibleUsername(ctx context.Context, req RevokeColle
 	if !domain.ValidCollectibleUsername(req.Username) {
 		return CommandResult{}, codedError(CodeUsernameInvalid, domain.ErrUsernameInvalid)
 	}
+	if req.ExpectedOwnerUserID < 0 {
+		return CommandResult{}, fmt.Errorf("expected_owner_user_id must not be negative")
+	}
 	return s.runCommand(ctx, req.CommandMeta, ActionRevokeCollectibleUsername, 0, domain.Peer{}, req, func() (CommandResult, error) {
 		details := map[string]any{"username": req.Username, "burn": req.Burn}
 		asset, err := s.usernames.Collectible(ctx, req.Username)
@@ -1785,6 +2567,9 @@ func (s *Service) RevokeCollectibleUsername(ctx context.Context, req RevokeColle
 			return CommandResult{Details: details}, codedError(CodeCollectibleBurned, domain.ErrCollectibleUsernameBurned)
 		}
 		if !req.Burn && !asset.Owned() {
+			return CommandResult{Details: details}, codedError(CodeCollectibleNotOwned, domain.ErrCollectibleUsernameNotOwned)
+		}
+		if req.ExpectedOwnerUserID > 0 && asset.Owner != (domain.Peer{Type: domain.PeerTypeUser, ID: req.ExpectedOwnerUserID}) {
 			return CommandResult{Details: details}, codedError(CodeCollectibleNotOwned, domain.ErrCollectibleUsernameNotOwned)
 		}
 		if req.DryRun {
@@ -1858,6 +2643,207 @@ func (s *Service) DeleteCollectibleUsername(ctx context.Context, req DeleteColle
 		}
 		return CommandResult{Message: "collectible username deleted", Details: details}, nil
 	})
+}
+
+func (s *Service) CollectiblePhones(ctx context.Context, filter domain.CollectiblePhoneFilter) ([]domain.CollectiblePhone, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return nil, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	return s.collectiblePhones.ListCollectiblePhones(ctx, filter)
+}
+
+func (s *Service) CollectiblePhoneByID(ctx context.Context, id int64) (domain.CollectiblePhone, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return domain.CollectiblePhone{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	return s.collectiblePhones.CollectiblePhoneByID(ctx, id)
+}
+
+func (s *Service) CollectiblePhoneTransfers(ctx context.Context, id int64, limit int) ([]domain.CollectiblePhoneTransfer, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return nil, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	return s.collectiblePhones.CollectiblePhoneTransfers(ctx, id, limit)
+}
+
+func (s *Service) MintCollectiblePhone(ctx context.Context, req MintCollectiblePhoneRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	if req.Tier == "" {
+		req.Tier = domain.CollectiblePhoneTierStandard
+	}
+	req.Currency = strings.ToUpper(strings.TrimSpace(req.Currency))
+	if req.Currency == "" {
+		req.Currency = domain.CollectibleCurrencyUSD
+	}
+	req.CryptoCurrency = strings.ToUpper(strings.TrimSpace(req.CryptoCurrency))
+	purchase, err := collectiblePurchaseDate(req.PurchaseDate, s.now)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	domainReq := domain.MintCollectiblePhoneRequest{Phone: req.Phone, Tier: req.Tier, OwnerUserID: req.OwnerUserID, PurchaseDate: purchase,
+		Currency: req.Currency, Amount: req.Amount, CryptoCurrency: req.CryptoCurrency, CryptoAmount: req.CryptoAmount, URL: strings.TrimSpace(req.URL), Actor: req.Actor, Reason: req.Reason}
+	if err := domainReq.Validate(); err != nil {
+		return CommandResult{}, err
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionMintCollectiblePhone, req.OwnerUserID, domain.Peer{Type: domain.PeerTypeUser, ID: req.OwnerUserID}, req, func() (CommandResult, error) {
+		details := map[string]any{"phone": req.Phone, "tier": string(req.Tier), "owner_user_id": strconv.FormatInt(req.OwnerUserID, 10), "currency": req.Currency, "amount": strconv.FormatInt(req.Amount, 10)}
+		if _, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone); err == nil {
+			return CommandResult{Details: details}, domain.ErrCollectiblePhoneInvalid
+		} else if !errors.Is(err, domain.ErrCollectiblePhoneNotFound) {
+			return CommandResult{Details: details}, err
+		}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone mint validated", Details: details}, nil
+		}
+		domainReq.CommandKey = "admin-collectible-phone-mint:" + req.CommandID
+		a, created, err := s.collectiblePhones.MintCollectiblePhone(ctx, domainReq)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["collectible_id"] = strconv.FormatInt(a.ID, 10)
+		details["created"] = created
+		details["status"] = string(a.Status)
+		s.notifyCollectiblePhoneOwners(ctx, 0, a.OwnerUserID)
+		return CommandResult{Message: "collectible phone minted", Details: details}, nil
+	})
+}
+
+func (s *Service) UpdateCollectiblePhonePrice(ctx context.Context, req UpdateCollectiblePhonePriceRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	req.Currency = strings.ToUpper(strings.TrimSpace(req.Currency))
+	req.CryptoCurrency = strings.ToUpper(strings.TrimSpace(req.CryptoCurrency))
+	d := domain.UpdateCollectiblePhonePriceRequest{Phone: req.Phone, Currency: req.Currency, Amount: req.Amount,
+		CryptoCurrency: req.CryptoCurrency, CryptoAmount: req.CryptoAmount, Actor: req.Actor, Reason: req.Reason}
+	if err := d.Validate(); err != nil {
+		return CommandResult{}, err
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionUpdateCollectiblePhonePrice, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		a, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{"phone": req.Phone, "owner_user_id": strconv.FormatInt(a.OwnerUserID, 10),
+			"currency": req.Currency, "amount": strconv.FormatInt(req.Amount, 10), "crypto_currency": req.CryptoCurrency,
+			"crypto_amount": strconv.FormatInt(req.CryptoAmount, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone price update validated", Details: details}, nil
+		}
+		u, changed, err := s.collectiblePhones.UpdateCollectiblePhonePrice(ctx, d)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["changed"] = changed
+		s.notifyCollectiblePhoneOwners(ctx, u.OwnerUserID)
+		return CommandResult{Message: "collectible phone price updated", Details: details}, nil
+	})
+}
+
+func (s *Service) TransferCollectiblePhone(ctx context.Context, req TransferCollectiblePhoneRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	d := domain.TransferCollectiblePhoneRequest{Phone: req.Phone, ToUserID: req.ToUserID, Actor: req.Actor, Reason: req.Reason}
+	if err := d.Validate(); err != nil {
+		return CommandResult{}, err
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionTransferCollectiblePhone, req.ToUserID, domain.Peer{Type: domain.PeerTypeUser, ID: req.ToUserID}, req, func() (CommandResult, error) {
+		a, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{"phone": req.Phone, "from_user_id": strconv.FormatInt(a.OwnerUserID, 10), "to_user_id": strconv.FormatInt(req.ToUserID, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone transfer validated", Details: details}, nil
+		}
+		d.CommandKey = "admin-collectible-phone-transfer:" + req.CommandID
+		u, changed, err := s.collectiblePhones.TransferCollectiblePhone(ctx, d)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["changed"] = changed
+		s.notifyCollectiblePhoneOwners(ctx, a.OwnerUserID, u.OwnerUserID)
+		return CommandResult{Message: "collectible phone transferred", Details: details}, nil
+	})
+}
+
+func (s *Service) RevokeCollectiblePhone(ctx context.Context, req RevokeCollectiblePhoneRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	d := domain.RevokeCollectiblePhoneRequest{Phone: req.Phone, Burn: req.Burn, Actor: req.Actor, Reason: req.Reason}
+	if err := d.Validate(); err != nil {
+		return CommandResult{}, err
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionRevokeCollectiblePhone, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		a, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{"phone": req.Phone, "previous_owner_user_id": strconv.FormatInt(a.OwnerUserID, 10), "burn": req.Burn}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone revoke validated", Details: details}, nil
+		}
+		d.CommandKey = "admin-collectible-phone-revoke:" + req.CommandID
+		u, changed, err := s.collectiblePhones.RevokeCollectiblePhone(ctx, d)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["changed"] = changed
+		details["status"] = string(u.Status)
+		s.notifyCollectiblePhoneOwners(ctx, a.OwnerUserID, 0)
+		return CommandResult{Message: "collectible phone revoked", Details: details}, nil
+	})
+}
+
+func (s *Service) DeleteCollectiblePhone(ctx context.Context, req DeleteCollectiblePhoneRequest) (CommandResult, error) {
+	if s == nil || s.collectiblePhones == nil {
+		return CommandResult{}, fmt.Errorf("collectible phone dependency is not configured")
+	}
+	req.Phone = domain.NormalizeCollectiblePhone(req.Phone)
+	if !domain.ValidCollectiblePhone(req.Phone) {
+		return CommandResult{}, domain.ErrCollectiblePhoneInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionDeleteCollectiblePhone, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		a, err := s.collectiblePhones.CollectiblePhone(ctx, req.Phone)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		details := map[string]any{"phone": req.Phone, "previous_owner_user_id": strconv.FormatInt(a.OwnerUserID, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "collectible phone delete validated", Details: details}, nil
+		}
+		deleted, err := s.collectiblePhones.DeleteCollectiblePhone(ctx, domain.DeleteCollectiblePhoneRequest{Phone: req.Phone, Actor: req.Actor, Reason: req.Reason, CommandKey: "admin-collectible-phone-delete:" + req.CommandID})
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["deleted"] = deleted
+		s.notifyCollectiblePhoneOwners(ctx, a.OwnerUserID, 0)
+		return CommandResult{Message: "collectible phone deleted", Details: details}, nil
+	})
+}
+
+func (s *Service) notifyCollectiblePhoneOwners(ctx context.Context, ids ...int64) {
+	seen := map[int64]struct{}{}
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if u, found, err := s.users.AdminUser(ctx, id); err == nil && found {
+			_ = s.notifyUserChanged(ctx, u)
+		}
+	}
 }
 
 // RecomputeAccountRating rebuilds one user's composite rating from the current
@@ -2193,6 +3179,52 @@ func (s *Service) SetChannelSettings(ctx context.Context, req SetChannelSettings
 			details["notify_error"] = err.Error()
 		}
 		return CommandResult{Message: "channel settings updated", Details: details}, nil
+	})
+}
+
+func (s *Service) SetChannelAvatar(ctx context.Context, req SetChannelAvatarRequest) (CommandResult, error) {
+	if req.ChannelID <= 0 {
+		return CommandResult{}, fmt.Errorf("channel_id is required")
+	}
+	if s == nil || s.channels == nil || s.photos == nil {
+		return CommandResult{}, fmt.Errorf("admin channel avatar dependencies are not configured")
+	}
+	if len(req.Data) == 0 || len(req.Data) > MaxAccountAvatarBytes || !s.photos.ValidateAvatarUpload(req.Data) {
+		return CommandResult{}, domain.ErrPhotoInvalid
+	}
+	digest := sha256.Sum256(req.Data)
+	req.ContentSHA256 = hex.EncodeToString(digest[:])
+	target := domain.Peer{Type: domain.PeerTypeChannel, ID: req.ChannelID}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetChannelAvatar, 0, target, req, func() (CommandResult, error) {
+		channel, err := s.channels.GetChannelByID(ctx, req.ChannelID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if channel.Deleted || channel.Monoforum || (!channel.Broadcast && !channel.Megagroup) {
+			return CommandResult{}, domain.ErrChannelInvalid
+		}
+		details := map[string]any{
+			"file_name":         req.FileName,
+			"bytes":             len(req.Data),
+			"content_sha256":    req.ContentSHA256,
+			"previous_photo_id": strconv.FormatInt(channel.PhotoID, 10),
+		}
+		if req.DryRun {
+			return CommandResult{Message: "channel avatar update validated", Details: details}, nil
+		}
+		photo, err := s.photos.CreateAvatarFromBytes(ctx, req.Data)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		updated, err := s.channels.AdminSetPhoto(ctx, req.ChannelID, photo)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["photo_id"] = strconv.FormatInt(photo.ID, 10)
+		if err := s.notifyChannelChanged(ctx, updated); err != nil {
+			details["notify_error"] = err.Error()
+		}
+		return CommandResult{Message: "channel avatar updated", Details: details}, nil
 	})
 }
 
@@ -2577,6 +3609,14 @@ func (s *Service) ImportOfficialStarGift(ctx context.Context, req ImportOfficial
 	}
 	if req.SupplyTotal <= 0 {
 		req.SupplyTotal = bundle.Gift.AvailabilityTotal
+		if req.SupplyTotal <= 0 {
+			// Official unlimited gifts do not carry availability_total. Their
+			// upgrade_variants is the complete model/pattern/backdrop combination
+			// count and is the only finite capacity supplied by the snapshot.
+			// Falling back to one made the first collectible exhaust the entire
+			// locally imported pool.
+			req.SupplyTotal = bundle.Gift.UpgradeVariants
+		}
 	}
 	// Official snapshot NFT gifts often omit availability_total (sold-out /
 	// unlimited-upgrade catalogs). Collectible publish still needs a local supply.
@@ -2873,6 +3913,445 @@ func (s *Service) EmojiAnimation(ctx context.Context, documentID int64) ([]byte,
 	return s.emoji.DocumentAnimationJSON(ctx, documentID)
 }
 
+func (s *Service) SetStickerSetArchived(ctx context.Context, req SetStickerSetArchivedRequest) (CommandResult, error) {
+	if s == nil || s.stickerSets == nil || req.SetID <= 0 {
+		return CommandResult{}, domain.ErrStickerSetInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetStickerSetArchived, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"set_id": strconv.FormatInt(req.SetID, 10), "archived": req.Archived}
+		if req.DryRun {
+			return CommandResult{Message: "sticker set state change validated", Details: details}, nil
+		}
+		changed, err := s.stickerSets.AdminSetStickerSetArchived(ctx, req.SetID, req.Archived)
+		details["changed"] = changed
+		return CommandResult{Message: "sticker set state updated", Details: details}, err
+	})
+}
+
+func (s *Service) SetStickerSetSortOrder(ctx context.Context, req SetStickerSetSortOrderRequest) (CommandResult, error) {
+	if s == nil || s.stickerSets == nil || req.SetID <= 0 || req.SortOrder < math.MinInt32 || req.SortOrder > math.MaxInt32 {
+		return CommandResult{}, domain.ErrStickerSetInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetStickerSetSortOrder, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"set_id": strconv.FormatInt(req.SetID, 10), "sort_order": req.SortOrder}
+		if req.DryRun {
+			return CommandResult{Message: "sticker set order change validated", Details: details}, nil
+		}
+		changed, err := s.stickerSets.AdminSetStickerSetSortOrder(ctx, req.SetID, req.SortOrder)
+		details["changed"] = changed
+		return CommandResult{Message: "sticker set order updated", Details: details}, err
+	})
+}
+
+func (s *Service) RenameStickerSet(ctx context.Context, req RenameStickerSetRequest) (CommandResult, error) {
+	if s == nil || s.stickerSets == nil || req.SetID <= 0 || strings.TrimSpace(req.Title) == "" {
+		return CommandResult{}, domain.ErrStickerSetInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionRenameStickerSet, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"set_id": strconv.FormatInt(req.SetID, 10), "title": req.Title}
+		if req.DryRun {
+			return CommandResult{Message: "sticker set rename validated", Details: details}, nil
+		}
+		set, err := s.stickerSets.AdminRenameStickerSet(ctx, req.SetID, req.Title)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["title"] = set.Title
+		return CommandResult{Message: "sticker set renamed", Details: details}, nil
+	})
+}
+
+func (s *Service) DeleteStickerSet(ctx context.Context, req DeleteStickerSetRequest) (CommandResult, error) {
+	if s == nil || s.stickerSets == nil || req.SetID <= 0 {
+		return CommandResult{}, domain.ErrStickerSetInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionDeleteStickerSet, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"set_id": strconv.FormatInt(req.SetID, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "sticker set deletion validated", Details: details}, nil
+		}
+		kind, err := s.stickerSets.AdminDeleteStickerSet(ctx, req.SetID)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["kind"] = string(kind)
+		return CommandResult{Message: "sticker set deleted", Details: details}, nil
+	})
+}
+
+func (s *Service) CreateStickerSet(ctx context.Context, req CreateStickerSetRequest) (CommandResult, error) {
+	if s == nil || s.stickerSets == nil {
+		return CommandResult{}, domain.ErrStickerSetInvalid
+	}
+	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.ShortName) == "" || strings.TrimSpace(req.Emoji) == "" {
+		return CommandResult{}, domain.ErrStickerSetFileInvalid
+	}
+	mimeType, ok := s.stickerSets.ValidateStickerMaterialUpload(req.FileName, req.Data)
+	if !ok {
+		return CommandResult{}, domain.ErrStickerSetFileInvalid
+	}
+	digest := sha256.Sum256(req.Data)
+	req.ContentSHA256 = hex.EncodeToString(digest[:])
+	kind := domain.StickerSetKindStickers
+	if req.Kind == string(domain.StickerSetKindEmoji) {
+		kind = domain.StickerSetKindEmoji
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionCreateStickerSet, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{
+			"title": req.Title, "short_name": req.ShortName, "kind": string(kind),
+			"file_name": req.FileName, "mime_type": mimeType, "bytes": len(req.Data),
+		}
+		if req.DryRun {
+			return CommandResult{Message: "sticker pack validated", Details: details}, nil
+		}
+		doc, err := s.stickerSets.AdminUploadStickerMaterial(ctx, req.FileName, req.Data)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		set, _, err := s.stickerSets.AdminCreateStickerSet(ctx, domain.CreateStickerSetRequest{
+			Title:     req.Title,
+			ShortName: req.ShortName,
+			Kind:      kind,
+			Items: []domain.StickerSetItemInput{{
+				DocumentID:         doc.ID,
+				DocumentAccessHash: doc.AccessHash,
+				Emoji:              req.Emoji,
+				Keywords:           req.Keywords,
+			}},
+		})
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["set_id"] = strconv.FormatInt(set.ID, 10)
+		details["short_name"] = set.ShortName
+		return CommandResult{Message: "sticker pack created", Details: details}, nil
+	})
+}
+
+func (s *Service) AddStickerToSet(ctx context.Context, req AddStickerToSetRequest) (CommandResult, error) {
+	if s == nil || s.stickerSets == nil || req.SetID <= 0 {
+		return CommandResult{}, domain.ErrStickerSetInvalid
+	}
+	if strings.TrimSpace(req.Emoji) == "" {
+		return CommandResult{}, domain.ErrStickerSetEmojiInvalid
+	}
+	mimeType, ok := s.stickerSets.ValidateStickerMaterialUpload(req.FileName, req.Data)
+	if !ok {
+		return CommandResult{}, domain.ErrStickerSetFileInvalid
+	}
+	digest := sha256.Sum256(req.Data)
+	req.ContentSHA256 = hex.EncodeToString(digest[:])
+	return s.runCommand(ctx, req.CommandMeta, ActionAddStickerToSet, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{
+			"set_id": strconv.FormatInt(req.SetID, 10), "emoji": req.Emoji,
+			"file_name": req.FileName, "mime_type": mimeType, "bytes": len(req.Data),
+		}
+		if req.DryRun {
+			return CommandResult{Message: "sticker upload validated", Details: details}, nil
+		}
+		doc, err := s.stickerSets.AdminUploadStickerMaterial(ctx, req.FileName, req.Data)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		set, _, err := s.stickerSets.AdminAddStickerToSet(ctx, req.SetID, domain.StickerSetItemInput{
+			DocumentID:         doc.ID,
+			DocumentAccessHash: doc.AccessHash,
+			Emoji:              req.Emoji,
+			Keywords:           req.Keywords,
+		})
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["document_id"] = strconv.FormatInt(doc.ID, 10)
+		details["count"] = set.Count
+		return CommandResult{Message: "sticker added", Details: details}, nil
+	})
+}
+
+func (s *Service) RemoveStickerFromSet(ctx context.Context, req RemoveStickerFromSetRequest) (CommandResult, error) {
+	if s == nil || s.stickerSets == nil || req.SetID <= 0 || req.DocumentID <= 0 {
+		return CommandResult{}, domain.ErrStickerSetInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionRemoveStickerFromSet, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"set_id": strconv.FormatInt(req.SetID, 10), "document_id": strconv.FormatInt(req.DocumentID, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "sticker removal validated", Details: details}, nil
+		}
+		set, _, err := s.stickerSets.AdminRemoveStickerFromSet(ctx, req.SetID, req.DocumentID)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["count"] = set.Count
+		return CommandResult{Message: "sticker removed", Details: details}, nil
+	})
+}
+
+const maxStickerDocumentBytes = 8 << 20
+
+// StickerDocumentAnimation returns a sticker/custom-emoji document preview for
+// the admin console. TGS is decompressed to Lottie JSON; static sticker images
+// are returned as-is with a safe image content type.
+func (s *Service) StickerDocumentAnimation(ctx context.Context, documentID int64) ([]byte, string, bool, error) {
+	if s == nil || s.photos == nil || documentID <= 0 {
+		return nil, "", false, nil
+	}
+	chunk, found, err := s.photos.GetFile(ctx, domain.FileDownloadRequest{
+		LocationKey: fmt.Sprintf("doc:%d", documentID),
+		Limit:       maxStickerDocumentBytes + 1,
+	})
+	if err != nil {
+		return nil, "", false, err
+	}
+	if !found || chunk.Total <= 0 || chunk.Total > maxStickerDocumentBytes || int64(len(chunk.Bytes)) != chunk.Total {
+		return nil, "", false, nil
+	}
+	data := chunk.Bytes
+	if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+		reader, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, "", false, nil
+		}
+		defer reader.Close()
+		decompressed, err := io.ReadAll(io.LimitReader(reader, maxStickerDocumentBytes))
+		if err != nil {
+			return nil, "", false, nil
+		}
+		return decompressed, "application/json; charset=utf-8", true, nil
+	}
+	detected := http.DetectContentType(data)
+	if !isSafeStickerPreviewImageType(detected) {
+		return nil, "", false, nil
+	}
+	return data, detected, true, nil
+}
+
+func isSafeStickerPreviewImageType(value string) bool {
+	switch value {
+	case "image/webp", "image/png", "image/jpeg", "image/gif":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) GifCatalog(ctx context.Context) ([]domain.GifCatalogEntry, error) {
+	if s == nil || s.gifCatalog == nil {
+		return nil, domain.ErrGifCatalogUnavailable
+	}
+	return s.gifCatalog.AdminListGifCatalog(ctx)
+}
+
+func (s *Service) CreateGifCatalogEntry(ctx context.Context, req CreateGifCatalogEntryRequest) (CommandResult, error) {
+	if s == nil || s.gifCatalog == nil {
+		return CommandResult{}, domain.ErrGifCatalogUnavailable
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		return CommandResult{}, domain.ErrGifCatalogEntryInvalid
+	}
+	mimeType, ok := s.gifCatalog.ValidateGifUpload(req.FileName, req.Data)
+	if !ok {
+		return CommandResult{}, domain.ErrGifCatalogFileInvalid
+	}
+	digest := sha256.Sum256(req.Data)
+	req.ContentSHA256 = hex.EncodeToString(digest[:])
+	return s.runCommand(ctx, req.CommandMeta, ActionCreateGifCatalogEntry, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"title": req.Title, "file_name": req.FileName, "mime_type": mimeType, "bytes": len(req.Data)}
+		entries, err := s.gifCatalog.AdminListGifCatalog(ctx)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		if len(entries) >= domain.MaxGifCatalogEntries {
+			return CommandResult{Details: details}, domain.ErrGifCatalogFull
+		}
+		if req.DryRun {
+			return CommandResult{Message: "gif catalog entry validated", Details: details}, nil
+		}
+		doc, err := s.gifCatalog.AdminUploadGifMaterial(ctx, req.FileName, req.Data)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		entry, err := s.gifCatalog.AdminCreateGifCatalogEntry(ctx, req.Title, doc.ID)
+		if err != nil {
+			return CommandResult{Details: details}, err
+		}
+		details["id"], details["document_id"] = strconv.FormatInt(entry.ID, 10), strconv.FormatInt(doc.ID, 10)
+		return CommandResult{Message: "gif catalog entry created", Details: details}, nil
+	})
+}
+
+func (s *Service) SetGifCatalogEnabled(ctx context.Context, req SetGifCatalogEnabledRequest) (CommandResult, error) {
+	if s == nil || s.gifCatalog == nil || req.ID <= 0 {
+		return CommandResult{}, domain.ErrGifCatalogEntryInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetGifCatalogEnabled, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"id": strconv.FormatInt(req.ID, 10), "enabled": req.Enabled}
+		if req.DryRun {
+			return CommandResult{Message: "gif catalog state validated", Details: details}, nil
+		}
+		changed, err := s.gifCatalog.AdminSetGifCatalogEnabled(ctx, req.ID, req.Enabled)
+		details["changed"] = changed
+		return CommandResult{Message: "gif catalog state updated", Details: details}, err
+	})
+}
+
+func (s *Service) SetGifCatalogSortOrder(ctx context.Context, req SetGifCatalogSortOrderRequest) (CommandResult, error) {
+	if s == nil || s.gifCatalog == nil || req.ID <= 0 {
+		return CommandResult{}, domain.ErrGifCatalogEntryInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionSetGifCatalogSortOrder, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"id": strconv.FormatInt(req.ID, 10), "sort_order": req.SortOrder}
+		if req.DryRun {
+			return CommandResult{Message: "gif catalog order validated", Details: details}, nil
+		}
+		changed, err := s.gifCatalog.AdminSetGifCatalogSortOrder(ctx, req.ID, req.SortOrder)
+		details["changed"] = changed
+		return CommandResult{Message: "gif catalog order updated", Details: details}, err
+	})
+}
+
+func (s *Service) DeleteGifCatalogEntry(ctx context.Context, req DeleteGifCatalogEntryRequest) (CommandResult, error) {
+	if s == nil || s.gifCatalog == nil || req.ID <= 0 {
+		return CommandResult{}, domain.ErrGifCatalogEntryInvalid
+	}
+	return s.runCommand(ctx, req.CommandMeta, ActionDeleteGifCatalogEntry, 0, domain.Peer{}, req, func() (CommandResult, error) {
+		details := map[string]any{"id": strconv.FormatInt(req.ID, 10)}
+		if req.DryRun {
+			return CommandResult{Message: "gif catalog deletion validated", Details: details}, nil
+		}
+		changed, err := s.gifCatalog.AdminDeleteGifCatalogEntry(ctx, req.ID)
+		details["changed"] = changed
+		return CommandResult{Message: "gif catalog entry deleted", Details: details}, err
+	})
+}
+
+func (s *Service) GifCatalogDocumentPreview(ctx context.Context, documentID int64) ([]byte, string, bool, error) {
+	if s == nil || s.gifCatalog == nil || documentID <= 0 {
+		return nil, "", false, nil
+	}
+	chunk, found, err := s.gifCatalog.GetFile(ctx, domain.FileDownloadRequest{LocationKey: fmt.Sprintf("doc:%d", documentID), Limit: domain.MaxGifCatalogDocumentSize + 1})
+	if err != nil || !found {
+		return nil, "", found, err
+	}
+	if chunk.Total <= 0 || chunk.Total > domain.MaxGifCatalogDocumentSize || int64(len(chunk.Bytes)) != chunk.Total {
+		return nil, "", false, nil
+	}
+	detected := http.DetectContentType(chunk.Bytes)
+	if detected != "video/mp4" && !strings.HasPrefix(detected, "video/") {
+		return nil, "", false, nil
+	}
+	return chunk.Bytes, detected, true, nil
+}
+
+func (s *Service) AccountAvatar(ctx context.Context, userID int64) ([]byte, string, bool, error) {
+	if s == nil || s.photos == nil || userID <= 0 {
+		return nil, "", false, nil
+	}
+	photo, found, err := s.photos.CurrentProfilePhotoKind(ctx, domain.PeerTypeUser, userID, domain.ProfilePhotoKindProfile)
+	if err != nil || !found {
+		return nil, "", found, err
+	}
+	return s.avatarBytes(ctx, photo)
+}
+
+func (s *Service) ChannelAvatar(ctx context.Context, channelID int64) ([]byte, string, bool, error) {
+	if s == nil || s.photos == nil || s.channels == nil || channelID <= 0 {
+		return nil, "", false, nil
+	}
+	channel, err := s.channels.GetChannelByID(ctx, channelID)
+	if err != nil {
+		return nil, "", false, err
+	}
+	if channel.PhotoID == 0 {
+		return nil, "", false, nil
+	}
+	photo, found, err := s.photos.GetPhoto(ctx, channel.PhotoID)
+	if err != nil || !found {
+		return nil, "", found, err
+	}
+	return s.avatarBytes(ctx, photo)
+}
+
+func (s *Service) avatarBytes(ctx context.Context, photo domain.Photo) ([]byte, string, bool, error) {
+	size, inline, ok := bestAccountPhotoSize(photo.Sizes)
+	if !ok {
+		return nil, "", false, nil
+	}
+	data := inline
+	if len(data) == 0 {
+		chunk, found, err := s.photos.GetFile(ctx, domain.FileDownloadRequest{
+			LocationKey: fmt.Sprintf("photo:%d:%s", photo.ID, size.Type),
+			Limit:       MaxAccountAvatarBytes + 1,
+		})
+		if err != nil || !found {
+			return nil, "", found, err
+		}
+		if chunk.Total <= 0 || chunk.Total > MaxAccountAvatarBytes || int64(len(chunk.Bytes)) != chunk.Total {
+			return nil, "", false, nil
+		}
+		data = chunk.Bytes
+	}
+	if len(data) == 0 || len(data) > MaxAccountAvatarBytes {
+		return nil, "", false, nil
+	}
+	mimeType := http.DetectContentType(data)
+	if !safeAccountImageType(mimeType) {
+		return nil, "", false, nil
+	}
+	return data, mimeType, true, nil
+}
+
+func bestAccountPhotoSize(sizes []domain.PhotoSize) (domain.PhotoSize, []byte, bool) {
+	var best domain.PhotoSize
+	var bestBytes []byte
+	bestScore := int64(-1)
+	for _, size := range sizes {
+		if !validAccountPhotoSizeType(size.Type) {
+			continue
+		}
+		var inline []byte
+		switch size.Kind {
+		case domain.PhotoSizeKindCached:
+			if len(size.Bytes) == 0 || len(size.Bytes) > MaxAccountAvatarBytes {
+				continue
+			}
+			inline = size.Bytes
+		case domain.PhotoSizeKindDefault, domain.PhotoSizeKindProgressive:
+		default:
+			continue
+		}
+		score := int64(size.W) * int64(size.H)
+		if score <= 0 {
+			score = int64(size.Size)
+		}
+		if score > bestScore {
+			best, bestBytes, bestScore = size, inline, score
+		}
+	}
+	return best, bestBytes, bestScore >= 0
+}
+
+func validAccountPhotoSizeType(value string) bool {
+	if value == "" || len(value) > 8 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func safeAccountImageType(value string) bool {
+	switch value {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Service) StarGiftCollectibles(ctx context.Context, giftID int64) (domain.StarGiftUpgradePreview, bool, error) {
 	if s == nil || s.gifts == nil || giftID <= 0 {
 		return domain.StarGiftUpgradePreview{}, false, nil
@@ -3054,6 +4533,19 @@ func premiumCommandDetails(u domain.User, months int, now time.Time) map[string]
 		"new_premium_until":       projected,
 		"would_change":            months > 0 || u.PremiumUntil != 0,
 	}
+}
+
+// premiumAdminActorID gives the entitlement/audit tables a stable positive
+// identity for an operator name without pretending that the operator is a
+// Telegram user.
+func premiumAdminActorID(actor string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(strings.TrimSpace(actor)))
+	id := int64(h.Sum64() & 0x7fffffffffffffff)
+	if id == 0 {
+		return 1
+	}
+	return id
 }
 
 func revokeTargets(items []domain.Authorization, req RevokeSessionsRequest) ([]domain.Authorization, domain.Authorization, error) {

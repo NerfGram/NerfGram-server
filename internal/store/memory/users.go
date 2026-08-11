@@ -18,11 +18,11 @@ type UserStore struct {
 	usernameRegistry *CollectibleUsernameStore
 }
 
-// NewUserStore 创建内存 UserStore。内置系统账号（777000 / BotFather / Stickers / ChatBot）
+// NewUserStore 创建内存 UserStore。内置系统账号
 // 预置进表，与 postgres 的迁移种子保持双 store 行为一致。
 func NewUserStore() *UserStore {
 	s := &UserStore{byID: make(map[int64]domain.User), nextID: domain.UserIDSequenceBase}
-	for _, id := range []int64{domain.OfficialSystemUserID, domain.BotFatherUserID, domain.StickersBotUserID, domain.ChatBotUserID, domain.StarsTestBotUserID, domain.BroadcastBotUserID} {
+	for _, id := range domain.SystemUserIDs() {
 		if u, ok := domain.SystemUserByID(id); ok {
 			s.byID[u.ID] = u
 		}
@@ -227,6 +227,23 @@ func (s *UserStore) UpdateUsername(ctx context.Context, userID int64, username s
 		}
 	}
 	u.Username = username
+	s.byID[userID] = u
+	return u, nil
+}
+
+func (s *UserStore) UpdatePhone(_ context.Context, userID int64, phone string) (domain.User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u, ok := s.byID[userID]
+	if !ok || u.Deleted {
+		return domain.User{}, domain.ErrUserNotFound
+	}
+	for id, existing := range s.byID {
+		if id != userID && !existing.Deleted && existing.Phone == phone {
+			return domain.User{}, domain.ErrPhoneNumberOccupied
+		}
+	}
+	u.Phone = phone
 	s.byID[userID] = u
 	return u, nil
 }

@@ -558,6 +558,15 @@ func (s *Service) AdminSetEmojiStatus(ctx context.Context, channelID int64, stat
 	return s.channels.SetChannelEmojiStatusAdmin(ctx, channelID, status)
 }
 
+// AdminSetPhoto changes the channel base photo without fabricating a member
+// action or service message. It is a non-PTS administrative metadata repair.
+func (s *Service) AdminSetPhoto(ctx context.Context, channelID int64, photo domain.Photo) (domain.Channel, error) {
+	if s == nil || s.channels == nil || channelID == 0 || photo.ID == 0 {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	return s.channels.SetChannelPhotoAdmin(ctx, channelID, photo)
+}
+
 // ListAdminedPublicChannels returns public channels/supergroups administered by user.
 func (s *Service) ListAdminedPublicChannels(ctx context.Context, userID int64) ([]domain.Channel, error) {
 	if s == nil || s.channels == nil || userID == 0 {

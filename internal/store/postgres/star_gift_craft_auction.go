@@ -61,6 +61,17 @@ func defaultStarGiftCraftDraw(upper int) (int, error) {
 	return int(draw.Int64()), nil
 }
 
+func starGiftCraftInputAvailable(gift domain.UniqueStarGift, owner domain.Peer, survivor bool) bool {
+	if gift.Owner != owner || gift.Burned || gift.OwnerAddress != "" || gift.CraftChancePermille <= 0 {
+		return false
+	}
+	// The first input survives a successful craft. Official clients reject an
+	// already-addressed NFT in that slot because its on-chain identity cannot be
+	// reconciled with the newly crafted model. Addressed burn-only inputs remain
+	// valid in the other slots.
+	return !survivor || gift.GiftAddress == ""
+}
+
 // SweepStarGiftLifecycle advances time-driven aggregates without requiring a
 // foreground client RPC. All effects remain local PostgreSQL ledger/message
 // mutations; this worker never talks to TON, Fragment, wallets or chain nodes.
@@ -210,7 +221,7 @@ func (s *StarGiftLifecycleStore) ListCraftStarGifts(ctx context.Context, userID,
 	rows, err := s.db.Query(ctx, `SELECT p.id,p.owner_peer_type,p.owner_peer_id,p.from_user_id,p.gift_id,p.catalog_revision_id,
 p.msg_id,p.saved_id,p.gift_date,p.name_hidden,p.unsaved,p.converted,p.convert_stars,p.prepaid_upgrade_stars,p.prepaid_upgrade_hash,p.gift_num,
 p.lifecycle_status,p.transfer_stars,p.can_export_at,p.can_transfer_at,p.can_resell_at,p.drop_original_details_stars,p.can_craft_at,
-p.message,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
+p.message,p.message_entities::text,COALESCE(p.unique_gift_id,0),p.upgrade_msg_id,p.pinned_order,
 COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order,i.collection_id) FROM star_gift_collection_items i
 JOIN star_gift_collections c ON c.collection_id=i.collection_id WHERE i.saved_gift_id=p.id),ARRAY[]::integer[])
 FROM peer_star_gifts p JOIN unique_star_gifts u ON u.id=p.unique_gift_id WHERE `+where+`
@@ -307,7 +318,7 @@ func (s *StarGiftLifecycleStore) CraftStarGift(ctx context.Context, req domain.S
 				return domain.ErrStarGiftCraftUnavailable
 			}
 			unique, found, err := NewStarGiftStore(tx).UniqueByID(ctx, saved.UniqueGiftID)
-			if err != nil || !found || unique.Owner != owner || unique.Burned || unique.OwnerAddress != "" || unique.CraftChancePermille <= 0 {
+			if err != nil || !found || !starGiftCraftInputAvailable(unique, owner, i == 0) {
 				return domain.ErrStarGiftCraftUnavailable
 			}
 			if giftID == 0 {
@@ -380,7 +391,7 @@ WHERE collectible_revision_id=$1 AND crafted
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE unique_star_gifts SET model_attribute_id=$2,pattern_attribute_id=$3,
-backdrop_attribute_id=$4,crafted=true,craft_chance_permille=0,updated_at=now() WHERE id=$1`, firstUniqueID, modelID, patternID, backdropID); err != nil {
+	backdrop_attribute_id=$4,crafted=true,craft_chance_permille=0,offer_min_stars=0,updated_at=now() WHERE id=$1`, firstUniqueID, modelID, patternID, backdropID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE peer_star_gifts SET can_craft_at=0 WHERE id=$1`, firstSavedID); err != nil {

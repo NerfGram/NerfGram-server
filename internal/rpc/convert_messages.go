@@ -260,7 +260,7 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 		}
 		return out
 	case domain.MessageServiceActionStarGiftUnique:
-		return tgMessageActionStarGiftUnique(m.ServiceAction.StarGiftUnique)
+		return tgMessageActionStarGiftUniqueForViewer(m.ServiceAction.StarGiftUnique, msg.OwnerUserID)
 	case domain.MessageServiceActionStarGiftOffer:
 		action := m.ServiceAction.StarGiftOffer
 		if action == nil {
@@ -275,6 +275,23 @@ func tgMessageServiceAction(msg domain.Message) tg.MessageActionClass {
 		}
 		return &tg.MessageActionStarGiftPurchaseOfferDeclined{Expired: action.Expired,
 			Gift: tgUniqueStarGift(action.Gift), Price: tgStarGiftAmount(action.Price)}
+	case domain.MessageServiceActionGiftPremium:
+		action := m.ServiceAction.GiftPremium
+		if action == nil || action.Currency == "" || action.Amount <= 0 || action.Days <= 0 {
+			return &tg.MessageActionEmpty{}
+		}
+		out := &tg.MessageActionGiftPremium{
+			Currency: action.Currency,
+			Amount:   action.Amount,
+			Days:     action.Days,
+		}
+		if action.Message.Text != "" {
+			out.SetMessage(tg.TextWithEntities{
+				Text:     action.Message.Text,
+				Entities: tgMessageEntities(action.Message.Entities),
+			})
+		}
+		return out
 	default:
 		return &tg.MessageActionEmpty{}
 	}
@@ -324,6 +341,26 @@ func tgMessageActionStarGiftUnique(action *domain.MessageStarGiftUniqueAction) t
 		out.SetSavedID(action.SavedID)
 	}
 	return out
+}
+
+// tgMessageActionStarGiftUniqueForViewer keeps owner-only lifecycle controls off
+// the sender's mirror service message. Without this projection the sender sees
+// actions such as "remove original details" and submits a slug that correctly
+// belongs to the recipient, which then fails with PEER_ID_INVALID.
+func tgMessageActionStarGiftUniqueForViewer(action *domain.MessageStarGiftUniqueAction, viewerUserID int64) tg.MessageActionClass {
+	if action == nil || viewerUserID <= 0 || action.Gift.Owner.Type != domain.PeerTypeUser ||
+		action.Gift.Owner.ID == viewerUserID {
+		return tgMessageActionStarGiftUnique(action)
+	}
+	projected := *action
+	projected.CanExportAt = 0
+	projected.TransferStars = 0
+	projected.ResaleAmount = nil
+	projected.CanTransferAt = 0
+	projected.CanResellAt = 0
+	projected.DropOriginalDetailsStars = 0
+	projected.CanCraftAt = 0
+	return tgMessageActionStarGiftUnique(&projected)
 }
 
 func tgPeerList(peers []domain.Peer) []tg.PeerClass {

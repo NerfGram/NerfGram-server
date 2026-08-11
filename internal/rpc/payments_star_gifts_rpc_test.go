@@ -423,6 +423,123 @@ func TestCraftStarGiftAcceptsOfficialSlugAndCanonicalizesAliases(t *testing.T) {
 	}
 }
 
+func TestCraftStarGiftSuccessCarriesClientSafeCraftMessageOnWire(t *testing.T) {
+	r, _, ownerUser, _ := starGiftTestRouter(t)
+	owner := domain.Peer{Type: domain.PeerTypeUser, ID: ownerUser.ID}
+	model := collectibleRPCAttribute(domain.StarGiftCollectibleModel, 7801, "Crafted Model")
+	model.Crafted = true
+	model.RarityKind = domain.StarGiftRarityUncommon
+	model.RarityPermille = 0
+	pattern := collectibleRPCAttribute(domain.StarGiftCollectiblePattern, 7802, "Pattern")
+	backdrop := collectibleRPCAttribute(domain.StarGiftCollectibleBackdrop, 7803, "Backdrop")
+	unique := domain.UniqueStarGift{
+		ID: 9901, GiftID: 8001, SourceSavedGiftID: 51, Title: "Crafted Gift",
+		Slug: "crafted-gift-1", Num: 1, Owner: owner, Crafted: true,
+		Model: model, Pattern: pattern, Backdrop: backdrop,
+		AvailabilityIssued: 1, AvailabilityTotal: 100,
+	}
+	outputAction := &domain.MessageStarGiftUniqueAction{
+		Gift: unique, FromUserID: owner.ID, Saved: true, Craft: true,
+	}
+	outputMessage := domain.Message{
+		ID: 120, OwnerUserID: owner.ID, Peer: owner, From: owner, Out: true, Date: 1700000100,
+		Media: &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
+			Kind: domain.MessageServiceActionStarGiftUnique, StarGiftUnique: outputAction,
+		}},
+	}
+	outputEvent := domain.UpdateEvent{
+		UserID: owner.ID, Type: domain.UpdateEventNewMessage, Pts: 42, PtsCount: 1,
+		Date: outputMessage.Date, Message: outputMessage,
+	}
+	sourceMessage := outputMessage
+	sourceMessage.ID = 119
+	sourceMessage.Media = &domain.MessageMedia{Kind: domain.MessageMediaKindService, ServiceAction: &domain.MessageServiceAction{
+		Kind:           domain.MessageServiceActionStarGiftUnique,
+		StarGiftUnique: &domain.MessageStarGiftUniqueAction{Gift: unique, FromUserID: owner.ID, Saved: true},
+	}}
+	sourceEvent := domain.UpdateEvent{
+		UserID: owner.ID, Type: domain.UpdateEventEditMessage, Pts: 41, PtsCount: 1,
+		Date: outputMessage.Date, Message: sourceMessage,
+	}
+	service := &craftStarGiftRPCService{
+		uniques: map[string]domain.UniqueStarGift{unique.Slug: unique},
+		saved: map[int64]domain.SavedStarGift{
+			51: {ID: 51, Owner: owner, MsgID: 118, UpgradeMsgID: 119, UniqueGiftID: unique.ID},
+		},
+		result: domain.StarGiftCraftResult{
+			Success: true, Gift: &unique,
+			Send: domain.SendPrivateTextResult{
+				SenderMessage: outputMessage,
+				SenderEvent:   outputEvent,
+			},
+			SourceEdits: []domain.EditedMessageForUser{{
+				UserID: owner.ID, Message: sourceMessage, Event: sourceEvent,
+			}},
+		},
+	}
+	r.deps.Gifts = service
+	updatesClass, err := r.onPaymentsCraftStarGift(WithUserID(context.Background(), owner.ID),
+		&tg.PaymentsCraftStarGiftRequest{Stargift: []tg.InputSavedStarGiftClass{
+			&tg.InputSavedStarGiftSlug{Slug: unique.Slug},
+		}})
+	if err != nil {
+		t.Fatalf("craft success: %v", err)
+	}
+	updates, ok := updatesClass.(*tg.Updates)
+	if !ok || len(updates.Updates) != 2 {
+		t.Fatalf("craft success updates = %T %#v", updatesClass, updatesClass)
+	}
+	if edit, ok := updates.Updates[0].(*tg.UpdateEditMessage); !ok || edit.Pts != sourceEvent.Pts {
+		t.Fatalf("craft source update = %T %#v", updates.Updates[0], updates.Updates[0])
+	}
+	if created, ok := updates.Updates[1].(*tg.UpdateNewMessage); !ok || created.Pts != outputEvent.Pts {
+		t.Fatalf("craft result update = %T %#v", updates.Updates[1], updates.Updates[1])
+	}
+
+	wire := &bin.Buffer{}
+	if err := tlprofile.EncodeObject(tlprofile.Profile228, updates, wire); err != nil {
+		t.Fatalf("encode Layer 228 craft result: %v", err)
+	}
+	decodedObject, err := tlprofile.DecodeObject(tlprofile.Profile228, &bin.Buffer{Buf: wire.Copy()}, tlprofile.Limits{})
+	if err != nil {
+		t.Fatalf("decode Layer 228 craft result: %v", err)
+	}
+	decoded, ok := decodedObject.(*tg.Updates)
+	if !ok || len(decoded.Updates) != 2 {
+		t.Fatalf("decoded craft result = %T %#v", decodedObject, decodedObject)
+	}
+	created, ok := decoded.Updates[1].(*tg.UpdateNewMessage)
+	if !ok {
+		t.Fatalf("decoded terminal update = %T", decoded.Updates[1])
+	}
+	message, ok := created.Message.(*tg.MessageService)
+	if !ok {
+		t.Fatalf("decoded craft message = %T", created.Message)
+	}
+	action, ok := message.Action.(*tg.MessageActionStarGiftUnique)
+	if !ok || !action.Craft || !action.Saved {
+		t.Fatalf("decoded craft action = %T %#v", message.Action, message.Action)
+	}
+	gift, ok := action.Gift.(*tg.StarGiftUnique)
+	if !ok || !gift.Crafted || gift.ID != unique.ID || gift.Slug != unique.Slug || len(gift.Attributes) < 3 {
+		t.Fatalf("decoded crafted gift = %T %#v", action.Gift, action.Gift)
+	}
+	wireModel, ok := gift.Attributes[0].(*tg.StarGiftAttributeModel)
+	if !ok || !wireModel.Crafted {
+		t.Fatalf("decoded crafted model = %T %#v", gift.Attributes[0], gift.Attributes[0])
+	}
+	if _, ok := wireModel.Document.(*tg.Document); !ok {
+		t.Fatalf("decoded crafted model document = %T", wireModel.Document)
+	}
+	wirePattern, ok := gift.Attributes[1].(*tg.StarGiftAttributePattern)
+	if !ok {
+		t.Fatalf("decoded crafted pattern = %T", gift.Attributes[1])
+	}
+	if _, ok := wirePattern.Document.(*tg.Document); !ok {
+		t.Fatalf("decoded crafted pattern document = %T", wirePattern.Document)
+	}
+}
+
 type upgradeReplayRPCService struct {
 	GiftsService
 	saved        domain.SavedStarGift
@@ -695,6 +812,50 @@ func TestChannelUniqueActionSuppressesCraftReadinessAcrossProfiles(t *testing.T)
 		if !ok || gift.CraftChancePermille != unique.CraftChancePermille {
 			t.Fatalf("Layer %d channel unique gift = %#v", profile, decoded.Gift)
 		}
+	}
+}
+
+func TestUniqueGiftSenderMirrorHidesOwnerLifecycleControls(t *testing.T) {
+	const (
+		ownerID  = int64(7102)
+		senderID = int64(7101)
+	)
+	action := &domain.MessageStarGiftUniqueAction{
+		Gift: domain.UniqueStarGift{
+			ID: 9903, GiftID: 8003, Title: "Owned gift", Slug: "owned-gift-1", Num: 1,
+			Owner: domain.Peer{Type: domain.PeerTypeUser, ID: ownerID},
+		},
+		TransferStars: 25, ResaleAmount: &domain.StarGiftAmount{Currency: domain.StarGiftCurrencyStars, Amount: 100},
+		CanExportAt: 100, CanTransferAt: 101, CanResellAt: 102,
+		DropOriginalDetailsStars: 25, CanCraftAt: 103,
+	}
+
+	owner := tgMessageActionStarGiftUniqueForViewer(action, ownerID).(*tg.MessageActionStarGiftUnique)
+	if value, ok := owner.GetDropOriginalDetailsStars(); !ok || value != 25 {
+		t.Fatalf("owner drop_original_details_stars = %d set=%v", value, ok)
+	}
+
+	sender := tgMessageActionStarGiftUniqueForViewer(action, senderID).(*tg.MessageActionStarGiftUnique)
+	if _, ok := sender.GetDropOriginalDetailsStars(); ok {
+		t.Fatal("sender mirror exposed drop_original_details_stars")
+	}
+	if _, ok := sender.GetTransferStars(); ok {
+		t.Fatal("sender mirror exposed transfer_stars")
+	}
+	if _, ok := sender.GetResaleAmount(); ok {
+		t.Fatal("sender mirror exposed resale_amount")
+	}
+	if _, ok := sender.GetCanExportAt(); ok {
+		t.Fatal("sender mirror exposed can_export_at")
+	}
+	if _, ok := sender.GetCanTransferAt(); ok {
+		t.Fatal("sender mirror exposed can_transfer_at")
+	}
+	if _, ok := sender.GetCanResellAt(); ok {
+		t.Fatal("sender mirror exposed can_resell_at")
+	}
+	if _, ok := sender.GetCanCraftAt(); ok {
+		t.Fatal("sender mirror exposed can_craft_at")
 	}
 }
 
@@ -1229,8 +1390,9 @@ func TestStarGiftSaga(t *testing.T) {
 	}
 
 	inv := &tg.InputInvoiceStarGift{
-		Peer:   &tg.InputPeerUser{UserID: recipient.ID, AccessHash: recipient.AccessHash},
-		GiftID: gift.ID,
+		HideName: true,
+		Peer:     &tg.InputPeerUser{UserID: recipient.ID, AccessHash: recipient.AccessHash},
+		GiftID:   gift.ID,
 	}
 
 	// 2. getPaymentForm → paymentFormStarGift（XTR + 非空 prices）。
@@ -1301,6 +1463,19 @@ func TestStarGiftSaga(t *testing.T) {
 	}
 	if from, ok := saved.GetFromID(); !ok {
 		t.Fatalf("saved gift from = %v, want sender peer", from)
+	}
+	if !saved.NameHidden {
+		t.Fatal("saved gift name_hidden = false, want anonymous gift")
+	}
+	foundSender := false
+	for _, user := range savedRes.Users {
+		if got, ok := user.(*tg.User); ok && got.ID == sender.ID {
+			foundSender = true
+			break
+		}
+	}
+	if !foundSender {
+		t.Fatalf("saved gift users = %+v, want anonymous sender %d for receiver", savedRes.Users, sender.ID)
 	}
 
 	// 4b. 收礼人 userFull 必须带 stargifts_count（否则客户端资料页 Gifts 区段不出现）。
@@ -1854,5 +2029,60 @@ func TestStarsTopupRejectsUnlistedAmount(t *testing.T) {
 	_, err := r.onPaymentsGetPaymentForm(ctx, &tg.PaymentsGetPaymentFormRequest{Invoice: inv})
 	if !tgerr.Is(err, "STARS_FORM_AMOUNT_MISMATCH") {
 		t.Fatalf("getPaymentForm unlisted err = %v, want STARS_FORM_AMOUNT_MISMATCH", err)
+	}
+}
+
+func TestSavedStarGiftAnonymousDetailsVisibleOnlyToReceiver(t *testing.T) {
+	const (
+		senderID   = int64(1780243201)
+		receiverID = int64(1780243231)
+		viewerID   = int64(1780243999)
+	)
+	gift := domain.SavedStarGift{
+		Owner:      domain.Peer{Type: domain.PeerTypeUser, ID: receiverID},
+		FromUserID: senderID,
+		GiftID:     7001,
+		RevisionID: 8001,
+		MsgID:      91,
+		Date:       1700000000,
+		NameHidden: true,
+		Message:    "private gift message",
+	}
+
+	// Telegram iOS needs the sender peer to turn a user gift's msg_id into an
+	// InputSavedStarGiftUser reference. The protocol exposes hidden original
+	// details to the receiver, while keeping them hidden from profile viewers.
+	receiverProjection := tgSavedStarGifts(receiverID, []domain.SavedStarGift{gift}, nil, nil)
+	if len(receiverProjection) != 1 {
+		t.Fatalf("receiver projection len = %d, want 1", len(receiverProjection))
+	}
+	from, ok := receiverProjection[0].GetFromID()
+	fromUser, isUser := from.(*tg.PeerUser)
+	if !ok || !isUser || fromUser.UserID != senderID {
+		t.Fatalf("receiver from_id = %#v ok=%v, want sender %d", from, ok, senderID)
+	}
+	message, ok := receiverProjection[0].GetMessage()
+	if !ok || message.Text != gift.Message {
+		t.Fatalf("receiver message = %#v ok=%v, want private message", message, ok)
+	}
+	if msgID, ok := receiverProjection[0].GetMsgID(); !ok || msgID != gift.MsgID {
+		t.Fatalf("receiver msg_id = %d ok=%v, want %d", msgID, ok, gift.MsgID)
+	}
+	if ids := savedStarGiftUserIDs(receiverID, []domain.SavedStarGift{gift}); !reflect.DeepEqual(ids, []int64{senderID}) {
+		t.Fatalf("receiver user ids = %v, want sender %d", ids, senderID)
+	}
+
+	viewerProjection := tgSavedStarGifts(viewerID, []domain.SavedStarGift{gift}, nil, nil)
+	if len(viewerProjection) != 1 {
+		t.Fatalf("viewer projection len = %d, want 1", len(viewerProjection))
+	}
+	if from, ok := viewerProjection[0].GetFromID(); ok {
+		t.Fatalf("anonymous sender leaked to profile viewer: %#v", from)
+	}
+	if message, ok := viewerProjection[0].GetMessage(); ok {
+		t.Fatalf("anonymous message leaked to profile viewer: %#v", message)
+	}
+	if ids := savedStarGiftUserIDs(viewerID, []domain.SavedStarGift{gift}); len(ids) != 0 {
+		t.Fatalf("anonymous sender user leaked to profile viewer: %v", ids)
 	}
 }

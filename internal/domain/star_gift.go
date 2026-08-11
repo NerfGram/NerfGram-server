@@ -87,7 +87,8 @@ type SavedStarGift struct {
 	PrepaidUpgradeHash       string // 第三方单独代付升级的一次性 entitlement
 	GiftNum                  int    // auction-acquired release number for regular gifts
 	Message                  string // 附言（可选）
-	UniqueGiftID             int64  // 非 0 表示已升级为唯一礼物；与 Converted 互斥
+	MessageEntities          []MessageEntity
+	UniqueGiftID             int64 // 非 0 表示已升级为唯一礼物；与 Converted 互斥
 	TransferStars            int64
 	CanExportAt              int
 	CanTransferAt            int
@@ -205,46 +206,47 @@ type StarGiftCollectibleWrite struct {
 
 // UniqueStarGift 是一份已经发行的唯一礼物。属性、编号与 slug 一经创建永久不变。
 type UniqueStarGift struct {
-	ID                    int64
-	GiftID                int64
-	CollectibleRevisionID int64
-	SourceSavedGiftID     int64
-	Title                 string
-	Slug                  string
-	Num                   int
-	Owner                 Peer
-	RequirePremium        bool
-	ResaleTonOnly         bool
-	ThemeAvailable        bool
-	Burned                bool
-	Crafted               bool
-	OwnerName             string
-	OwnerAddress          string
-	GiftAddress           string
-	ResellAmount          *StarGiftAmount
-	ResellVersion         int64
-	ReleasedBy            Peer
-	ValueAmount           int64
-	ValueCurrency         string
-	ValueUSD              int64
-	ThemePeer             Peer
-	Host                  Peer
-	OfferMinStars         int
-	CraftChancePermille   int
-	LastSaleDate          int
-	LastSaleAmount        *StarGiftAmount
-	Model                 StarGiftCollectibleAttribute
-	Pattern               StarGiftCollectibleAttribute
-	Backdrop              StarGiftCollectibleAttribute
-	AvailabilityIssued    int
-	AvailabilityTotal     int
-	KeepOriginalDetails   bool
-	OriginalFromUserID    int64
-	OriginalOwner         Peer
-	OriginalDate          int
-	OriginalMessage       string
-	OriginalNameHidden    bool
-	CreatedAt             time.Time
+	ID                      int64
+	GiftID                  int64
+	CollectibleRevisionID   int64
+	SourceSavedGiftID       int64
+	Title                   string
+	Slug                    string
+	Num                     int
+	Owner                   Peer
+	RequirePremium          bool
+	ResaleTonOnly           bool
+	ThemeAvailable          bool
+	Burned                  bool
+	Crafted                 bool
+	OwnerName               string
+	OwnerAddress            string
+	GiftAddress             string
+	ResellAmount            *StarGiftAmount
+	ResellVersion           int64
+	ReleasedBy              Peer
+	ValueAmount             int64
+	ValueCurrency           string
+	ValueUSD                int64
+	ThemePeer               Peer
+	Host                    Peer
+	OfferMinStars           int
+	CraftChancePermille     int
+	LastSaleDate            int
+	LastSaleAmount          *StarGiftAmount
+	Model                   StarGiftCollectibleAttribute
+	Pattern                 StarGiftCollectibleAttribute
+	Backdrop                StarGiftCollectibleAttribute
+	AvailabilityIssued      int
+	AvailabilityTotal       int
+	KeepOriginalDetails     bool
+	OriginalFromUserID      int64
+	OriginalOwner           Peer
+	OriginalDate            int
+	OriginalMessage         string
+	OriginalMessageEntities []MessageEntity
+	OriginalNameHidden      bool
+	CreatedAt               time.Time
 }
 
 // CollectibleEmojiStatus projects an immutable unique gift into the complete
@@ -385,6 +387,7 @@ type StarGiftPurchaseRequest struct {
 	IncludeUpgrade   bool
 	HideName         bool
 	Message          string
+	MessageEntities  []MessageEntity
 	ChargeStars      int64
 	FormID           int64
 	CommandKey       string
@@ -400,17 +403,18 @@ type StarGiftPurchaseRequest struct {
 // fresh form represents a fresh purchase even when every invoice field is the
 // same; retrying one form represents the same purchase command.
 type StarGiftPurchaseForm struct {
-	FormID         int64
-	BuyerUserID    int64
-	To             Peer
-	GiftID         int64
-	RevisionID     int64
-	IncludeUpgrade bool
-	HideName       bool
-	Message        string
-	ChargeStars    int64
-	IssuedAt       int
-	ExpiresAt      int
+	FormID          int64
+	BuyerUserID     int64
+	To              Peer
+	GiftID          int64
+	RevisionID      int64
+	IncludeUpgrade  bool
+	HideName        bool
+	Message         string
+	MessageEntities []MessageEntity
+	ChargeStars     int64
+	IssuedAt        int
+	ExpiresAt       int
 }
 
 type StarGiftPurchaseResult struct {

@@ -89,6 +89,61 @@ func TestStarGiftCraftReadyAt(t *testing.T) {
 	}
 }
 
+func TestStarGiftCraftInputAvailable(t *testing.T) {
+	owner := domain.Peer{Type: domain.PeerTypeUser, ID: 100}
+	base := domain.UniqueStarGift{
+		Owner:               owner,
+		CraftChancePermille: 250,
+	}
+
+	tests := []struct {
+		name     string
+		gift     domain.UniqueStarGift
+		survivor bool
+		want     bool
+	}{
+		{name: "plain survivor", gift: base, survivor: true, want: true},
+		{name: "addressed survivor", gift: func() domain.UniqueStarGift {
+			gift := base
+			gift.GiftAddress = "EQcraft"
+			return gift
+		}(), survivor: true, want: false},
+		{name: "addressed burn-only input", gift: func() domain.UniqueStarGift {
+			gift := base
+			gift.GiftAddress = "EQburn"
+			return gift
+		}(), survivor: false, want: true},
+		{name: "on-chain owner", gift: func() domain.UniqueStarGift {
+			gift := base
+			gift.OwnerAddress = "EQowner"
+			return gift
+		}(), survivor: false, want: false},
+		{name: "burned", gift: func() domain.UniqueStarGift {
+			gift := base
+			gift.Burned = true
+			return gift
+		}(), survivor: false, want: false},
+		{name: "wrong owner", gift: func() domain.UniqueStarGift {
+			gift := base
+			gift.Owner.ID++
+			return gift
+		}(), survivor: false, want: false},
+		{name: "no chance", gift: func() domain.UniqueStarGift {
+			gift := base
+			gift.CraftChancePermille = 0
+			return gift
+		}(), survivor: false, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := starGiftCraftInputAvailable(tt.gift, owner, tt.survivor); got != tt.want {
+				t.Fatalf("starGiftCraftInputAvailable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEncodeSharedPrivateStarGiftMediaOmitsUserBoxLocalRefs(t *testing.T) {
 	ordinary := &domain.MessageMedia{
 		Kind: domain.MessageMediaKindService,

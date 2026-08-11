@@ -309,6 +309,27 @@ func (s *ChannelStore) SetChannelEmojiStatusAdmin(_ context.Context, channelID i
 	return cloneChannel(channel), nil
 }
 
+func (s *ChannelStore) SetChannelPhotoAdmin(_ context.Context, channelID int64, photo domain.Photo) (domain.Channel, error) {
+	if channelID == 0 || photo.ID == 0 {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	channel, ok := s.channels[channelID]
+	if !ok || channel.Deleted {
+		return domain.Channel{}, domain.ErrChannelInvalid
+	}
+	stripped := domain.StrippedFromSizes(photo.Sizes)
+	if stripped == nil {
+		stripped = []byte{}
+	}
+	channel.PhotoID = photo.ID
+	channel.PhotoDCID = photo.DCID
+	channel.PhotoStripped = stripped
+	s.channels[channelID] = channel
+	return cloneChannel(channel), nil
+}
+
 func (s *ChannelStore) ResolvePublicChannelUsername(_ context.Context, viewerUserID int64, username string) (domain.Channel, bool, error) {
 	_ = viewerUserID // zero is the anonymous public-web view; no membership state is projected.
 	username = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(username, "@")))

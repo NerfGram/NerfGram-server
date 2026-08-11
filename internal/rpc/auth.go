@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -471,9 +472,25 @@ func (r *Router) onAuthSendCode(ctx context.Context, req *tg.AuthSendCodeRequest
 			errors.Is(err, auth.ErrSystemUserLoginForbidden) {
 			return nil, phoneNumberInvalidErr()
 		}
+		// The public MTProto error intentionally stays opaque, but operators need
+		// the wrapped store/provider cause to repair an update-related failure.
+		// Hash the normalized phone so neither the number nor the OTP reaches logs.
+		phoneDigest := sha256.Sum256([]byte(domain.NormalizePhone(req.PhoneNumber)))
+		fields := append(r.contextLogFields(ctx),
+			zap.Int("api_id", req.APIID),
+			zap.String("phone_digest", hex.EncodeToString(phoneDigest[:8])),
+			zap.Error(err),
+		)
+		r.log.Error("auth.sendCode failed", fields...)
 		return nil, internalErr()
 	}
-	return r.tgSentCodeForHash(ctx, hash)
+	sent, err := r.tgSentCodeForHash(ctx, hash)
+	if err != nil {
+		fields := append(r.contextLogFields(ctx), zap.Error(err))
+		r.log.Error("auth.sendCode delivery lookup failed", fields...)
+		return nil, err
+	}
+	return sent, nil
 }
 
 func (r *Router) onAuthReportMissingCode(ctx context.Context, req *tg.AuthReportMissingCodeRequest) (bool, error) {

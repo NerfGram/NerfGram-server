@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,99 @@ import (
 	"telesrv/internal/domain"
 	"telesrv/internal/store"
 )
+
+// BotAPIGiftPremiumSubscription implements the HTTP Bot API method through the
+// same catalog, payment intent, Stars ledger and entitlement transaction used by
+// the MTProto Premium flow.
+func (r *Router) BotAPIGiftPremiumSubscription(
+	ctx context.Context,
+	botID, userID int64,
+	monthCount int,
+	starCount int64,
+	message domain.PremiumGiftMessage,
+	requestID string,
+) (bool, error) {
+	if r == nil || r.deps.Premium == nil || r.deps.Users == nil {
+		return false, errors.New("PAYMENT_FORM_INVALID")
+	}
+	bot, found, err := r.deps.Users.ByID(ctx, botID, botID)
+	if err != nil {
+		return false, err
+	}
+	if !found || !bot.Bot {
+		return false, errors.New("BOT_INVALID")
+	}
+	recipient, found, err := r.deps.Users.ByID(ctx, botID, userID)
+	if err != nil {
+		return false, err
+	}
+	if !found || recipient.ID <= 0 || recipient.ID == botID || recipient.Bot ||
+		recipient.Deleted || domain.IsSystemUserID(recipient.ID) {
+		return false, errors.New("USER_ID_INVALID")
+	}
+	if restricted, err := r.premiumGiftsRestricted(ctx, recipient.ID); err != nil {
+		return false, err
+	} else if restricted {
+		return false, errors.New("USER_PRIVACY_RESTRICTED")
+	}
+	if !message.Valid() {
+		return false, errors.New("ENTITY_BOUNDS_INVALID")
+	}
+	plan, err := r.deps.Premium.Plan(ctx, monthCount)
+	if err != nil {
+		return false, errors.New("MONTH_COUNT_INVALID")
+	}
+	if plan.AmountStars != starCount {
+		return false, errors.New("STAR_COUNT_INVALID")
+	}
+	now := int(r.clock.Now().Unix())
+	idempotencyKey := fmt.Sprintf("botapi-premium:%d:%s", botID, requestID)
+	form, err := r.deps.Premium.IssuePaymentForm(ctx, domain.PremiumPaymentForm{
+		IdempotencyKey:  idempotencyKey,
+		BuyerUserID:     botID,
+		Kind:            domain.PremiumPurchaseGift,
+		RecipientUserID: recipient.ID,
+		Months:          plan.Months,
+		DurationDays:    plan.DurationDays,
+		AmountStars:     plan.AmountStars,
+		PlanVersion:     plan.Version,
+		Message:         message,
+		IssuedAt:        now,
+		ExpiresAt:       now + domain.PremiumPaymentFormTTLSeconds,
+	})
+	if err != nil {
+		return false, errors.New("PAYMENT_FORM_INVALID")
+	}
+	result, err := r.deps.Premium.Purchase(ctx, domain.PremiumPurchaseRequest{
+		BuyerUserID:     botID,
+		FormID:          form.ID,
+		Kind:            form.Kind,
+		RecipientUserID: form.RecipientUserID,
+		Months:          form.Months,
+		PlanVersion:     form.PlanVersion,
+		Message:         form.Message,
+		Date:            now,
+		CommandKey:      idempotencyKey,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrStarsInsufficient):
+			return false, errors.New("BALANCE_TOO_LOW")
+		case errors.Is(err, domain.ErrPremiumFormAmountChanged):
+			return false, errors.New("STAR_COUNT_INVALID")
+		case errors.Is(err, domain.ErrPremiumRecipientInvalid):
+			return false, errors.New("USER_ID_INVALID")
+		case errors.Is(err, domain.ErrPremiumRecipientRestricted):
+			return false, errors.New("USER_PRIVACY_RESTRICTED")
+		default:
+			return false, errors.New("PAYMENT_FORM_INVALID")
+		}
+	}
+	r.invalidatePremiumUserCaches(ctx, result.User.ID)
+	r.invalidateRPCProjectionForUser(result.User.ID)
+	r.pushPremiumStatusUpdate(ctx, result.User)
+	return true, nil
+}
 
 var botAPIAuthKeyID = [8]byte{'B', 'O', 'T', 'A', 'P', 'I', 0, 1}
 

@@ -25,6 +25,7 @@ type Service struct {
 	photos        userprojection.ProfilePhotoProvider
 	privacy       userprojection.PrivacyEvaluator
 	freezes       userprojection.AccountFreezeProvider
+	phones        userprojection.CollectiblePhoneProvider
 	premium       PremiumChecker
 	projector     *userprojection.Projector
 	versions      store.ReadModelVersionStore
@@ -57,6 +58,10 @@ func WithPrivacyEvaluator(p userprojection.PrivacyEvaluator) Option {
 
 func WithAccountFreezeProvider(p userprojection.AccountFreezeProvider) Option {
 	return func(s *Service) { s.freezes = p }
+}
+
+func WithCollectiblePhoneProvider(p userprojection.CollectiblePhoneProvider) Option {
+	return func(s *Service) { s.phones = p }
 }
 
 // WithReadModelVersions enables durable version-token backed peer dialog caching.
@@ -99,6 +104,7 @@ func (s *Service) rebuildProjector() {
 		userprojection.WithPhotoProvider(s.photos),
 		userprojection.WithPrivacyEvaluator(s.privacy),
 		userprojection.WithAccountFreezeProvider(s.freezes),
+		userprojection.WithCollectiblePhoneProvider(s.phones),
 	)
 }
 

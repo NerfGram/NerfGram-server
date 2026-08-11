@@ -138,6 +138,26 @@ func (s *Service) GetDocument(ctx context.Context, id int64) (domain.Document, b
 	return s.media.GetDocument(ctx, id)
 }
 
+// ValidateAvatarUpload performs a bounded, write-free image header check for
+// admin dry-runs. Full decoding and rendition validation still happens in
+// CreateAvatarFromBytes before anything is exposed as a current avatar.
+func (s *Service) ValidateAvatarUpload(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	return err == nil && cfg.Width > 0 && cfg.Height > 0
+}
+
+// CreateAvatarFromBytes stores browser-uploaded image bytes through the same
+// explicit blob backend and s/a/c rendition pipeline used by Telegram uploads.
+func (s *Service) CreateAvatarFromBytes(ctx context.Context, data []byte) (domain.Photo, error) {
+	if len(data) == 0 {
+		return domain.Photo{}, domain.ErrPhotoInvalid
+	}
+	return s.createAvatarPhoto(ctx, data)
+}
+
 // CreateAvatarFromUpload 把已上传文件组装成头像 Photo（'s'/'a'/'c' 尺寸，'a'/'c' 匹配
 // InputPeerPhotoFileLocation big/small 与 channelFull 下载路径），不绑定 profile_photos。用于频道 editPhoto。
 func (s *Service) CreateAvatarFromUpload(ctx context.Context, file domain.UploadedFileRef) (domain.Photo, error) {

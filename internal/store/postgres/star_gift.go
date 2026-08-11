@@ -490,19 +490,23 @@ func (s *StarGiftStore) Create(ctx context.Context, gift domain.SavedStarGift) (
 	if !validSavedStarGift(gift) {
 		return 0, domain.ErrStarGiftInvalid
 	}
+	entitiesJSON, err := encodeMessageEntities(gift.MessageEntities)
+	if err != nil {
+		return 0, domain.ErrStarGiftInvalid
+	}
 	var id int64
-	err := s.db.QueryRow(ctx, `
+	err = s.db.QueryRow(ctx, `
 WITH next_id AS (
     SELECT nextval(pg_get_serial_sequence('public.peer_star_gifts', 'id'))::bigint AS id
 )
-INSERT INTO peer_star_gifts (id, owner_peer_type, owner_peer_id, from_user_id, gift_id, catalog_revision_id, msg_id, saved_id, gift_date, name_hidden, unsaved, converted, convert_stars, prepaid_upgrade_stars, prepaid_upgrade_hash, gift_num, message)
+INSERT INTO peer_star_gifts (id, owner_peer_type, owner_peer_id, from_user_id, gift_id, catalog_revision_id, msg_id, saved_id, gift_date, name_hidden, unsaved, converted, convert_stars, prepaid_upgrade_stars, prepaid_upgrade_hash, gift_num, message, message_entities)
 SELECT next_id.id, $1,$2,$3,$4,$5,$6,
        CASE WHEN $1 = 'channel' AND $7::bigint = 0 THEN next_id.id ELSE $7::bigint END,
-       $8,$9,$10,false,$11,$12,$13,$14,$15
+       $8,$9,$10,false,$11,$12,$13,$14,$15,$16
 FROM next_id
 RETURNING id`,
 		string(gift.Owner.Type), gift.Owner.ID, gift.FromUserID, gift.GiftID, gift.RevisionID, gift.MsgID, gift.SavedID, gift.Date,
-		gift.NameHidden, gift.Unsaved, gift.ConvertStars, gift.PrepaidUpgradeStars, gift.PrepaidUpgradeHash, gift.GiftNum, gift.Message).Scan(&id)
+		gift.NameHidden, gift.Unsaved, gift.ConvertStars, gift.PrepaidUpgradeStars, gift.PrepaidUpgradeHash, gift.GiftNum, gift.Message, entitiesJSON).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("create star gift: %w", err)
 	}
@@ -595,7 +599,7 @@ SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.ca
        p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
        p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
        p.drop_original_details_stars, p.can_craft_at,
-       p.message, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
+	   p.message, p.message_entities::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
@@ -749,7 +753,7 @@ SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.ca
        p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
 	   p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
 	   p.drop_original_details_stars, p.can_craft_at,
-       p.message, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
+	       p.message, p.message_entities::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
@@ -889,7 +893,7 @@ SELECT p.id, p.owner_peer_type, p.owner_peer_id, p.from_user_id, p.gift_id, p.ca
        p.msg_id, p.saved_id, p.gift_date, p.name_hidden, p.unsaved, p.converted, p.convert_stars, p.prepaid_upgrade_stars, p.prepaid_upgrade_hash, p.gift_num,
 	   p.lifecycle_status, p.transfer_stars, p.can_export_at, p.can_transfer_at, p.can_resell_at,
 	   p.drop_original_details_stars, p.can_craft_at,
-       p.message, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
+	       p.message, p.message_entities::text, COALESCE(p.unique_gift_id, 0), p.upgrade_msg_id, p.pinned_order,
        COALESCE((SELECT array_agg(i.collection_id ORDER BY c.sort_order, i.collection_id)
                  FROM star_gift_collection_items i
                  JOIN star_gift_collections c ON c.collection_id=i.collection_id
@@ -932,14 +936,20 @@ WHERE `+where+` FOR UPDATE`, args...)
 func scanSavedStarGift(row rowScanner) (domain.SavedStarGift, error) {
 	var g domain.SavedStarGift
 	var ownerType string
+	var entitiesJSON string
 	if err := row.Scan(&g.ID, &ownerType, &g.Owner.ID, &g.FromUserID, &g.GiftID, &g.RevisionID, &g.MsgID, &g.SavedID, &g.Date,
 		&g.NameHidden, &g.Unsaved, &g.Converted, &g.ConvertStars, &g.PrepaidUpgradeStars, &g.PrepaidUpgradeHash, &g.GiftNum,
 		&g.LifecycleStatus, &g.TransferStars, &g.CanExportAt, &g.CanTransferAt, &g.CanResellAt,
-		&g.DropOriginalDetailsStars, &g.CanCraftAt, &g.Message, &g.UniqueGiftID,
+		&g.DropOriginalDetailsStars, &g.CanCraftAt, &g.Message, &entitiesJSON, &g.UniqueGiftID,
 		&g.UpgradeMsgID, &g.PinnedOrder, &g.CollectionIDs); err != nil {
 		return domain.SavedStarGift{}, err
 	}
 	g.Owner.Type = domain.PeerType(ownerType)
+	entities, err := decodeMessageEntities(entitiesJSON)
+	if err != nil {
+		return domain.SavedStarGift{}, fmt.Errorf("decode star gift message entities: %w", err)
+	}
+	g.MessageEntities = entities
 	return g, nil
 }
 
@@ -965,6 +975,9 @@ msg_id = $3 OR EXISTS (
 
 func validSavedStarGift(g domain.SavedStarGift) bool {
 	if g.GiftID == 0 || g.RevisionID == 0 || !validStarGiftOwner(g.Owner) {
+		return false
+	}
+	if !(domain.PremiumGiftMessage{Text: g.Message, Entities: g.MessageEntities}).Valid() {
 		return false
 	}
 	switch g.Owner.Type {

@@ -76,6 +76,37 @@ func TestOutboxDispatcherPushesNewMessageAndMarksDelivered(t *testing.T) {
 	}
 }
 
+func TestOutboxEventDeletedNewMessageUsesDeletePtsUpdate(t *testing.T) {
+	msg := domain.Message{
+		ID:          547,
+		OwnerUserID: 1000000001,
+		Peer:        domain.Peer{Type: domain.PeerTypeUser, ID: 1000000002},
+		From:        domain.Peer{Type: domain.PeerTypeUser, ID: 1000000001},
+		Date:        1700000301,
+		Body:        "deleted before dispatch",
+		Pts:         2035,
+		Deleted:     true,
+	}
+	updates := tgUpdateForOutboxEvent(domain.UpdateEvent{
+		UserID:   msg.OwnerUserID,
+		Type:     domain.UpdateEventNewMessage,
+		Pts:      msg.Pts,
+		PtsCount: 1,
+		Date:     msg.Date,
+		Message:  msg,
+	})
+	if updates == nil || len(updates.Updates) != 1 {
+		t.Fatalf("updates = %+v, want one delete pts update", updates)
+	}
+	del, ok := updates.Updates[0].(*tg.UpdateDeleteMessages)
+	if !ok {
+		t.Fatalf("update = %T, want UpdateDeleteMessages instead of UpdateNewMessage", updates.Updates[0])
+	}
+	if del.Pts != msg.Pts || del.PtsCount != 1 || len(del.Messages) != 1 || del.Messages[0] != msg.ID {
+		t.Fatalf("delete update = %+v, want message %d at pts=%d", del, msg.ID, msg.Pts)
+	}
+}
+
 func TestOutboxDispatcherUsesScopedAuthKeyExclusion(t *testing.T) {
 	var excludeAuthKeyID [8]byte
 	excludeAuthKeyID[0] = 7

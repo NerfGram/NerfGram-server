@@ -1,7 +1,9 @@
-import { ArrowLeft, BadgeCheck } from "lucide-react";
+import { ArrowLeft, BadgeCheck, ImagePlus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
 import { ActionButton } from "../components/ActionButton";
+import { Avatar } from "../components/Avatar";
+import { AvatarModal } from "../components/AvatarModal";
 import { Alert, AuditTable, Badge, JsonBlock, LoadingSurface, PageFrame, SectionHead, SplitLayout, Summary } from "../components/ui";
 import { useI18n } from "../i18n";
 import { ScamFakeActions, ScamFakeBadges } from "../components/flags";
@@ -14,6 +16,8 @@ export function ChannelDetailPage({ id, navigate }: { id: number; navigate: Navi
   const { t } = useI18n();
   const [detail, setDetail] = useState<ChannelDetail | null>(null);
   const [error, setError] = useState("");
+  const [avatarOpen, setAvatarOpen] = useState(false);
+  const [avatarRefresh, setAvatarRefresh] = useState(0);
 
   async function load() {
     setError("");
@@ -46,9 +50,12 @@ export function ChannelDetailPage({ id, navigate }: { id: number; navigate: Navi
         main={
           <div className="stacked-sections">
             <section className="entity-head">
-              <div>
+              <div className="entity-identity">
+                <Avatar id={ch.ID} kind="channel" label={ch.Title || ch.Username} size={64} refreshKey={avatarRefresh} />
+                <div>
                 <div className="entity-title">{ch.Title || "-"}</div>
                 <div className="entity-subtitle">{displayUsername(ch.Username) || t("account.noUsername")} · {t("channel.creator", { id: ch.CreatorUserID })}</div>
+                </div>
               </div>
               <div className="entity-badges">
                 <Badge>{channelKind(ch, t)}</Badge>
@@ -93,12 +100,14 @@ export function ChannelDetailPage({ id, navigate }: { id: number; navigate: Navi
             <div className="dock-title">{t("attr.settings")}</div>
             <ChannelSettingsAction channel={ch} onDone={load} />
             <div className="dock-title">{t("attr.attributes")}</div>
+            <button className="btn icon-text" type="button" onClick={() => setAvatarOpen(true)}><ImagePlus size={15} /> {t("avatar.change")}</button>
             <UsernameAction idKey="channel_id" id={ch.ID} path="/api/actions/set-channel-username" current={ch.Username} onDone={load} />
             <ColorAction idKey="channel_id" id={ch.ID} path="/api/actions/set-channel-color" onDone={load} />
             <EmojiStatusAction idKey="channel_id" id={ch.ID} path="/api/actions/set-channel-emoji-status" onDone={load} />
           </section>
         }
       />
+      {avatarOpen && <AvatarModal kind="channel" id={ch.ID} onClose={() => setAvatarOpen(false)} onDone={() => { setAvatarRefresh((value) => value + 1); void load(); }} />}
     </PageFrame>
   );
 }

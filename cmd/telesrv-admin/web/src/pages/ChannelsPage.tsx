@@ -1,49 +1,74 @@
-import { ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
 import { Alert, Badge, EmptyRow, Metric, PageFrame, QueryPanel } from "../components/ui";
 import { ScamFakeBadges } from "../components/flags";
+import { Avatar } from "../components/Avatar";
 import { useI18n } from "../i18n";
 import { channelKind, displayUsername, formatDate } from "../lib/format";
 import { channelMetrics } from "../lib/metrics";
 import type { Navigate } from "../routing";
 import type { ChannelListResponse } from "../types";
 
+type ChannelCursor = { beforeID: number; beforeUpdatedUS: number };
+
+const firstChannelPage: ChannelCursor = { beforeID: 0, beforeUpdatedUS: 0 };
+
 export function ChannelsPage({ navigate }: { navigate: Navigate }) {
   const { t } = useI18n();
   const [q, setQ] = useState("");
   const [limit, setLimit] = useState("50");
   const [data, setData] = useState<ChannelListResponse | null>(null);
-  const [cursor, setCursor] = useState({ beforeID: 0, beforeUpdatedUS: 0 });
+  const [filters, setFilters] = useState({ q: "", limit: "50" });
+  const [cursor, setCursor] = useState<ChannelCursor>(firstChannelPage);
+  const [cursorHistory, setCursorHistory] = useState<ChannelCursor[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  async function load(next = false) {
+  async function loadPage(target: ChannelCursor, requestedFilters = filters, resetHistory = false) {
     setBusy(true);
     setError("");
-    const params = new URLSearchParams({ limit });
-    if (q.trim()) {
-      params.set("q", q.trim());
-    } else if (next) {
-      params.set("before_id", String(cursor.beforeID));
-      params.set("before_updated_us", String(cursor.beforeUpdatedUS));
+    const params = new URLSearchParams({ limit: requestedFilters.limit });
+    if (requestedFilters.q) {
+      params.set("q", requestedFilters.q);
+    } else if (target.beforeID > 0) {
+      params.set("before_id", String(target.beforeID));
+      params.set("before_updated_us", String(target.beforeUpdatedUS));
     }
     try {
       const result = await api.channels(params);
       setData(result);
-      setCursor({
-        beforeID: result.next_before_id,
-        beforeUpdatedUS: result.next_before_updated_us
-      });
+      setFilters(requestedFilters);
+      setCursor(target);
+      if (resetHistory) setCursorHistory([]);
+      return true;
     } catch (err) {
       setError(errorMessage(err));
+      return false;
     } finally {
       setBusy(false);
     }
   }
 
+  async function search() {
+    const requestedFilters = { q: q.trim(), limit };
+    await loadPage(firstChannelPage, requestedFilters, true);
+  }
+
+  async function nextPage() {
+    if (!data?.listing || !data.has_more) return;
+    const target = { beforeID: data.next_before_id, beforeUpdatedUS: data.next_before_updated_us };
+    if (await loadPage(target)) setCursorHistory((history) => [...history, cursor]);
+  }
+
+  async function previousPage() {
+    const target = cursorHistory[cursorHistory.length - 1];
+    if (!target) return;
+    if (await loadPage(target)) setCursorHistory((history) => history.slice(0, -1));
+  }
+
   useEffect(() => {
-    void load(false);
+    void loadPage(firstChannelPage, { q: "", limit: "50" }, true);
   }, []);
 
   const metrics = channelMetrics(data?.rows ?? []);
@@ -53,7 +78,7 @@ export function ChannelsPage({ navigate }: { navigate: Navigate }) {
       title={t("channel.pageTitle")}
       eyebrow={data?.listing === false ? t("account.queryResults") : t("channel.recentUpdated")}
       actions={
-        <button className="btn" type="button" onClick={() => load(false)} disabled={busy}>
+        <button className="btn" type="button" onClick={() => loadPage(cursor)} disabled={busy}>
           <RefreshCw size={15} /> {t("common.refresh")}
         </button>
       }
@@ -66,7 +91,7 @@ export function ChannelsPage({ navigate }: { navigate: Navigate }) {
         <Metric label={t("channel.verifiedCount")} value={String(metrics.verified)} tone="good" />
       </div>
       <QueryPanel>
-        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void load(false); }}>
+        <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void search(); }}>
           <label className="searchbox">
             <Search size={15} />
             <input value={q} onChange={(event) => setQ(event.target.value)} placeholder={t("channel.searchPlaceholder")} />
@@ -78,9 +103,14 @@ export function ChannelsPage({ navigate }: { navigate: Navigate }) {
           <button className="btn primary icon-text" type="submit" disabled={busy}>
             {busy ? <Loader2 size={15} className="spin" /> : <Search size={15} />} {t("common.search")}
           </button>
+          {data?.listing && cursorHistory.length > 0 && (
+            <button className="btn icon-text" type="button" onClick={() => previousPage()} disabled={busy}>
+              <ChevronLeft size={15} /> {t("messages.previousPage")}
+            </button>
+          )}
           {data?.listing && data.has_more && (
-            <button className="btn icon-text" type="button" onClick={() => load(true)} disabled={busy}>
-              <ChevronRight size={15} /> {t("common.nextPage")}
+            <button className="btn icon-text" type="button" onClick={() => nextPage()} disabled={busy}>
+              <ChevronRight size={15} /> {t("messages.nextPage")}
             </button>
           )}
         </form>
@@ -107,7 +137,7 @@ export function ChannelsPage({ navigate }: { navigate: Navigate }) {
                 <td className="mono">{row.ID}</td>
                 <td>{channelKind(row, t)}</td>
                 <td>{displayUsername(row.Username)}</td>
-                <td>{row.Title}</td>
+                <td><span className="table-identity"><Avatar id={row.ID} kind="channel" label={row.Title || row.Username} />{row.Title}</span></td>
                 <td>{row.ParticipantsCount}</td>
                 <td>{row.AdminsCount}</td>
                 <td>{row.PTS}</td>

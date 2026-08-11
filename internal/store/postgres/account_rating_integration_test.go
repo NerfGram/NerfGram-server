@@ -43,11 +43,7 @@ func ratingTestCatalogRevision(t *testing.T, pool *pgxpool.Pool) (revisionID, gi
 			ID: docID, AccessHash: docID + 1, MimeType: "application/x-tgsticker", Size: 4, DCID: 2,
 			Attributes: []domain.DocumentAttribute{{Kind: domain.DocAttrSticker}},
 		},
-		Blob: domain.FileBlob{
-			LocationKey: "doc:" + fmt.Sprint(docID), Backend: domain.MediaBackendLocalFS,
-			ObjectKey: "rating-star-gift", Size: 4, SHA256: make([]byte, 32),
-			MimeType: "application/x-tgsticker",
-		},
+		Blob: postgresTestBlob("doc:"+fmt.Sprint(docID), "rating-star-gift", 4, "application/x-tgsticker"),
 		Animation: domain.StarGiftAnimation{
 			JSON:   []byte(`{"v":"5.7","w":512,"h":512,"fr":30,"ip":0,"op":30,"layers":[{}]}`),
 			SHA256: make([]byte, 32), SourceFormat: domain.StarGiftAnimationTGS, Width: 512, Height: 512,

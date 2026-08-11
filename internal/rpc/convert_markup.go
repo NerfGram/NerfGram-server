@@ -464,6 +464,12 @@ func tgMarkupButton(btn domain.MarkupButton) tg.KeyboardButtonClass {
 			out.SetStyle(style)
 		}
 		return out
+	case domain.MarkupButtonBuy:
+		out := &tg.KeyboardButtonBuy{Text: btn.Text}
+		if style, ok := tgMarkupButtonStyle(btn); ok {
+			out.SetStyle(style)
+		}
+		return out
 	default: // callback
 		out := &tg.KeyboardButtonCallback{Text: btn.Text, Data: btn.Data}
 		if btn.RequiresPassword {

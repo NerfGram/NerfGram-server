@@ -64,6 +64,10 @@ func NewBotStore(users *UserStore) *BotStore {
 	s.byID[domain.ChatBotUserID] = chatBotSeedProfile()
 	s.byID[domain.StarsTestBotUserID] = starsTestBotSeedProfile()
 	s.byID[domain.BroadcastBotUserID] = broadcastBotSeedProfile()
+	s.byID[domain.GifBotUserID] = domain.BotProfile{
+		BotUserID: domain.GifBotUserID, OwnerUserID: domain.GifBotUserID,
+		Description: "Search the server-curated GIF catalog.", InlinePlaceholder: "Search GIFs",
+	}
 	return s
 }
 

@@ -61,6 +61,20 @@ type EphemeralGatewayService interface {
 	BotAPIDeleteEphemeral(ctx context.Context, botUserID, chatID, receiverUserID int64, messageID int) (bool, error)
 }
 
+// PremiumGatewayService is optional so lightweight Bot API gateways retain the
+// smaller core interface. The production RPC router implements it through the
+// same durable Premium payment pipeline as MTProto payments.sendStarsForm.
+type PremiumGatewayService interface {
+	BotAPIGiftPremiumSubscription(
+		ctx context.Context,
+		botID, userID int64,
+		monthCount int,
+		starCount int64,
+		message domain.PremiumGiftMessage,
+		requestID string,
+	) (bool, error)
+}
+
 type GatewayUpdateWaiter interface {
 	BotAPIUpdateWaitVersion(botID int64) uint64
 	WaitBotAPIUpdate(ctx context.Context, botID int64, version uint64, timeout time.Duration) bool
@@ -270,11 +284,109 @@ func (h *handler) handle(w http.ResponseWriter, r *http.Request) {
 		h.answerWebAppQuery(w, r, botID)
 	case "savepreparedinlinemessage":
 		h.savePreparedInlineMessage(w, r, botID)
+	case "giftpremiumsubscription":
+		h.giftPremiumSubscription(w, r, botID)
 	case "answershippingquery", "answerprecheckoutquery":
 		writeAPIError(w, http.StatusNotImplemented, "BLOCKED_DURABLE_QUERY_STATE_MISSING")
 	default:
 		writeAPIError(w, http.StatusNotFound, "METHOD_NOT_FOUND")
 	}
+}
+
+func (h *handler) giftPremiumSubscription(w http.ResponseWriter, r *http.Request, botID int64) {
+	gateway, ok := h.gateway.(PremiumGatewayService)
+	if !ok {
+		writeAPIError(w, http.StatusNotImplemented, "METHOD_NOT_FOUND")
+		return
+	}
+	values, err := requestValues(r)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "BAD_REQUEST")
+		return
+	}
+	userID, err := strconv.ParseInt(strings.TrimSpace(values["user_id"]), 10, 64)
+	if err != nil || userID <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "USER_ID_INVALID")
+		return
+	}
+	monthCount, err := strconv.Atoi(strings.TrimSpace(values["month_count"]))
+	if err != nil || monthCount <= 0 || monthCount > domain.MaxPremiumPlanMonths {
+		writeAPIError(w, http.StatusBadRequest, "MONTH_COUNT_INVALID")
+		return
+	}
+	starCount, err := strconv.ParseInt(strings.TrimSpace(values["star_count"]), 10, 64)
+	if err != nil || starCount <= 0 || starCount > domain.MaxPremiumPlanAmountStars {
+		writeAPIError(w, http.StatusBadRequest, "STAR_COUNT_INVALID")
+		return
+	}
+	text, entities, err := botAPIFormattedTextRaw(
+		values["text"], values["text_parse_mode"], values["text_entities"],
+		domain.MaxPremiumGiftMessageRunes, false,
+	)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !premiumGiftBotAPIEntitiesAllowed(entities) {
+		writeAPIError(w, http.StatusBadRequest, "ENTITY_TYPE_UNSUPPORTED")
+		return
+	}
+	requestID := strings.TrimSpace(values["request_id"])
+	headerID := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if requestID != "" && headerID != "" && requestID != headerID {
+		writeAPIError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_INVALID")
+		return
+	}
+	if requestID == "" {
+		requestID = headerID
+	}
+	if requestID == "" {
+		requestID = randomBotAPIOwner()
+	}
+	if !validBotAPIIdempotencyKey(requestID) {
+		writeAPIError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_INVALID")
+		return
+	}
+	success, err := gateway.BotAPIGiftPremiumSubscription(
+		r.Context(),
+		botID,
+		userID,
+		monthCount,
+		starCount,
+		domain.PremiumGiftMessage{Text: text, Entities: entities},
+		requestID,
+	)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, apiErrorDescription(err))
+		return
+	}
+	writeAPIOK(w, success)
+}
+
+func premiumGiftBotAPIEntitiesAllowed(entities []domain.MessageEntity) bool {
+	for _, entity := range entities {
+		if !domain.PremiumGiftEntityTypeAllowed(entity.Type) {
+			return false
+		}
+	}
+	return true
+}
+
+func validBotAPIIdempotencyKey(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '-', '_', '.', ':':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func splitBotPath(path string) (token, method string, ok bool) {
@@ -1506,6 +1618,13 @@ func apiErrorDescription(err error) string {
 		"CHAT_ADMIN_REQUIRED",
 		"REPLY_MESSAGE_ID_INVALID",
 		"WEBHOOK_NOT_IMPLEMENTED",
+		"MONTH_COUNT_INVALID",
+		"STAR_COUNT_INVALID",
+		"IDEMPOTENCY_KEY_INVALID",
+		"BALANCE_TOO_LOW",
+		"PREMIUM_GIFT_SELF_INVALID",
+		"PREMIUM_GIFT_CODE_INVALID",
+		"PAYMENT_FORM_INVALID",
 	} {
 		if strings.Contains(text, marker) {
 			return marker

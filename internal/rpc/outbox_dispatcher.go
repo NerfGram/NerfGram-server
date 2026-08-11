@@ -527,6 +527,9 @@ func tgUpdateForOutboxEventForViewer(event domain.UpdateEvent, viewerUserID int6
 	}
 	switch event.Type {
 	case domain.UpdateEventNewMessage:
+		if event.Message.Deleted {
+			return tgDeletedPrivateMessageOutboxUpdate(event)
+		}
 		return tgPrivateMessageUpdates(event, event.Message, 0, false, tgUsersForViewer(viewerUserID, event.Users), tgChannels(viewerUserID, event.Channels))
 	case domain.UpdateEventReadHistoryInbox, domain.UpdateEventReadHistoryOutbox:
 		var update tg.UpdateClass
@@ -566,6 +569,29 @@ func tgUpdateForOutboxEventForViewer(event domain.UpdateEvent, viewerUserID int6
 			Date:    event.Date,
 			Seq:     0,
 		}
+	}
+}
+
+func tgDeletedPrivateMessageOutboxUpdate(event domain.UpdateEvent) *tg.Updates {
+	if event.Pts <= 0 || event.PtsCount <= 0 {
+		return nil
+	}
+	ids := []int{}
+	if event.Message.ID > 0 && event.Message.ID <= domain.MaxMessageBoxID {
+		ids = append(ids, event.Message.ID)
+	}
+	date := event.Date
+	if date == 0 {
+		date = event.Message.Date
+	}
+	return &tg.Updates{
+		Updates: []tg.UpdateClass{&tg.UpdateDeleteMessages{
+			Messages: ids,
+			Pts:      event.Pts,
+			PtsCount: event.PtsCount,
+		}},
+		Date: date,
+		Seq:  0,
 	}
 }
 

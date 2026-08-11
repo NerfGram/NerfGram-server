@@ -809,6 +809,10 @@ func (r *Router) messageFilterFromSearchRequest(ctx context.Context, userID int6
 		MusicOnly:      messagesSearchFilterMusic(req.Filter),
 		NeedTotalCount: req.OffsetID == 0 && req.MinDate == 0 && req.MaxDate == 0 && req.AddOffset >= 0 && req.Hash == 0,
 	}
+	if phoneCalls, ok := req.Filter.(*tg.InputMessagesFilterPhoneCalls); ok {
+		filter.PhoneCallsOnly = true
+		filter.MissedPhoneCallsOnly = phoneCalls.Missed
+	}
 	if peer, ok := r.domainPeerFromInputPeer(userID, req.Peer); ok {
 		filter.HasPeer = true
 		filter.Peer = peer
@@ -911,7 +915,7 @@ func messagesSearchFilterChatPhotos(filter tg.MessagesFilterClass) bool {
 
 func searchFilterNeedsMediaStore(filter tg.MessagesFilterClass) bool {
 	switch filter.(type) {
-	case nil, *tg.InputMessagesFilterEmpty:
+	case nil, *tg.InputMessagesFilterEmpty, *tg.InputMessagesFilterPhoneCalls:
 		return false
 	case *tg.InputMessagesFilterPhotos,
 		*tg.InputMessagesFilterVideo,

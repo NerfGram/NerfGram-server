@@ -33,15 +33,13 @@ func (r *Router) registerPayments(d *tlprofile.Dispatcher) {
 	})
 	registerRPC[*tg.PaymentsGetStarsTopupOptionsRequest](d, tlprofile.SemanticMethodPaymentsGetStarsTopupOptions, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsTopupOptionsRequest) (any,
 
-		// premium 订阅赠送 telesrv 不实现（无支付流），返回空选项。关键作用：TDesktop 送礼框
-		// ShowStarGiftBox 的 ready() 门控要求 getPremiumGiftCodeOptions 成功返回(on_next)才置
-		// premiumGiftsReady=true，否则整框不弹出——此前返 NOT_IMPLEMENTED 导致点生日礼物无反应。
-		// 空列表即解门，星礼物正常发送；premium 区段另由 userFull.disallow_premium_gifts=true 隐藏。
+		// Premium gift options come from the same versioned XTR catalog used by
+		// payment forms and settlement.
 		error) {
 		return devStarsTopupOptions(), nil
 	})
 	registerRPC[*tg.PaymentsGetPremiumGiftCodeOptionsRequest](d, tlprofile.SemanticMethodPaymentsGetPremiumGiftCodeOptions, func(ctx context.Context, req *tg.PaymentsGetPremiumGiftCodeOptionsRequest) (any, error) {
-		return []tg.PremiumGiftCodeOption{}, nil
+		return r.onPaymentsGetPremiumGiftCodeOptions(ctx, req)
 	})
 	registerRPC[*tg.PaymentsGetStarsStatusRequest](d, tlprofile.SemanticMethodPaymentsGetStarsStatus, func(ctx context.Context, layerRequest *tg.PaymentsGetStarsStatusRequest) (any, error) {
 		return r.onPaymentsGetStarsStatus(ctx, layerRequest)
@@ -578,7 +576,13 @@ func tgStarsTransactions(in []domain.StarsTransaction) []tg.StarsTransaction {
 		case domain.StarsReasonGift:
 			item.Gift = true
 		case domain.StarsReasonGiftUpgrade:
-			item.StargiftUpgrade = true
+			// Telegram Desktop treats stargift_upgrade as a promise that the
+			// optional stargift field contains a unique gift and immediately
+			// dereferences its model document while building the history row.
+			// The compact ledger projection currently has no StarGift payload,
+			// so advertising the flag produces a client-side access violation.
+			// Keep the transaction visible through its title/description and only
+			// restore this flag together with a complete unique-gift projection.
 		case domain.StarsReasonGiftResale:
 			item.StargiftResale = true
 		case domain.StarsReasonGiftPrepaid:
@@ -589,6 +593,10 @@ func tgStarsTransactions(in []domain.StarsTransaction) []tg.StarsTransaction {
 			item.StargiftAuctionBid = true
 		case domain.StarsReasonGiftOffer:
 			item.Offer = true
+		case domain.StarsReasonPremium:
+			if t.PremiumMonths > 0 {
+				item.SetPremiumGiftMonths(t.PremiumMonths)
+			}
 		}
 		out = append(out, item)
 	}
@@ -632,6 +640,8 @@ func tgStarsTransactionPeer(t domain.StarsTransaction) tg.StarsTransactionPeerCl
 	switch t.Reason {
 	case domain.StarsReasonGrant, domain.StarsReasonTopup:
 		return &tg.StarsTransactionPeerFragment{}
+	case domain.StarsReasonPremium:
+		return &tg.StarsTransactionPeerPremiumBot{}
 	}
 	if t.Peer.Type != "" && t.Peer.ID != 0 {
 		if p := tgPeer(t.Peer); p != nil {

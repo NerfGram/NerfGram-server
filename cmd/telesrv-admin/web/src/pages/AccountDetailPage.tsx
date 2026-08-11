@@ -1,11 +1,13 @@
-import { ArrowLeft, BadgeCheck, CircleAlert, Sparkles, Star } from "lucide-react";
+import { ArrowLeft, BadgeCheck, CircleAlert, ImagePlus, Sparkles, Star } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorMessage } from "../api";
 import { ActionButton } from "../components/ActionButton";
+import { Avatar } from "../components/Avatar";
+import { AvatarModal } from "../components/AvatarModal";
 import { AuthorizationTable } from "../components/AuthorizationTable";
 import { Alert, AuditTable, Badge, LoadingSurface, PageFrame, SectionHead, SplitLayout, Summary, UsernameCell } from "../components/ui";
 import { ScamFakeActions, ScamFakeBadges } from "../components/flags";
-import { ColorAction, EmojiStatusAction, SupportAction, UsernameAction } from "../components/attributes";
+import { ColorAction, EmojiStatusAction, LoginEmailAction, PhoneAction, ProfileAction, SupportAction, UsernameAction } from "../components/attributes";
 import { useI18n } from "../i18n";
 import { displayName, displayPhone, displayUsername, formatDate, formatUnix, toInt } from "../lib/format";
 import type { Navigate } from "../routing";
@@ -26,6 +28,8 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
   const [issueActive, setIssueActive] = useState(false);
   const [freezeUntil, setFreezeUntil] = useState(() => toDateTimeLocal(new Date(Date.now() + 7 * 86400_000)));
   const [freezeAppealURL, setFreezeAppealURL] = useState("");
+  const [avatarOpen, setAvatarOpen] = useState(false);
+  const [avatarRefresh, setAvatarRefresh] = useState(0);
 
   async function load() {
     setBusy(true);
@@ -68,7 +72,9 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
         main={
           <div className="stacked-sections">
             <section className="entity-head">
-              <div>
+              <div className="entity-identity">
+                <Avatar id={account.ID} label={displayName(account)} size={64} refreshKey={avatarRefresh} />
+                <div>
                 <div className="entity-title">{displayName(account)}</div>
                 <div className="entity-subtitle">{displayUsername(account.Username) || t("account.noUsername")} · {displayPhone(account.Phone) || t("account.noPhone")}</div>
                 {account.Collectibles?.length > 0 && (
@@ -76,6 +82,7 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
                     <UsernameCell username="" collectibles={account.Collectibles} />
                   </div>
                 )}
+                </div>
               </div>
               <div className="entity-badges">
                 {account.PremiumUntil > 0 ? <Badge tone="good">{t("account.premium")}</Badge> : <Badge>{t("account.notPremium")}</Badge>}
@@ -92,6 +99,7 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
               <Summary label={t("common.updatedAt")} value={formatDate(account.UpdatedAt) || "-"} />
               <Summary label={t("account.activeSessions")} value={String(detail.Authorizations.length)} />
               <Summary label={t("account.accountFlags")} value={`support=${detail.Support} bot=${detail.Bot}`} />
+              <Summary label={t("attr.loginEmail")} value={detail.LoginEmail || t("common.none")} />
               <Summary label={t("account.restriction")} value={detail.HasRestriction ? detail.Restriction.Reason || t("account.restricted") : t("common.none")} />
               <Summary label={t("account.freezeSince")} value={detail.Restriction.Since ? formatDate(detail.Restriction.Since) : t("common.none")} />
               <Summary label={t("account.freezeUntil")} value={detail.Restriction.Until ? formatDate(detail.Restriction.Until) : t("common.none")} />
@@ -318,6 +326,10 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
             </div>
             <ScamFakeActions idKey="user_id" id={account.ID} path="/api/actions/set-account-flags" scam={detail.Scam} fake={detail.Fake} onDone={load} />
             <div className="dock-title">{t("attr.attributes")}</div>
+            <button className="btn icon-text" type="button" onClick={() => setAvatarOpen(true)}><ImagePlus size={15} /> {t("avatar.change")}</button>
+            <ProfileAction id={account.ID} firstName={account.FirstName} lastName={account.LastName} onDone={load} />
+            <PhoneAction id={account.ID} current={account.Phone} onDone={load} />
+            <LoginEmailAction id={account.ID} current={detail.LoginEmail} onDone={load} />
             <SupportAction id={account.ID} support={detail.Support} onDone={load} />
             <UsernameAction idKey="user_id" id={account.ID} path="/api/actions/set-account-username" current={account.Username} onDone={load} />
             <ColorAction idKey="user_id" id={account.ID} path="/api/actions/set-account-color" onDone={load} />
@@ -325,6 +337,7 @@ export function AccountDetailPage({ id, navigate }: { id: number; navigate: Navi
           </section>
         }
       />
+      {avatarOpen && <AvatarModal kind="user" id={account.ID} onClose={() => setAvatarOpen(false)} onDone={() => { setAvatarRefresh((value) => value + 1); void load(); }} />}
     </PageFrame>
   );
 }

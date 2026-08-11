@@ -82,6 +82,27 @@ export function formatQuantity(value: string): string {
   return Number.isFinite(parsed) ? parsed.toLocaleString() : raw;
 }
 
+export function formatBytes(value: string): string {
+  const raw = (value ?? "").trim();
+  if (!/^\d+$/.test(raw)) return "0 B";
+  let bytes: bigint;
+  try {
+    bytes = BigInt(raw);
+  } catch {
+    return `${raw} B`;
+  }
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let divisor = 1n;
+  let unit = 0;
+  while (bytes >= divisor * 1024n && unit < units.length - 1) {
+    divisor *= 1024n;
+    unit++;
+  }
+  if (unit === 0) return `${bytes.toString()} B`;
+  const tenths = (bytes * 10n) / divisor;
+  return `${(tenths / 10n).toString()}.${(tenths % 10n).toString()} ${units[unit]}`;
+}
+
 // Currency scaling for fragment.collectibleInfo.
 //
 // The wire format is integer smallest units: core.telegram.org says amount is

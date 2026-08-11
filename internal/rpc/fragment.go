@@ -57,10 +57,47 @@ func (r *Router) onFragmentGetCollectibleInfo(ctx context.Context, req *tg.Fragm
 		if collectible == nil || strings.TrimSpace(collectible.Phone) == "" {
 			return nil, collectibleInvalidErr()
 		}
-		return nil, collectibleNotFoundErr()
+		return r.collectiblePhoneInfo(ctx, userID, collectible.Phone)
 	default:
 		return nil, collectibleInvalidErr()
 	}
+}
+
+func (r *Router) collectiblePhoneInfo(ctx context.Context, viewerUserID int64, phone string) (*tg.FragmentCollectibleInfo, error) {
+	number := domain.NormalizeCollectiblePhone(phone)
+	if number == "" {
+		return nil, collectibleInvalidErr()
+	}
+	if !domain.ValidCollectiblePhone(number) {
+		return nil, collectibleNotFoundErr()
+	}
+	if r.deps.CollectiblePhones == nil || r.deps.Users == nil {
+		return nil, collectibleNotFoundErr()
+	}
+	asset, err := r.deps.CollectiblePhones.CollectiblePhone(ctx, number)
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrCollectiblePhoneInvalid):
+			return nil, collectibleInvalidErr()
+		case errors.Is(err, domain.ErrCollectiblePhoneNotFound), errors.Is(err, domain.ErrCollectiblePhoneNotOwned), errors.Is(err, domain.ErrCollectiblePhoneBurned):
+			return nil, collectibleNotFoundErr()
+		default:
+			return nil, internalErr()
+		}
+	}
+	if !asset.Owned() {
+		return nil, collectibleNotFoundErr()
+	}
+	projected, found, err := r.deps.Users.ByID(ctx, viewerUserID, asset.OwnerUserID)
+	if err != nil {
+		return nil, internalErr()
+	}
+	if !found || projected.Phone != asset.Phone {
+		return nil, collectibleNotFoundErr()
+	}
+	info := asset.Info()
+	return &tg.FragmentCollectibleInfo{PurchaseDate: info.PurchaseDate, Currency: info.Currency,
+		Amount: info.Amount, CryptoCurrency: info.CryptoCurrency, CryptoAmount: info.CryptoAmount, URL: info.URL}, nil
 }
 
 func (r *Router) collectibleUsernameInfo(ctx context.Context, userID int64, username string) (*tg.FragmentCollectibleInfo, error) {

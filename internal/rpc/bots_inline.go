@@ -77,9 +77,12 @@ func (r *Router) onMessagesGetInlineBotResults(ctx context.Context, req *tg.Mess
 			return nil, err
 		}
 	}
-	peer, err := r.checkedDomainPeerFromInputPeer(ctx, userID, req.Peer)
-	if err != nil {
-		return nil, err
+	var peer domain.Peer
+	if _, global := req.Peer.(*tg.InputPeerEmpty); !global {
+		peer, err = r.checkedDomainPeerFromInputPeer(ctx, userID, req.Peer)
+		if err != nil {
+			return nil, err
+		}
 	}
 	cacheKey := inlineCacheKey{
 		botUserID: bot.ID,
@@ -98,6 +101,19 @@ func (r *Router) onMessagesGetInlineBotResults(ctx context.Context, req *tg.Mess
 	if cached, ok := r.inlines.cachedContext(ctx, now, cacheKey); ok {
 		results := r.inlines.registerCachedContext(ctx, now, bot.ID, userID, peer, cached)
 		return r.tgBotInlineResults(ctx, userID, results), nil
+	}
+	if service := r.deps.ServiceBotInlineResults; service != nil && service.HandlesInlineBot(bot.ID) {
+		results, handled, err := service.OnInlineQuery(ctx, bot.ID, userID, req.Query, req.Offset)
+		if err != nil {
+			return nil, internalErr()
+		}
+		if handled {
+			if len(results.Results) > domain.MaxBotInlineResults {
+				return nil, internalErr()
+			}
+			registered := r.inlines.registerCachedContext(ctx, now, bot.ID, userID, peer, results)
+			return r.tgBotInlineResults(ctx, userID, registered), nil
+		}
 	}
 	queryID, pending := r.inlines.registerWithCacheKeyContext(ctx, now, bot.ID, userID, peer, cacheKey)
 	defer r.inlines.deregisterIfUnansweredContext(ctx, queryID)
@@ -228,6 +244,7 @@ func (r *Router) onMessagesSendInlineBotResult(ctx context.Context, req *tg.Mess
 	if !duplicate {
 		r.pushInlineBotSendFeedback(ctx, userID, results, result, updates)
 		r.inlines.consumeContext(ctx, req.QueryID)
+		r.autoSaveSentGif(ctx, userID, media)
 	}
 	return updates, nil
 }

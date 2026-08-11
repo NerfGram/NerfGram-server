@@ -55,7 +55,7 @@ export function GroupMessageDetailPage({ channelID, msgID, navigate }: { channel
         <div className="summary-grid">
           <Summary label={t("common.messageId")} value={String(msg.ID)} mono />
           <Summary label={t("messages.channelGroup")} value={String(msg.ChannelID)} mono />
-          <Summary label="From Peer" value={`${msg.FromPeerType}:${msg.FromPeerID}`} mono />
+          <Summary label={t("common.fromPeer")} value={`${msg.FromPeerType}:${msg.FromPeerID}`} mono />
           <Summary label={t("common.views")} value={String(msg.ViewsCount)} />
         </div>
         <section className="section-block">

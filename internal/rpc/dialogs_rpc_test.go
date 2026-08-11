@@ -48,7 +48,7 @@ func TestDialogFilterFromGetDialogsRequestUsesAllParameters(t *testing.T) {
 	}
 }
 
-func TestMessagesGetDialogsReturnsNotModifiedFromFullListHash(t *testing.T) {
+func TestMessagesGetDialogsUnknownHashReturnsFullListToRefreshPeerMetadata(t *testing.T) {
 	dialogs := &captureDialogs{list: domain.DialogList{Count: 3, Hash: 77}}
 	r := New(Config{}, Deps{Dialogs: dialogs}, zaptest.NewLogger(t), clock.System)
 	req := &tg.MessagesGetDialogsRequest{
@@ -65,12 +65,11 @@ func TestMessagesGetDialogsReturnsNotModifiedFromFullListHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
-	got, ok := enc.(*tg.MessagesDialogsNotModified)
-	if !ok {
-		t.Fatalf("response = %T, want *tg.MessagesDialogsNotModified", enc)
+	if _, ok := enc.(*tg.MessagesDialogsNotModified); ok {
+		t.Fatalf("response = %T, want full dialogs after unknown/invalidation hash", enc)
 	}
-	if got.Count != 3 || dialogs.filter.Hash != 77 {
-		t.Fatalf("not modified = %+v filter %+v, want count/hash from service", got, dialogs.filter)
+	if dialogs.filter.Hash != 77 || dialogs.getDialogsCalls != 1 {
+		t.Fatalf("filter %+v full calls %d, want one authoritative load", dialogs.filter, dialogs.getDialogsCalls)
 	}
 }
 

@@ -25,6 +25,29 @@ func TestAdminAPIRequiresBearerToken(t *testing.T) {
 	}
 }
 
+type gifCatalogReadService struct{ fakeService }
+
+func (gifCatalogReadService) GifCatalog(context.Context) ([]domain.GifCatalogEntry, error) {
+	return []domain.GifCatalogEntry{{
+		ID: 9_007_199_254_740_993, Title: "Wave", DocumentID: 9_007_199_254_740_995, Enabled: true,
+	}}, nil
+}
+
+func TestAdminAPIGifCatalogKeepsInt64IDsAsStrings(t *testing.T) {
+	srv := &Server{token: "secret", svc: gifCatalogReadService{}}
+	req := httptest.NewRequest(http.MethodGet, "/v1/gif-catalog", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"ID":"9007199254740993"`) ||
+		!strings.Contains(body, `"DocumentID":"9007199254740995"`) {
+		t.Fatalf("int64 ids were not encoded as strings: %s", body)
+	}
+}
+
 func TestAdminAPISetAccountFrozen(t *testing.T) {
 	svc := &captureFreezeService{}
 	srv := &Server{token: "secret", svc: svc}
@@ -40,6 +63,120 @@ func TestAdminAPISetAccountFrozen(t *testing.T) {
 	}
 	if svc.req.UserID != 1001 || !svc.req.Frozen || svc.req.Until.IsZero() || svc.req.AppealURL != "https://appeals.example.test" {
 		t.Fatalf("decoded freeze request = %+v", svc.req)
+	}
+}
+
+type premiumReadCaptureService struct {
+	fakeService
+	userID    int64
+	limit     int
+	paymentID int64
+	plansRead bool
+	planReq   admin.UpsertPremiumPlanRequest
+}
+
+func (s *premiumReadCaptureService) PremiumEntitlements(
+	_ context.Context,
+	userID int64,
+	limit int,
+) ([]domain.PremiumEntitlement, error) {
+	s.userID, s.limit = userID, limit
+	return []domain.PremiumEntitlement{{ID: 11, UserID: userID}}, nil
+}
+
+func (s *premiumReadCaptureService) PremiumPayment(
+	_ context.Context,
+	paymentIntentID int64,
+) (domain.PremiumPaymentDetails, bool, error) {
+	s.paymentID = paymentIntentID
+	return domain.PremiumPaymentDetails{
+		Intent: domain.PremiumPaymentIntent{ID: paymentIntentID, Currency: domain.PremiumCurrencyStars},
+	}, true, nil
+}
+
+func (s *premiumReadCaptureService) PremiumPlans(
+	context.Context,
+) ([]domain.PremiumPlan, error) {
+	s.plansRead = true
+	return []domain.PremiumPlan{{
+		Months: 3, DurationDays: 90, AmountStars: 750, Enabled: true,
+		SortOrder: 10, Label: "3 months", ManagedBy: domain.PremiumPlanManagedByAdmin,
+		Version: 4,
+	}}, nil
+}
+
+func (s *premiumReadCaptureService) UpsertPremiumPlan(
+	_ context.Context,
+	req admin.UpsertPremiumPlanRequest,
+) (admin.CommandResult, error) {
+	s.planReq = req
+	return admin.CommandResult{
+		CommandID: req.CommandID, Action: admin.ActionUpsertPremiumPlan,
+		Status: "completed", DryRun: req.DryRun,
+	}, nil
+}
+
+func TestAdminAPIPremiumReadsRequirePremiumManage(t *testing.T) {
+	svc := &premiumReadCaptureService{}
+	srv := &Server{
+		token: "master",
+		scoped: []ScopedToken{
+			{Name: "premium-ops", Token: "premium-token", Permissions: []string{PermissionPremiumManage}},
+			{Name: "reviewer", Token: "review-token", Permissions: []string{PermissionVerificationReview}},
+		},
+		svc: svc,
+	}
+	entitlements := httptest.NewRequest(http.MethodGet, "/v1/premium/users/2002/entitlements?limit=25", nil)
+	entitlements.Header.Set("Authorization", "Bearer premium-token")
+	entitlementResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(entitlementResponse, entitlements)
+	if entitlementResponse.Code != http.StatusOK || svc.userID != 2002 || svc.limit != 25 ||
+		!strings.Contains(entitlementResponse.Body.String(), `"id":11`) {
+		t.Fatalf("entitlements status=%d capture=%+v body=%s",
+			entitlementResponse.Code, svc, entitlementResponse.Body.String())
+	}
+
+	payment := httptest.NewRequest(http.MethodGet, "/v1/premium/payments/44", nil)
+	payment.Header.Set("Authorization", "Bearer premium-token")
+	paymentResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(paymentResponse, payment)
+	if paymentResponse.Code != http.StatusOK || svc.paymentID != 44 ||
+		!strings.Contains(paymentResponse.Body.String(), `"id":44`) {
+		t.Fatalf("payment status=%d capture=%+v body=%s",
+			paymentResponse.Code, svc, paymentResponse.Body.String())
+	}
+
+	plans := httptest.NewRequest(http.MethodGet, "/v1/premium/plans", nil)
+	plans.Header.Set("Authorization", "Bearer premium-token")
+	plansResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(plansResponse, plans)
+	if plansResponse.Code != http.StatusOK || !svc.plansRead ||
+		!strings.Contains(plansResponse.Body.String(), `"AmountStars":750`) ||
+		!strings.Contains(plansResponse.Body.String(), `"ManagedBy":"admin"`) {
+		t.Fatalf("plans status=%d capture=%+v body=%s",
+			plansResponse.Code, svc, plansResponse.Body.String())
+	}
+
+	upsert := httptest.NewRequest(http.MethodPost, "/v1/premium/plans/upsert", strings.NewReader(
+		`{"command_id":"premium-plan-1","reason":"new price","months":3,"duration_days":90,"amount_stars":800,"enabled":true,"sort_order":10,"label":"Quarter","expected_version":4}`,
+	))
+	upsert.Header.Set("Authorization", "Bearer premium-token")
+	upsertResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(upsertResponse, upsert)
+	if upsertResponse.Code != http.StatusOK || svc.planReq.Months != 3 ||
+		svc.planReq.AmountStars != 800 || svc.planReq.ExpectedVersion != 4 ||
+		svc.planReq.Actor != "premium-ops" {
+		t.Fatalf("upsert status=%d req=%+v body=%s",
+			upsertResponse.Code, svc.planReq, upsertResponse.Body.String())
+	}
+
+	forbidden := httptest.NewRequest(http.MethodGet, "/v1/premium/plans", nil)
+	forbidden.Header.Set("Authorization", "Bearer review-token")
+	forbiddenResponse := httptest.NewRecorder()
+	srv.routes().ServeHTTP(forbiddenResponse, forbidden)
+	if forbiddenResponse.Code != http.StatusForbidden ||
+		!strings.Contains(forbiddenResponse.Body.String(), PermissionPremiumManage) {
+		t.Fatalf("forbidden status=%d body=%s", forbiddenResponse.Code, forbiddenResponse.Body.String())
 	}
 }
 
@@ -291,6 +428,28 @@ func TestAdminAPIGrantStars(t *testing.T) {
 	}
 }
 
+type captureDebitStarsService struct {
+	fakeService
+	req admin.DebitStarsRequest
+}
+
+func (s *captureDebitStarsService) DebitStars(_ context.Context, req admin.DebitStarsRequest) (admin.CommandResult, error) {
+	s.req = req
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func TestAdminAPIDebitStars(t *testing.T) {
+	svc := &captureDebitStarsService{}
+	srv := &Server{token: "secret", svc: svc}
+	req := httptest.NewRequest(http.MethodPost, "/v1/accounts/debit-stars", strings.NewReader(`{"command_id":"refund-1","actor":"bot","reason":"refund","user_id":1001,"amount":20}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || svc.req.UserID != 1001 || svc.req.Amount != 20 || svc.req.CommandID != "refund-1" {
+		t.Fatalf("status=%d request=%+v body=%s", rec.Code, svc.req, rec.Body.String())
+	}
+}
+
 func TestAdminAPISetChannelVerified(t *testing.T) {
 	srv := &Server{token: "secret", svc: fakeService{}}
 	req := httptest.NewRequest(http.MethodPost, "/v1/channels/set-verified", strings.NewReader(`{"command_id":"c3","actor":"ops","reason":"official","dry_run":true,"channel_id":2001,"verified":true}`))
@@ -405,10 +564,10 @@ func TestCollectiblePreviewResponsePreservesInt64AsDecimalStrings(t *testing.T) 
 func TestOfficialStarGiftListItemExposesExplicitCapabilities(t *testing.T) {
 	item := officialStarGiftListItem(officialgifts.GiftSummary{
 		ID: 9223372036854775807, Title: "Fresh Socks", Stars: 25, ConvertStars: 10, UpgradeStars: 50,
-		ModelCount: 10, PatternCount: 20, BackdropCount: 30, CraftedModelCount: 2,
+		UpgradeVariants: 6000, ModelCount: 10, PatternCount: 20, BackdropCount: 30, CraftedModelCount: 2,
 	})
 	if item["source_gift_id"] != "9223372036854775807" || item["title"] != "Fresh Socks" ||
-		item["can_upgrade"] != true || item["can_craft"] != true {
+		item["upgrade_variants"] != 6000 || item["can_upgrade"] != true || item["can_craft"] != true {
 		t.Fatalf("official gift item = %#v", item)
 	}
 	item = officialStarGiftListItem(officialgifts.GiftSummary{
@@ -479,6 +638,10 @@ func (fakeService) DeleteBot(_ context.Context, req admin.DeleteBotRequest) (adm
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
 
+func (fakeService) ExportBotToken(_ context.Context, req admin.ExportBotTokenRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
 func (fakeService) SetUserFlags(_ context.Context, req admin.SetUserFlagsRequest) (admin.CommandResult, error) {
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
@@ -496,6 +659,34 @@ func (fakeService) GiveGift(_ context.Context, req admin.GiveGiftRequest) (admin
 }
 
 func (fakeService) SetUsername(_ context.Context, req admin.SetUsernameRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetProfile(_ context.Context, req admin.SetProfileRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetPhone(_ context.Context, req admin.SetPhoneRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetLoginEmail(_ context.Context, req admin.SetLoginEmailRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) AccountAvatar(context.Context, int64) ([]byte, string, bool, error) {
+	return nil, "", false, nil
+}
+
+func (fakeService) SetAccountAvatar(_ context.Context, req admin.SetAccountAvatarRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) ChannelAvatar(context.Context, int64) ([]byte, string, bool, error) {
+	return nil, "", false, nil
+}
+
+func (fakeService) SetChannelAvatar(_ context.Context, req admin.SetChannelAvatarRequest) (admin.CommandResult, error) {
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
 
@@ -535,6 +726,34 @@ func (fakeService) DeletePrivateHistory(context.Context, admin.DeletePrivateHist
 	return admin.CommandResult{}, nil
 }
 
+func (fakeService) SetStickerSetArchived(_ context.Context, req admin.SetStickerSetArchivedRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) SetStickerSetSortOrder(_ context.Context, req admin.SetStickerSetSortOrderRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) RenameStickerSet(_ context.Context, req admin.RenameStickerSetRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) DeleteStickerSet(_ context.Context, req admin.DeleteStickerSetRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) CreateStickerSet(_ context.Context, req admin.CreateStickerSetRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) RemoveStickerFromSet(_ context.Context, req admin.RemoveStickerFromSetRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+
+func (fakeService) StickerDocumentAnimation(context.Context, int64) ([]byte, string, bool, error) {
+	return nil, "", false, nil
+}
+
 func (fakeService) ImportStarGift(_ context.Context, req admin.ImportStarGiftRequest) (admin.CommandResult, error) {
 	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
 }
@@ -569,6 +788,23 @@ func (fakeService) StarGiftAnimation(context.Context, int64) ([]byte, bool, erro
 
 func (fakeService) EmojiAnimation(context.Context, int64) ([]byte, bool, error) {
 	return []byte(`{"v":"5.7","w":100,"h":100}`), true, nil
+}
+
+func (fakeService) GifCatalog(context.Context) ([]domain.GifCatalogEntry, error) { return nil, nil }
+func (fakeService) CreateGifCatalogEntry(_ context.Context, req admin.CreateGifCatalogEntryRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+func (fakeService) SetGifCatalogEnabled(_ context.Context, req admin.SetGifCatalogEnabledRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+func (fakeService) SetGifCatalogSortOrder(_ context.Context, req admin.SetGifCatalogSortOrderRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+func (fakeService) DeleteGifCatalogEntry(_ context.Context, req admin.DeleteGifCatalogEntryRequest) (admin.CommandResult, error) {
+	return admin.CommandResult{CommandID: req.CommandID, Status: "completed", DryRun: req.DryRun}, nil
+}
+func (fakeService) GifCatalogDocumentPreview(context.Context, int64) ([]byte, string, bool, error) {
+	return nil, "", false, nil
 }
 
 func (fakeService) StarGiftCollectibles(context.Context, int64) (domain.StarGiftUpgradePreview, bool, error) {

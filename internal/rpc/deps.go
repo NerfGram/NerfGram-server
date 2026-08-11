@@ -11,6 +11,7 @@ import (
 	"telesrv/internal/sfu"
 	"telesrv/internal/store"
 	"telesrv/internal/turnsrv"
+	"telesrv/internal/updatecdn"
 )
 
 // 本文件按「消费者定义接口」惯例，在 rpc 包定义 Router 依赖的业务服务接口。
@@ -259,6 +260,10 @@ type UsersService interface {
 	ByIDs(ctx context.Context, currentUserID int64, userIDs []int64) ([]domain.User, error)
 }
 
+type CollectiblePhoneService interface {
+	CollectiblePhone(ctx context.Context, phone string) (domain.CollectiblePhone, error)
+}
+
 // TelegramLoginService is the domain-only boundary shared by the MTProto RPC
 // edge and the public OIDC provider. PostgreSQL remains authoritative for all
 // consent transitions; the RPC layer only projects domain state to TL.
@@ -346,6 +351,13 @@ type BotsService interface {
 type ServiceBotCallbacks interface {
 	HandlesBot(botUserID int64) bool
 	OnCallbackQuery(ctx context.Context, query domain.BotCallbackQuery) (domain.BotCallbackAnswer, bool, error)
+}
+
+// ServiceBotInlineResults answers built-in inline bots synchronously while the
+// edge still registers a fresh query_id for messages.sendInlineBotResult.
+type ServiceBotInlineResults interface {
+	HandlesInlineBot(botUserID int64) bool
+	OnInlineQuery(ctx context.Context, botUserID, userID int64, query, offset string) (domain.BotInlineResults, bool, error)
 }
 
 // UserIdentityService 是 UsersService 的资料扩展能力，用于 username/phone 解析。
@@ -1038,52 +1050,56 @@ type Deps struct {
 	// AuthKeySessionLayers is the protocol-only durable ordering boundary for
 	// explicit invokeWithLayer evidence. Production must wire the same auth-key
 	// store used by the MTProto edge; nil is reserved for isolated router tests.
-	AuthKeySessionLayers store.AuthKeySessionLayerStore
-	Account              AccountService
-	Privacy              PrivacyService
-	Help                 HelpService
-	AccountFreeze        AccountFreezeService
-	AICompose            AIComposeService
-	Ephemeral            EphemeralService
-	EphemeralPush        store.EphemeralPushBroker
-	Moderation           ModerationService
-	Users                UsersService
-	Usernames            UsernameRegistryService
-	AccountRatings       AccountRatingService
-	BotVerifications     BotVerificationService
-	TelegramLogin        TelegramLoginService
-	Updates              UpdatesService
-	BootstrapUpdates     store.BootstrapUpdateJobStore
-	BotAPIUpdates        store.BotAPIUpdateStore
-	BotCallbacks         store.BotCallbackRegistryStore
-	Contacts             ContactsService
-	Dialogs              DialogsService
-	Chatlists            ChatlistsService
-	Messages             MessagesService
-	Translation          TranslationService
-	Stories              StoriesService
-	Channels             ChannelsService
-	Communities          CommunitiesService
-	Files                FilesService
-	PremiumPromo         PremiumPromoService
-	Bots                 BotsService
-	ServiceBotCallbacks  ServiceBotCallbacks
-	Polls                PollsService
-	Phone                PhoneService
-	GroupCalls           GroupCallsService
-	LiveStreams          LiveStreamsService
-	SFU                  sfu.Service
-	TURN                 turnsrv.Service
-	LangPack             LangPackService
-	Sessions             SessionBinder
-	Inline               store.InlineRegistryStore
-	Limiter              RateLimiter
-	Metrics              Metrics
-	SecretChats          SecretChatService
-	Stars                StarsService
-	Gifts                GiftsService
-	Passkey              PasskeyService
-	Themes               ThemeService
+	AuthKeySessionLayers    store.AuthKeySessionLayerStore
+	Account                 AccountService
+	Privacy                 PrivacyService
+	Help                    HelpService
+	AppUpdates              updatecdn.Resolver
+	AccountFreeze           AccountFreezeService
+	AICompose               AIComposeService
+	Ephemeral               EphemeralService
+	EphemeralPush           store.EphemeralPushBroker
+	Moderation              ModerationService
+	Users                   UsersService
+	Usernames               UsernameRegistryService
+	CollectiblePhones       CollectiblePhoneService
+	AccountRatings          AccountRatingService
+	BotVerifications        BotVerificationService
+	TelegramLogin           TelegramLoginService
+	Updates                 UpdatesService
+	BootstrapUpdates        store.BootstrapUpdateJobStore
+	BotAPIUpdates           store.BotAPIUpdateStore
+	BotCallbacks            store.BotCallbackRegistryStore
+	Contacts                ContactsService
+	Dialogs                 DialogsService
+	Chatlists               ChatlistsService
+	Messages                MessagesService
+	Translation             TranslationService
+	Stories                 StoriesService
+	Channels                ChannelsService
+	Communities             CommunitiesService
+	Files                   FilesService
+	PremiumPromo            PremiumPromoService
+	Premium                 PremiumService
+	Bots                    BotsService
+	ServiceBotCallbacks     ServiceBotCallbacks
+	ServiceBotInlineResults ServiceBotInlineResults
+	Polls                   PollsService
+	Phone                   PhoneService
+	GroupCalls              GroupCallsService
+	LiveStreams             LiveStreamsService
+	SFU                     sfu.Service
+	TURN                    turnsrv.Service
+	LangPack                LangPackService
+	Sessions                SessionBinder
+	Inline                  store.InlineRegistryStore
+	Limiter                 RateLimiter
+	Metrics                 Metrics
+	SecretChats             SecretChatService
+	Stars                   StarsService
+	Gifts                   GiftsService
+	Passkey                 PasskeyService
+	Themes                  ThemeService
 }
 
 // ThemeService 抽象自定义云主题(app/themes):创建/更新/查询主题 + 维护每用户已安装列表。
@@ -1176,6 +1192,23 @@ type StarsService interface {
 	ListTransactions(ctx context.Context, userID int64, query domain.StarsTransactionQuery) (domain.StarsTransactionPage, error)
 	TotalSpent(ctx context.Context, userID int64) (int64, error)
 	ListSubscriptions(ctx context.Context, userID int64) ([]domain.StarsSubscription, error)
+}
+
+// PremiumService is the domain-only boundary for catalog reads, payment form
+// issuance and atomic Stars-backed settlement.
+type PremiumService interface {
+	BotUserID() int64
+	BotUsername() string
+	Plans(ctx context.Context) ([]domain.PremiumPlan, error)
+	Plan(ctx context.Context, months int) (domain.PremiumPlan, error)
+	IssuePaymentForm(ctx context.Context, form domain.PremiumPaymentForm) (domain.PremiumPaymentForm, error)
+	Purchase(ctx context.Context, req domain.PremiumPurchaseRequest) (domain.PremiumPurchaseResult, error)
+	ActiveEntitlements(ctx context.Context, userID int64, now int) ([]domain.PremiumEntitlement, error)
+	PurchaseHistory(ctx context.Context, userID int64, limit int) ([]domain.PremiumEntitlement, error)
+	SweepExpired(ctx context.Context, now, limit int) ([]domain.User, error)
+	Grant(ctx context.Context, req domain.PremiumAdminGrantRequest) (domain.PremiumEntitlement, domain.User, error)
+	Revoke(ctx context.Context, req domain.PremiumAdminRevokeRequest) (domain.User, error)
+	Refund(ctx context.Context, req domain.PremiumRefundRequest) (domain.PremiumPurchaseResult, error)
 }
 
 // SecretChatService 抽象私聊端对端加密（Secret Chat）握手状态机（app/secretchat）。
