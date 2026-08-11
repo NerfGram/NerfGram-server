@@ -116,17 +116,17 @@ func (s *UserStore) ByUsername(ctx context.Context, username string) (domain.Use
 		return domain.User{}, false, nil
 	}
 	row, err := s.q.GetUserByUsername(ctx, username)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The scalar users.username column only holds the editable slot, so a
-			// collectible username resolves through the registry instead. This is a
-			// fallback rather than the primary path: the fast lookup above stays
-			// untouched for every pre-existing username.
-			return s.byCollectibleUsername(ctx, strings.ToLower(username))
-		}
+	if err == nil {
+		return userFromModel(row), true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return domain.User{}, false, fmt.Errorf("get user by username: %w", err)
 	}
-	return userFromModel(row), true, nil
+	owner, found, err := getPeerUsernameOwner(ctx, s.db, strings.ToLower(username), false)
+	if err != nil || !found || owner.peerType != peerUsernameTypeUser {
+		return domain.User{}, false, err
+	}
+	return s.ByID(ctx, owner.peerID)
 }
 
 // byCollectibleUsername resolves an active collectible username to its holder.

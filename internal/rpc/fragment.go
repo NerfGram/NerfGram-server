@@ -135,6 +135,21 @@ func (r *Router) collectibleUsernameInfo(ctx context.Context, userID int64, user
 		CryptoAmount:   info.CryptoAmount,
 		URL:            info.URL,
 	}
+	if out.Currency == "" {
+		out.Currency = "USD"
+	}
+	if out.Amount <= 0 {
+		out.Amount = 5000
+	}
+	if out.CryptoCurrency == "" {
+		out.CryptoCurrency = "TON"
+	}
+	if out.CryptoAmount <= 0 {
+		out.CryptoAmount = 1_000_000_000
+	}
+	if out.URL == "" {
+		out.URL = "https://fragment.com/username/" + name
+	}
 	return out, nil
 }
 
