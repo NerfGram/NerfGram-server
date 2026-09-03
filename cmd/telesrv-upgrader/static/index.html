@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>NerfGram Upgrader</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600;700&family=SF+Pro+Text:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-color: #000000;
+      --card-bg: rgba(28, 28, 30, 0.85);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --card-hover: rgba(44, 44, 46, 0.95);
+      --text-primary: #FFFFFF;
+      --text-secondary: rgba(235, 235, 245, 0.6);
+      --text-tertiary: rgba(235, 235, 245, 0.38);
+      --accent-green: #30D158;
+      --accent-green-glow: rgba(48, 209, 88, 0.35);
+      --accent-gold: #FFD60A;
+      --accent-gold-glow: rgba(255, 214, 10, 0.3);
+      --accent-blue: #0A84FF;
+      --accent-red: #FF453A;
+      --wheel-lose: #2C2C2E;
+      --wheel-win: #30D158;
+      --spring-easing: cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      --smooth-easing: cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+      padding-bottom: 40px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Toast Notification */
+    .toast-overlay {
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-100px);
+      background: rgba(255, 69, 58, 0.92);
+      color: #FFFFFF;
+      padding: 12px 24px;
+      border-radius: 14px;
+      font-weight: 600;
+      font-size: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      z-index: 10000;
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      pointer-events: none;
+      text-align: center;
+      max-width: 90%;
+    }
+    .toast-overlay.active {
+      transform: translateX(-50%) translateY(0);
+    }
+
+    /* Main Container */
+    .app-container {
+      max-width: 480px;
+      margin: 0 auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Header */
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 4px 4px 4px;
+    }
+
+    .brand-title {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .brand-badge {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      padding: 3px 7px;
+      border-radius: 6px;
+      background: rgba(48, 209, 88, 0.15);
+      color: var(--accent-green);
+      border: 1px solid rgba(48, 209, 88, 0.25);
+    }
+
+    .user-pill {
+      font-size: 13px;
+      color: var(--text-secondary);
+      background: rgba(255, 255, 255, 0.06);
+      padding: 6px 12px;
+      border-radius: 20px;
+      border: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .user-stars-badge {
+      font-weight: 700;
+      color: var(--accent-gold);
+      background: rgba(255, 214, 10, 0.12);
+      border: 1px solid rgba(255, 214, 10, 0.25);
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+    }
+
+    /* Selection Cards Row */
+    .upgrade-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      position: relative;
+    }
+
+    .upgrade-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      cursor: pointer;
+      position: relative;
+      transition: transform 0.2s var(--smooth-easing), border-color 0.2s ease, background-color 0.2s ease;
+      min-height: 200px;
+      justify-content: space-between;
+    }
+
+    .upgrade-card:active {
+      transform: scale(0.97);
+      background: var(--card-hover);
+    }
+
+    .card-label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+    }
+
+    .gift-preview-img {
+      width: 96px;
+      height: 96px;
+      object-fit: contain;
+      filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.4));
+      transition: transform 0.3s var(--spring-easing);
+    }
+
+    .upgrade-card:hover .gift-preview-img {
+      transform: scale(1.06);
+    }
+
+    .gift-name {
+      font-size: 14px;
+      font-weight: 600;
+      margin-top: 8px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 140px;
+    }
+
+    .gift-price {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--accent-gold);
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    }
+
+    .change-btn {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent-blue);
+      margin-top: 6px;
+      text-transform: uppercase;
+    }
+
+    .grid-center-arrow {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 32px;
+      height: 32px;
+      background: #2C2C2E;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #FFFFFF;
+      font-size: 14px;
+      z-index: 2;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    }
+
+    /* Circular Spinner Wheel Section */
+    .wheel-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 0;
+      position: relative;
+    }
+
+    .wheel-container {
+      position: relative;
+      width: 280px;
+      height: 280px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .wheel-canvas {
+      width: 280px;
+      height: 280px;
+      border-radius: 50%;
+      filter: drop-shadow(0 12px 32px rgba(0, 0, 0, 0.6));
+    }
+
+    /* Center Hub */
+    .wheel-center-hub {
+      position: absolute;
+      width: 130px;
+      height: 130px;
+      background: radial-gradient(circle at 35% 35%, #2C2C2E, #1C1C1E);
+      border: 2px solid rgba(255, 255, 255, 0.12);
+      border-radius: 50%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.15), 0 10px 24px rgba(0, 0, 0, 0.8);
+      z-index: 5;
+    }
+
+    .hub-chance {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: var(--accent-green);
+      text-shadow: 0 0 16px var(--accent-green-glow);
+    }
+
+    .hub-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      letter-spacing: 0.5px;
+      margin-top: 1px;
+    }
+
+    .hub-multiplier {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent-gold);
+      margin-top: 2px;
+    }
+
+    /* Wheel Pointer Needle */
+    .wheel-pointer {
+      position: absolute;
+      top: -10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 20px;
+      height: 28px;
+      z-index: 10;
+      filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.7));
+    }
+    .wheel-pointer svg {
+      width: 100%;
+      height: 100%;
+      fill: #FFFFFF;
+    }
+
+    /* Action Button */
+    .action-btn {
+      width: 100%;
+      background: linear-gradient(180deg, #34C759 0%, #248A3D 100%);
+      color: #FFFFFF;
+      border: none;
+      border-radius: 18px;
+      padding: 16px;
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      box-shadow: 0 8px 24px var(--accent-green-glow), inset 0 1px 1px rgba(255, 255, 255, 0.3);
+      transition: transform 0.15s var(--smooth-easing), filter 0.15s ease, opacity 0.2s ease;
+    }
+
+    .action-btn:active:not(:disabled) {
+      transform: scale(0.97);
+      filter: brightness(0.92);
+    }
+
+    .action-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      filter: grayscale(0.5);
+    }
+
+    /* Bottom Sheets */
+    .sheet-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      z-index: 100;
+      display: none;
+      align-items: flex-end;
+      opacity: 0;
+      transition: opacity 0.25s ease;
+    }
+
+    .sheet-overlay.active {
+      display: flex;
+      opacity: 1;
+    }
+
+    .sheet-content {
+      width: 100%;
+      background: #1C1C1E;
+      border-top: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 28px 28px 0 0;
+      padding: 20px 16px 36px 16px;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      transform: translateY(100%);
+      transition: transform 0.3s var(--spring-easing);
+    }
+
+    .sheet-overlay.active .sheet-content {
+      transform: translateY(0);
+    }
+
+    .sheet-handle {
+      width: 36px;
+      height: 5px;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 3px;
+      margin: 0 auto 4px auto;
+    }
+
+    .sheet-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .sheet-title {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .sheet-close {
+      background: #2C2C2E;
+      border: none;
+      color: var(--text-secondary);
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      font-size: 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .star-presets {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .preset-chip {
+      background: #2C2C2E;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 12px 8px;
+      text-align: center;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--accent-gold);
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.1s ease;
+    }
+
+    .preset-chip:active {
+      transform: scale(0.95);
+    }
+
+    .preset-chip.active {
+      background: rgba(255, 214, 10, 0.18);
+      border-color: var(--accent-gold);
+    }
+
+    .catalog-list {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      overflow-y: auto;
+      max-height: 50vh;
+      padding-right: 4px;
+    }
+
+    .catalog-item {
+      background: #2C2C2E;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 16px;
+      padding: 12px 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      cursor: pointer;
+      transition: transform 0.15s ease, border-color 0.15s ease;
+    }
+
+    .catalog-item:active {
+      transform: scale(0.94);
+    }
+
+    .catalog-item.active {
+      border-color: var(--accent-green);
+      background: rgba(48, 209, 88, 0.12);
+    }
+
+    .catalog-img {
+      width: 64px;
+      height: 64px;
+      object-fit: contain;
+      margin-bottom: 6px;
+    }
+
+    .catalog-title {
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 90px;
+    }
+
+    .catalog-cost {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent-gold);
+      margin-top: 2px;
+    }
+
+    /* Result Modal */
+    .result-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(25px);
+      -webkit-backdrop-filter: blur(25px);
+      z-index: 200;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .result-overlay.active {
+      display: flex;
+      opacity: 1;
+    }
+
+    .result-card {
+      background: #1C1C1E;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 28px;
+      padding: 28px 24px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      max-width: 320px;
+      width: 100%;
+      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.8);
+      transform: scale(0.85);
+      transition: transform 0.3s var(--spring-easing);
+    }
+
+    .result-overlay.active .result-card {
+      transform: scale(1);
+    }
+
+    .result-badge {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      padding: 5px 14px;
+      border-radius: 20px;
+      margin-bottom: 16px;
+    }
+
+    .result-badge.win {
+      background: rgba(48, 209, 88, 0.2);
+      color: var(--accent-green);
+      border: 1px solid var(--accent-green);
+    }
+
+    .result-badge.lose {
+      background: rgba(255, 69, 58, 0.2);
+      color: var(--accent-red);
+      border: 1px solid var(--accent-red);
+    }
+
+    .result-img {
+      width: 128px;
+      height: 128px;
+      object-fit: contain;
+      margin-bottom: 16px;
+      filter: drop-shadow(0 12px 24px rgba(0, 0, 0, 0.5));
+    }
+
+    .result-title {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .result-desc {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.4;
+      margin-bottom: 24px;
+    }
+
+    .result-btn {
+      width: 100%;
+      background: #FFFFFF;
+      color: #000000;
+      font-weight: 700;
+      font-size: 16px;
+      padding: 14px;
+      border-radius: 14px;
+      border: none;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Toast Notification -->
+  <div class="toast-overlay" id="toast"></div>
+
+  <div class="app-container" id="appMain">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand-title">
+        🎰 Upgrader
+        <span class="brand-badge">Official</span>
+      </div>
+      <div class="user-pill" id="userPill">
+        <span id="userName">Игрок</span>
+        <span class="user-stars-badge" id="userStars">0 ⭐</span>
+      </div>
+    </header>
+
+    <!-- Upgrader Cards (Left: Source Gift / Stars, Right: Target Gift) -->
+    <div class="upgrade-grid">
+      <!-- Source Card -->
+      <div class="upgrade-card" id="sourceCard" onclick="openSourceSheet()">
+        <div class="card-label">Твой вклад</div>
+        <img id="srcImg" class="gift-preview-img" src="gifts/5226539835577100016.webp" alt="Source">
+        <div>
+          <div class="gift-name" id="srcTitle">50 Звёзд ⭐</div>
+          <div class="gift-price" id="srcStars">50 ⭐</div>
+          <div class="change-btn">Изменить</div>
+        </div>
+      </div>
+
+      <div class="grid-center-arrow">➜</div>
+
+      <!-- Target Card -->
+      <div class="upgrade-card" id="targetCard" onclick="openTargetSheet()">
+        <div class="card-label">Цель апгрейда</div>
+        <img id="tgtImg" class="gift-preview-img" src="gifts/5226539835577100016.webp" alt="Target">
+        <div>
+          <div class="gift-name" id="tgtTitle">Candy Cane</div>
+          <div class="gift-price" id="tgtStars">100 ⭐</div>
+          <div class="change-btn">Выбрать</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Circular Spinner Wheel -->
+    <div class="wheel-section">
+      <div class="wheel-container">
+        <div class="wheel-pointer">
+          <svg viewBox="0 0 24 24"><polygon points="12,24 0,0 24,0"/></svg>
+        </div>
+        <canvas id="wheelCanvas" class="wheel-canvas" width="560" height="560"></canvas>
+        <div class="wheel-center-hub">
+          <div class="hub-chance" id="hubChance">47.5%</div>
+          <div class="hub-label">Шанс победы</div>
+          <div class="hub-multiplier" id="hubMult">2.0x</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Action Button -->
+    <button class="action-btn" id="spinBtn" onclick="startUpgrade()">
+      <span>🎰</span>
+      <span id="spinBtnText">Улучшить за 50 ⭐</span>
+    </button>
+  </div>
+
+  <!-- Source Selection Sheet -->
+  <div class="sheet-overlay" id="sourceSheet">
+    <div class="sheet-content">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <div class="sheet-title">Выберите подарок или Звёзды ⭐</div>
+        <button class="sheet-close" onclick="closeSheets()">✕</button>
+      </div>
+
+      <div class="card-label" style="text-align: left; margin-bottom: 0;">Быстрый выбор Звёзд ⭐:</div>
+      <div class="star-presets">
+        <div class="preset-chip active" onclick="selectStarPreset(25)">25 ⭐</div>
+        <div class="preset-chip" onclick="selectStarPreset(50)">50 ⭐</div>
+        <div class="preset-chip" onclick="selectStarPreset(100)">100 ⭐</div>
+        <div class="preset-chip" onclick="selectStarPreset(250)">250 ⭐</div>
+        <div class="preset-chip" onclick="selectStarPreset(500)">500 ⭐</div>
+        <div class="preset-chip" onclick="selectStarPreset(1000)">1000 ⭐</div>
+      </div>
+
+      <div class="card-label" style="text-align: left; margin-bottom: 0;">Подарки из вашего профиля:</div>
+      <div class="catalog-list" id="userGiftsList">
+        <div style="grid-column: 1/-1; color: var(--text-secondary); font-size: 13px; padding: 20px 0; text-align: center;">
+          У вас пока нет подарков в профиле.<br>Вы можете крутить за Звёзды ⭐ выше!
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Target Selection Sheet -->
+  <div class="sheet-overlay" id="targetSheet">
+    <div class="sheet-content">
+      <div class="sheet-handle"></div>
+      <div class="sheet-header">
+        <div class="sheet-title">Выберите желаемый подарок</div>
+        <button class="sheet-close" onclick="closeSheets()">✕</button>
+      </div>
+      <div class="catalog-list" id="targetCatalogList">
+        <!-- Loaded via API -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Win / Lose Result Modal -->
+  <div class="result-overlay" id="resultModal">
+    <div class="result-card">
+      <img id="resImg" class="result-img" src="" alt="Result">
+      <div id="resBadge" class="result-badge win">УСПЕХ!</div>
+      <div id="resTitle" class="result-title">Вы выиграли!</div>
+      <div id="resDesc" class="result-desc">Подарок успешно добавлен в ваш профиль NerfGram.</div>
+      <button class="result-btn" onclick="closeResultModal()">Продолжить</button>
+    </div>
+  </div>
+
+  <script>
+    // Telegram WebApp Initialization
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      try {
+        tg.ready();
+        tg.expand();
+        tg.setHeaderColor('#000000');
+        tg.setBackgroundColor('#000000');
+      } catch(e){}
+    }
+
+    // Resolve Current User from WebApp, URL params, or Hash
+    function resolveUser() {
+      // 1. From Telegram WebApp
+      if (tg?.initDataUnsafe?.user?.id) {
+        return tg.initDataUnsafe.user;
+      }
+      // 2. From hash tgWebAppData
+      if (window.location.hash) {
+        try {
+          const hashParams = new URLSearchParams(window.location.hash.substring(1));
+          const appData = hashParams.get('tgWebAppData');
+          if (appData) {
+            const parsed = new URLSearchParams(appData);
+            const userStr = parsed.get('user');
+            if (userStr) return JSON.parse(userStr);
+          }
+        } catch(e){}
+      }
+      // 3. From URL query params ?user_id=123&name=...
+      const urlParams = new URLSearchParams(window.location.search);
+      const uid = urlParams.get('user_id') || urlParams.get('uid');
+      if (uid) {
+        return {
+          id: parseInt(uid, 10),
+          first_name: urlParams.get('name') || urlParams.get('first_name') || "Игрок"
+        };
+      }
+      // 4. Default fallback
+      return { id: 1780243200, first_name: "Игрок" };
+    }
+
+    const currentUser = resolveUser();
+    document.getElementById('userName').textContent = currentUser.first_name || "Игрок";
+
+    function showToast(text) {
+      const t = document.getElementById('toast');
+      t.textContent = text;
+      t.classList.add('active');
+      setTimeout(() => t.classList.remove('active'), 3200);
+    }
+
+    // Audio synthesizer via Web Audio API
+    let audioCtx = null;
+    function initAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+    }
+
+    function playTick() {
+      if (!audioCtx) return;
+      try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(120, audioCtx.currentTime + 0.04);
+        gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.04);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.04);
+      } catch(e){}
+    }
+
+    function playWinSound() {
+      if (!audioCtx) return;
+      try {
+        const notes = [523.25, 659.25, 783.99, 1046.50];
+        notes.forEach((freq, i) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, audioCtx.currentTime + i * 0.08);
+          gain.gain.setValueAtTime(0.2, audioCtx.currentTime + i * 0.08);
+          gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i * 0.08 + 0.4);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start(audioCtx.currentTime + i * 0.08);
+          osc.stop(audioCtx.currentTime + i * 0.08 + 0.45);
+        });
+      } catch(e){}
+    }
+
+    // State
+    let catalog = [];
+    let userGifts = [];
+    let currentSource = { type: 'stars', stars: 50, title: '50 Звёзд ⭐', img: 'gifts/5226539835577100016.webp', peer_gift_id: 0 };
+    let currentTarget = { id: 1, title: 'Candy Cane', stars: 100, img: 'gifts/5226539835577100016.webp' };
+    let isSpinning = false;
+    let currentWheelRotation = 0;
+
+    async function loadData() {
+      try {
+        const catRes = await fetch('/api/catalog');
+        if (catRes.ok) {
+          const list = await catRes.json();
+          if (list && list.length > 0) {
+            catalog = list.map((g) => ({
+              id: g.id,
+              title: g.title,
+              stars: g.stars,
+              convert_stars: g.convert_stars,
+              img: g.image || 'gifts/5226539835577100016.webp'
+            }));
+          }
+        }
+      } catch(e){}
+
+      try {
+        const uRes = await fetch(`/api/user-data?user_id=${currentUser.id}`);
+        if (uRes.ok) {
+          const uData = await uRes.json();
+          userGifts = (uData.gifts || []).map(g => ({
+            ...g,
+            img: g.image || 'gifts/5226539835577100016.webp'
+          }));
+          if (uData.first_name) {
+            document.getElementById('userName').textContent = uData.first_name;
+          }
+          if (uData.stars !== undefined) {
+            document.getElementById('userStars').textContent = `${uData.stars.toLocaleString()} ⭐`;
+          }
+        }
+      } catch(e){}
+
+      // Set default target if not set
+      if (!currentTarget || currentTarget.stars <= currentSource.stars) {
+        currentTarget = catalog.find(g => g.stars > currentSource.stars) || catalog[catalog.length - 1] || currentTarget;
+      }
+      updateUI();
+      renderTargetCatalog();
+      renderUserGifts();
+    }
+
+    function calculateChance() {
+      const src = currentSource.stars;
+      const tgt = currentTarget.stars;
+      if (src >= tgt) return 95.0;
+      const ratio = (src / tgt) * 0.95;
+      return Math.min(95.0, Math.max(1.0, +(ratio * 100).toFixed(1)));
+    }
+
+    function updateUI() {
+      document.getElementById('srcImg').src = currentSource.img;
+      document.getElementById('srcTitle').textContent = currentSource.title;
+      document.getElementById('srcStars').textContent = `${currentSource.stars} ⭐`;
+
+      document.getElementById('tgtImg').src = currentTarget.img;
+      document.getElementById('tgtTitle').textContent = currentTarget.title;
+      document.getElementById('tgtStars').textContent = `${currentTarget.stars} ⭐`;
+
+      const chance = calculateChance();
+      const mult = (currentTarget.stars / currentSource.stars).toFixed(1);
+      document.getElementById('hubChance').textContent = `${chance}%`;
+      document.getElementById('hubMult').textContent = `${mult}x`;
+
+      const btnText = currentSource.type === 'gift' 
+        ? `Улучшить подарок (${currentSource.stars} ⭐)` 
+        : `Улучшить за ${currentSource.stars} ⭐`;
+      document.getElementById('spinBtnText').textContent = btnText;
+
+      drawWheel(chance, currentWheelRotation);
+    }
+
+    function drawWheel(chancePercent, rotationDeg = 0) {
+      const canvas = document.getElementById('wheelCanvas');
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      const center = w / 2;
+      const radius = center - 16;
+
+      ctx.clearRect(0, 0, w, h);
+
+      const winAngle = (chancePercent / 100) * 2 * Math.PI;
+      const rotRad = (rotationDeg * Math.PI) / 180;
+
+      ctx.save();
+      ctx.translate(center, center);
+      ctx.rotate(rotRad);
+      ctx.translate(-center, -center);
+
+      // 1. Lose Sector (Dark Grey)
+      ctx.beginPath();
+      ctx.moveTo(center, center);
+      ctx.arc(center, center, radius, winAngle, 2 * Math.PI);
+      ctx.closePath();
+      ctx.fillStyle = '#2C2C2E';
+      ctx.fill();
+
+      // 2. Win Sector (Vibrant Apple Green)
+      ctx.beginPath();
+      ctx.moveTo(center, center);
+      ctx.arc(center, center, radius, 0, winAngle);
+      ctx.closePath();
+      const greenGrad = ctx.createRadialGradient(center, center, radius * 0.4, center, center, radius);
+      greenGrad.addColorStop(0, '#34C759');
+      greenGrad.addColorStop(1, '#30D158');
+      ctx.fillStyle = greenGrad;
+      ctx.fill();
+
+      // Glowing outer rim
+      ctx.beginPath();
+      ctx.arc(center, center, radius, 0, 2 * Math.PI);
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function openSourceSheet() {
+      if (isSpinning) return;
+      document.getElementById('sourceSheet').classList.add('active');
+    }
+
+    function openTargetSheet() {
+      if (isSpinning) return;
+      document.getElementById('targetSheet').classList.add('active');
+    }
+
+    function closeSheets() {
+      document.getElementById('sourceSheet').classList.remove('active');
+      document.getElementById('targetSheet').classList.remove('active');
+    }
+
+    function selectStarPreset(stars) {
+      currentSource = {
+        type: 'stars',
+        stars: stars,
+        title: `${stars} Звёзд ⭐`,
+        img: 'gifts/5226539835577100016.webp',
+        peer_gift_id: 0
+      };
+      document.querySelectorAll('.preset-chip').forEach(c => {
+        c.classList.toggle('active', c.textContent.includes(stars));
+      });
+      if (currentTarget.stars <= currentSource.stars) {
+        currentTarget = catalog.find(g => g.stars > currentSource.stars) || catalog[catalog.length - 1];
+      }
+      closeSheets();
+      updateUI();
+    }
+
+    function selectUserGift(gift) {
+      currentSource = {
+        type: 'gift',
+        stars: gift.stars,
+        title: gift.title,
+        img: gift.img,
+        peer_gift_id: gift.peer_gift_id
+      };
+      if (currentTarget.stars <= currentSource.stars) {
+        currentTarget = catalog.find(g => g.stars > currentSource.stars) || catalog[catalog.length - 1];
+      }
+      closeSheets();
+      updateUI();
+    }
+
+    function selectTargetGift(gift) {
+      if (gift.stars <= currentSource.stars) {
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+        showToast('Цель должна быть дороже вашего вклада!');
+        return;
+      }
+      currentTarget = gift;
+      closeSheets();
+      updateUI();
+    }
+
+    function renderTargetCatalog() {
+      const list = document.getElementById('targetCatalogList');
+      list.innerHTML = '';
+      catalog.forEach(g => {
+        const item = document.createElement('div');
+        item.className = `catalog-item ${currentTarget.id === g.id ? 'active' : ''}`;
+        item.onclick = () => selectTargetGift(g);
+        item.innerHTML = `
+          <img src="${g.img}" class="catalog-img" alt="${g.title}">
+          <div class="catalog-title">${g.title}</div>
+          <div class="catalog-cost">${g.stars} ⭐</div>
+        `;
+        list.appendChild(item);
+      });
+    }
+
+    function renderUserGifts() {
+      const list = document.getElementById('userGiftsList');
+      if (!userGifts || userGifts.length === 0) {
+        list.innerHTML = `
+          <div style="grid-column: 1/-1; color: var(--text-secondary); font-size: 13px; padding: 20px 0; text-align: center;">
+            У вас пока нет доступных подарков в профиле.<br>Вы можете крутить за Звёзды ⭐ выше!
+          </div>
+        `;
+        return;
+      }
+      list.innerHTML = '';
+      userGifts.forEach((g) => {
+        const item = document.createElement('div');
+        item.className = 'catalog-item';
+        item.onclick = () => selectUserGift(g);
+        item.innerHTML = `
+          <img src="${g.img}" class="catalog-img" alt="${g.title}">
+          <div class="catalog-title">${g.title}</div>
+          <div class="catalog-cost">${g.stars} ⭐</div>
+        `;
+        list.appendChild(item);
+      });
+    }
+
+    async function startUpgrade() {
+      if (isSpinning) return;
+      initAudio();
+
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+
+      isSpinning = true;
+      document.getElementById('spinBtn').disabled = true;
+
+      try {
+        const payload = {
+          user_id: currentUser.id,
+          source_peer_gift_id: currentSource.peer_gift_id || 0,
+          source_stars: currentSource.stars,
+          target_gift_id: currentTarget.id,
+          target_stars: currentTarget.stars,
+          target_title: currentTarget.title
+        };
+
+        const res = await fetch('/api/upgrade', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        if (!data.success) {
+          throw new Error(data.error || 'Ошибка апгрейда');
+        }
+
+        // Animate the wheel with spring deceleration
+        const fullSpins = 5 + Math.floor(Math.random() * 3);
+        const targetStopAngle = data.stop_angle;
+        const totalDelta = (fullSpins * 360) + (360 - targetStopAngle);
+        const startRotation = currentWheelRotation;
+        const finalRotation = startRotation + totalDelta;
+
+        const duration = 4200; // 4.2s Apple deceleration
+        const startTime = performance.now();
+        let lastTickAngle = 0;
+
+        function animate(now) {
+          const elapsed = now - startTime;
+          const progress = Math.min(1, elapsed / duration);
+          // Ease out cubic
+          const easeOut = 1 - Math.pow(1 - progress, 3);
+          const currentRot = startRotation + totalDelta * easeOut;
+
+          // Sound tick every 30 degrees
+          if (Math.abs(currentRot - lastTickAngle) >= 30) {
+            playTick();
+            lastTickAngle = currentRot;
+          }
+
+          drawWheel(data.win_chance, currentRot);
+
+          if (progress < 1) {
+            requestAnimationFrame(animate);
+          } else {
+            currentWheelRotation = finalRotation % 360;
+            if (data.new_balance !== undefined) {
+              document.getElementById('userStars').textContent = `${data.new_balance.toLocaleString()} ⭐`;
+            }
+            finishUpgrade(data.is_win);
+          }
+        }
+
+        requestAnimationFrame(animate);
+
+      } catch(e) {
+        console.error(e);
+        isSpinning = false;
+        document.getElementById('spinBtn').disabled = false;
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+        showToast(e.message || 'Ошибка соединения');
+      }
+    }
+
+    function finishUpgrade(isWin) {
+      isSpinning = false;
+      document.getElementById('spinBtn').disabled = false;
+
+      const modal = document.getElementById('resultModal');
+      const img = document.getElementById('resImg');
+      const badge = document.getElementById('resBadge');
+      const title = document.getElementById('resTitle');
+      const desc = document.getElementById('resDesc');
+
+      if (isWin) {
+        playWinSound();
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        img.src = currentTarget.img;
+        badge.className = 'result-badge win';
+        badge.textContent = 'ПОБЕДА!';
+        title.textContent = `Вы получили ${currentTarget.title}!`;
+        desc.textContent = `Подарок стоимостью ${currentTarget.stars} ⭐ успешно добавлен в ваш профиль NerfGram!`;
+      } else {
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+        img.src = currentSource.img;
+        badge.className = 'result-badge lose';
+        badge.textContent = 'НЕ ПОВЕЗЛО';
+        title.textContent = 'Попробуйте ещё раз';
+        desc.textContent = 'Стрелка остановилась в сером секторе. Попробуйте выбрать подарок с большим шансом победы.';
+      }
+
+      modal.classList.add('active');
+    }
+
+    function closeResultModal() {
+      document.getElementById('resultModal').classList.remove('active');
+      loadData();
+    }
+
+    // Initialize
+    loadData();
+  </script>
+</body>
+</html>
