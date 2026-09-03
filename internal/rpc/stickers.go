@@ -316,8 +316,8 @@ func (r *Router) allStickersForKind(ctx context.Context, hash int64, kind domain
 	if err != nil {
 		return nil, err
 	}
-	if !handled {
-		// 兼容无 per-user 安装态的测试/旧内存路径：从目录缓存读全局 installed 标志。
+	if !handled || len(sets) == 0 {
+		// 兼容无 per-user 安装态的测试/旧内存路径，以及新用户无已装集时默认下发全局 default/official 集。
 		sets = installedGlobalStickerSets(r.stickerCatalogSets(ctx, kind))
 	}
 	if len(sets) == 0 {
