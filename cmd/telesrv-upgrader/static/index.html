@@ -3,30 +3,23 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>NerfGram Upgrader</title>
+  <title>NerfGram Star Gifts Upgrader</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=SF+Pro+Display:wght@400;500;600;700&family=SF+Pro+Text:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg-color: #000000;
-      --card-bg: rgba(28, 28, 30, 0.85);
+      --bg-color: #0b0e14;
+      --card-bg: rgba(22, 27, 34, 0.75);
       --card-border: rgba(255, 255, 255, 0.08);
-      --card-hover: rgba(44, 44, 46, 0.95);
-      --text-primary: #FFFFFF;
-      --text-secondary: rgba(235, 235, 245, 0.6);
-      --text-tertiary: rgba(235, 235, 245, 0.38);
-      --accent-green: #30D158;
-      --accent-green-glow: rgba(48, 209, 88, 0.35);
-      --accent-gold: #FFD60A;
-      --accent-gold-glow: rgba(255, 214, 10, 0.3);
-      --accent-blue: #0A84FF;
-      --accent-red: #FF453A;
-      --wheel-lose: #2C2C2E;
-      --wheel-win: #30D158;
-      --spring-easing: cubic-bezier(0.175, 0.885, 0.32, 1.275);
-      --smooth-easing: cubic-bezier(0.2, 0.8, 0.2, 1);
+      --accent-color: #007aff;
+      --accent-glow: rgba(0, 122, 255, 0.35);
+      --gold-color: #ffb300;
+      --gold-glow: rgba(255, 179, 0, 0.35);
+      --nft-glow: rgba(255, 215, 0, 0.4);
+      --win-color: #34c759;
+      --loss-color: #ff3b30;
+      --text-main: #ffffff;
+      --text-muted: #8e8e93;
+      --font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
 
     * {
@@ -35,365 +28,421 @@
       padding: 0;
       -webkit-tap-highlight-color: transparent;
       user-select: none;
-      -webkit-user-select: none;
     }
 
     body {
       background-color: var(--bg-color);
-      color: var(--text-primary);
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", sans-serif;
+      color: var(--text-main);
+      font-family: var(--font-family);
       min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
       overflow-x: hidden;
-      padding-bottom: 40px;
-      -webkit-font-smoothing: antialiased;
+      position: relative;
+      background-image: 
+        radial-gradient(circle at 50% 0%, rgba(0, 122, 255, 0.12) 0%, transparent 60%),
+        radial-gradient(circle at 80% 100%, rgba(255, 179, 0, 0.08) 0%, transparent 50%);
     }
 
-    /* Toast Notification */
-    .toast-overlay {
-      position: fixed;
-      top: 20px;
-      left: 50%;
-      transform: translateX(-50%) translateY(-100px);
-      background: rgba(255, 69, 58, 0.92);
-      color: #FFFFFF;
-      padding: 12px 24px;
-      border-radius: 14px;
-      font-weight: 600;
-      font-size: 14px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      z-index: 10000;
-      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-      pointer-events: none;
-      text-align: center;
-      max-width: 90%;
+    /* Header */
+    header {
+      width: 100%;
+      max-width: 500px;
+      padding: 16px 20px 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 10;
     }
-    .toast-overlay.active {
-      transform: translateX(-50%) translateY(0);
+
+    .user-profile {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .user-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #007aff, #5856d6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 16px;
+      box-shadow: 0 4px 12px rgba(0, 122, 255, 0.25);
+    }
+
+    .user-info {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .user-name {
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.2px;
+    }
+
+    .user-status {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .stars-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255, 179, 0, 0.12);
+      border: 1px solid rgba(255, 179, 0, 0.3);
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--gold-color);
+      box-shadow: 0 4px 12px var(--gold-glow);
     }
 
     /* Main Container */
     .app-container {
-      max-width: 480px;
-      margin: 0 auto;
-      padding: 16px;
+      width: 100%;
+      max-width: 500px;
+      padding: 10px 20px 30px;
       display: flex;
       flex-direction: column;
+      align-items: center;
+      flex: 1;
       gap: 20px;
+      z-index: 5;
     }
 
-    /* Header */
-    .app-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 4px 4px 4px;
-    }
-
-    .brand-title {
-      font-size: 20px;
-      font-weight: 700;
-      letter-spacing: -0.5px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .brand-badge {
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      padding: 3px 7px;
-      border-radius: 6px;
-      background: rgba(48, 209, 88, 0.15);
-      color: var(--accent-green);
-      border: 1px solid rgba(48, 209, 88, 0.25);
-    }
-
-    .user-pill {
-      font-size: 13px;
-      color: var(--text-secondary);
-      background: rgba(255, 255, 255, 0.06);
-      padding: 6px 12px;
-      border-radius: 20px;
-      border: 1px solid var(--card-border);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .user-stars-badge {
-      font-weight: 700;
-      color: var(--accent-gold);
-      background: rgba(255, 214, 10, 0.12);
-      border: 1px solid rgba(255, 214, 10, 0.25);
-      padding: 2px 8px;
-      border-radius: 12px;
-      font-size: 12px;
-    }
-
-    /* Selection Cards Row */
-    .upgrade-grid {
+    /* Cards Arena */
+    .arena-grid {
+      width: 100%;
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
       gap: 12px;
-      position: relative;
     }
 
-    .upgrade-card {
+    .gift-card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 20px;
-      padding: 16px;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-radius: 22px;
+      padding: 16px 12px;
       display: flex;
       flex-direction: column;
       align-items: center;
       text-align: center;
-      cursor: pointer;
       position: relative;
-      transition: transform 0.2s var(--smooth-easing), border-color 0.2s ease, background-color 0.2s ease;
-      min-height: 200px;
-      justify-content: space-between;
+      cursor: pointer;
+      transition: all 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      min-height: 205px;
     }
 
-    .upgrade-card:active {
+    .gift-card:active {
       transform: scale(0.97);
-      background: var(--card-hover);
+    }
+
+    .gift-card.nft-card {
+      border-color: rgba(255, 215, 0, 0.35);
+      box-shadow: 0 10px 30px rgba(255, 179, 0, 0.15);
     }
 
     .card-label {
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 600;
+      color: var(--text-muted);
       text-transform: uppercase;
       letter-spacing: 0.5px;
-      color: var(--text-secondary);
       margin-bottom: 8px;
     }
 
-    .gift-preview-img {
+    /* Authentic Gift Artwork Box */
+    .gift-artwork-box {
       width: 96px;
       height: 96px;
-      object-fit: contain;
-      filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.4));
-      transition: transform 0.3s var(--spring-easing);
-    }
-
-    .upgrade-card:hover .gift-preview-img {
-      transform: scale(1.06);
-    }
-
-    .gift-name {
-      font-size: 14px;
-      font-weight: 600;
-      margin-top: 8px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 140px;
-    }
-
-    .gift-price {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--accent-gold);
-      margin-top: 2px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 4px;
-    }
-
-    .change-btn {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--accent-blue);
-      margin-top: 6px;
-      text-transform: uppercase;
-    }
-
-    .grid-center-arrow {
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      transform: translate(-50%, -50%);
-      width: 32px;
-      height: 32px;
-      background: #2C2C2E;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #FFFFFF;
-      font-size: 14px;
-      z-index: 2;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-    }
-
-    /* Circular Spinner Wheel Section */
-    .wheel-section {
+      border-radius: 20px;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding: 10px 0;
+      position: relative;
+      margin-bottom: 10px;
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.2), 0 8px 20px rgba(0, 0, 0, 0.4);
+      overflow: hidden;
+    }
+
+    .gift-artwork-box .gift-emoji {
+      font-size: 52px;
+      line-height: 1;
+      filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.45));
+    }
+
+    .nft-pill {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 215, 0, 0.5);
+      color: #ffd700;
+      font-size: 9px;
+      font-weight: 800;
+      padding: 2px 6px;
+      border-radius: 10px;
+      letter-spacing: 0.3px;
+    }
+
+    .model-pill {
+      position: absolute;
+      bottom: 6px;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(6px);
+      color: #ffffff;
+      font-size: 9px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 8px;
+      max-width: 84px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .gift-title {
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.2;
+      margin-bottom: 4px;
+      max-width: 130px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .gift-stars {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--gold-color);
+    }
+
+    .card-change-hint {
+      font-size: 10px;
+      color: var(--accent-color);
+      margin-top: 6px;
+      font-weight: 600;
+    }
+
+    /* Upgrade Icon Center */
+    .upgrade-arrow-badge {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--card-border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      color: var(--text-muted);
+    }
+
+    /* Wheel Section */
+    .wheel-section {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 10px 0;
       position: relative;
     }
 
     .wheel-container {
+      width: 260px;
+      height: 260px;
       position: relative;
-      width: 280px;
-      height: 280px;
       display: flex;
       align-items: center;
       justify-content: center;
     }
 
     .wheel-canvas {
-      width: 280px;
-      height: 280px;
+      width: 100%;
+      height: 100%;
       border-radius: 50%;
-      filter: drop-shadow(0 12px 32px rgba(0, 0, 0, 0.6));
+      box-shadow: 0 0 35px rgba(0, 122, 255, 0.2);
     }
 
-    /* Center Hub */
-    .wheel-center-hub {
-      position: absolute;
-      width: 130px;
-      height: 130px;
-      background: radial-gradient(circle at 35% 35%, #2C2C2E, #1C1C1E);
-      border: 2px solid rgba(255, 255, 255, 0.12);
-      border-radius: 50%;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      box-shadow: inset 0 2px 4px rgba(255, 255, 255, 0.15), 0 10px 24px rgba(0, 0, 0, 0.8);
-      z-index: 5;
-    }
-
-    .hub-chance {
-      font-size: 24px;
-      font-weight: 700;
-      letter-spacing: -0.5px;
-      color: var(--accent-green);
-      text-shadow: 0 0 16px var(--accent-green-glow);
-    }
-
-    .hub-label {
-      font-size: 10px;
-      font-weight: 600;
-      text-transform: uppercase;
-      color: var(--text-secondary);
-      letter-spacing: 0.5px;
-      margin-top: 1px;
-    }
-
-    .hub-multiplier {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--accent-gold);
-      margin-top: 2px;
-    }
-
-    /* Wheel Pointer Needle */
     .wheel-pointer {
       position: absolute;
       top: -10px;
       left: 50%;
       transform: translateX(-50%);
-      width: 20px;
-      height: 28px;
-      z-index: 10;
-      filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.7));
-    }
-    .wheel-pointer svg {
-      width: 100%;
-      height: 100%;
-      fill: #FFFFFF;
+      width: 0;
+      height: 0;
+      border-left: 12px solid transparent;
+      border-right: 12px solid transparent;
+      border-top: 22px solid #ffffff;
+      filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.5));
+      z-index: 20;
     }
 
-    /* Action Button */
-    .action-btn {
+    .wheel-center-cap {
+      position: absolute;
+      width: 110px;
+      height: 110px;
+      border-radius: 50%;
+      background: #12161f;
+      border: 3px solid rgba(255, 255, 255, 0.12);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+      z-index: 10;
+    }
+
+    .wheel-chance-val {
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      color: #ffffff;
+      line-height: 1;
+    }
+
+    .wheel-chance-lbl {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      margin-top: 3px;
+    }
+
+    /* Actions */
+    .controls-wrapper {
       width: 100%;
-      background: linear-gradient(180deg, #34C759 0%, #248A3D 100%);
-      color: #FFFFFF;
-      border: none;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .spin-btn {
+      width: 100%;
+      padding: 17px;
       border-radius: 18px;
-      padding: 16px;
+      background: linear-gradient(135deg, #007aff 0%, #0051ff 100%);
+      border: none;
+      color: #ffffff;
       font-size: 17px;
       font-weight: 700;
-      letter-spacing: -0.3px;
+      letter-spacing: -0.2px;
       cursor: pointer;
+      box-shadow: 0 8px 24px var(--accent-glow);
+      transition: all 0.2s ease;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 10px;
-      box-shadow: 0 8px 24px var(--accent-green-glow), inset 0 1px 1px rgba(255, 255, 255, 0.3);
-      transition: transform 0.15s var(--smooth-easing), filter 0.15s ease, opacity 0.2s ease;
+      gap: 8px;
     }
 
-    .action-btn:active:not(:disabled) {
-      transform: scale(0.97);
+    .spin-btn:active {
+      transform: scale(0.98);
       filter: brightness(0.92);
     }
 
-    .action-btn:disabled {
-      opacity: 0.5;
+    .spin-btn:disabled {
+      opacity: 0.45;
       cursor: not-allowed;
-      filter: grayscale(0.5);
+      box-shadow: none;
     }
 
-    /* Bottom Sheets */
-    .sheet-overlay {
+    /* Toast Notification */
+    .toast {
       position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.65);
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-100px);
+      background: rgba(30, 35, 45, 0.95);
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
-      z-index: 100;
-      display: none;
-      align-items: flex-end;
-      opacity: 0;
-      transition: opacity 0.25s ease;
-    }
-
-    .sheet-overlay.active {
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #ffffff;
+      padding: 12px 20px;
+      border-radius: 16px;
+      font-size: 14px;
+      font-weight: 600;
+      z-index: 1000;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      transition: all 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+      max-width: 90%;
+      text-align: center;
       display: flex;
-      opacity: 1;
+      align-items: center;
+      gap: 8px;
     }
 
-    .sheet-content {
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .toast.error {
+      border-color: rgba(255, 59, 48, 0.4);
+      background: rgba(45, 20, 20, 0.95);
+    }
+
+    /* Bottom Sheet Modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 500;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+      display: flex;
+      justify-content: center;
+      align-items: flex-end;
+    }
+
+    .modal-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .sheet-modal {
       width: 100%;
-      background: #1C1C1E;
+      max-width: 500px;
+      background: #141822;
       border-top: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 28px 28px 0 0;
-      padding: 20px 16px 36px 16px;
+      padding: 20px 20px 34px;
+      transform: translateY(100%);
+      transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
       max-height: 80vh;
       display: flex;
       flex-direction: column;
-      gap: 16px;
-      transform: translateY(100%);
-      transition: transform 0.3s var(--spring-easing);
     }
 
-    .sheet-overlay.active .sheet-content {
+    .modal-overlay.open .sheet-modal {
       transform: translateY(0);
-    }
-
-    .sheet-handle {
-      width: 36px;
-      height: 5px;
-      background: rgba(255, 255, 255, 0.2);
-      border-radius: 3px;
-      margin: 0 auto 4px auto;
     }
 
     .sheet-header {
       display: flex;
-      align-items: center;
       justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
     }
 
     .sheet-title {
@@ -402,59 +451,94 @@
     }
 
     .sheet-close {
-      background: #2C2C2E;
-      border: none;
-      color: var(--text-secondary);
-      width: 30px;
-      height: 30px;
+      width: 32px;
+      height: 32px;
       border-radius: 50%;
-      font-size: 16px;
-      cursor: pointer;
+      background: rgba(255, 255, 255, 0.08);
+      border: none;
+      color: var(--text-muted);
       display: flex;
       align-items: center;
       justify-content: center;
-    }
-
-    .star-presets {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-    }
-
-    .preset-chip {
-      background: #2C2C2E;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 12px;
-      padding: 12px 8px;
-      text-align: center;
-      font-size: 15px;
-      font-weight: 600;
-      color: var(--accent-gold);
+      font-size: 18px;
       cursor: pointer;
-      transition: background 0.15s ease, transform 0.1s ease;
     }
 
-    .preset-chip:active {
-      transform: scale(0.95);
+    .sheet-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 4px;
+      border-radius: 12px;
     }
 
-    .preset-chip.active {
-      background: rgba(255, 214, 10, 0.18);
-      border-color: var(--accent-gold);
+    .sheet-tab {
+      flex: 1;
+      padding: 8px 12px;
+      border-radius: 9px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
     }
 
-    .catalog-list {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 10px;
+    .sheet-tab.active {
+      background: var(--accent-color);
+      color: #ffffff;
+    }
+
+    .sheet-content {
       overflow-y: auto;
-      max-height: 50vh;
+      flex: 1;
       padding-right: 4px;
     }
 
-    .catalog-item {
-      background: #2C2C2E;
-      border: 1px solid rgba(255, 255, 255, 0.06);
+    .sheet-content::-webkit-scrollbar {
+      width: 4px;
+    }
+    .sheet-content::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+    }
+
+    .quick-chips-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .quick-chip {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--card-border);
+      padding: 10px 6px;
+      border-radius: 12px;
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.2s ease;
+    }
+
+    .quick-chip:active {
+      background: rgba(0, 122, 255, 0.2);
+      border-color: var(--accent-color);
+    }
+
+    .items-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .sheet-item-card {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--card-border);
       border-radius: 16px;
       padding: 12px 8px;
       display: flex;
@@ -462,597 +546,721 @@
       align-items: center;
       text-align: center;
       cursor: pointer;
-      transition: transform 0.15s ease, border-color 0.15s ease;
+      transition: all 0.2s ease;
     }
 
-    .catalog-item:active {
-      transform: scale(0.94);
+    .sheet-item-card:active {
+      transform: scale(0.96);
+      border-color: var(--accent-color);
     }
 
-    .catalog-item.active {
-      border-color: var(--accent-green);
-      background: rgba(48, 209, 88, 0.12);
+    .sheet-item-card.nft-item {
+      border-color: rgba(255, 215, 0, 0.3);
+      background: rgba(255, 215, 0, 0.03);
     }
 
-    .catalog-img {
-      width: 64px;
-      height: 64px;
-      object-fit: contain;
-      margin-bottom: 6px;
+    .empty-state {
+      text-align: center;
+      padding: 30px 10px;
+      color: var(--text-muted);
+      font-size: 14px;
+      line-height: 1.5;
     }
 
-    .catalog-title {
-      font-size: 12px;
-      font-weight: 600;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 90px;
-    }
-
-    .catalog-cost {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--accent-gold);
-      margin-top: 2px;
-    }
-
-    /* Result Modal */
-    .result-overlay {
+    /* Win Celebration Modal */
+    .win-modal-overlay {
       position: fixed;
       inset: 0;
       background: rgba(0, 0, 0, 0.85);
-      backdrop-filter: blur(25px);
-      -webkit-backdrop-filter: blur(25px);
-      z-index: 200;
-      display: none;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      z-index: 600;
+      display: flex;
       align-items: center;
       justify-content: center;
-      padding: 24px;
       opacity: 0;
+      pointer-events: none;
       transition: opacity 0.3s ease;
     }
 
-    .result-overlay.active {
-      display: flex;
+    .win-modal-overlay.open {
       opacity: 1;
+      pointer-events: auto;
     }
 
-    .result-card {
-      background: #1C1C1E;
-      border: 1px solid rgba(255, 255, 255, 0.15);
+    .win-modal-box {
+      width: 90%;
+      max-width: 380px;
+      background: #161b24;
+      border: 1px solid rgba(255, 215, 0, 0.4);
       border-radius: 28px;
-      padding: 28px 24px;
+      padding: 30px 24px;
       display: flex;
       flex-direction: column;
       align-items: center;
       text-align: center;
-      max-width: 320px;
-      width: 100%;
-      box-shadow: 0 20px 48px rgba(0, 0, 0, 0.8);
-      transform: scale(0.85);
-      transition: transform 0.3s var(--spring-easing);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8), 0 0 40px rgba(255, 215, 0, 0.25);
+      transform: scale(0.9);
+      transition: transform 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
     }
 
-    .result-overlay.active .result-card {
+    .win-modal-overlay.open .win-modal-box {
       transform: scale(1);
     }
 
-    .result-badge {
-      font-size: 13px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      padding: 5px 14px;
-      border-radius: 20px;
-      margin-bottom: 16px;
+    .win-title {
+      font-size: 24px;
+      font-weight: 800;
+      color: #ffd700;
+      margin-bottom: 6px;
     }
 
-    .result-badge.win {
-      background: rgba(48, 209, 88, 0.2);
-      color: var(--accent-green);
-      border: 1px solid var(--accent-green);
-    }
-
-    .result-badge.lose {
-      background: rgba(255, 69, 58, 0.2);
-      color: var(--accent-red);
-      border: 1px solid var(--accent-red);
-    }
-
-    .result-img {
-      width: 128px;
-      height: 128px;
-      object-fit: contain;
-      margin-bottom: 16px;
-      filter: drop-shadow(0 12px 24px rgba(0, 0, 0, 0.5));
-    }
-
-    .result-title {
-      font-size: 20px;
-      font-weight: 700;
-      margin-bottom: 8px;
-    }
-
-    .result-desc {
+    .win-subtitle {
       font-size: 14px;
-      color: var(--text-secondary);
-      line-height: 1.4;
+      color: var(--text-muted);
+      margin-bottom: 20px;
+    }
+
+    .win-artwork-large {
+      width: 140px;
+      height: 140px;
+      border-radius: 28px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      margin-bottom: 16px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    }
+
+    .win-artwork-large .gift-emoji {
+      font-size: 78px;
+      line-height: 1;
+    }
+
+    .win-item-name {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .win-item-stars {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--gold-color);
       margin-bottom: 24px;
     }
 
-    .result-btn {
+    .win-claim-btn {
       width: 100%;
-      background: #FFFFFF;
-      color: #000000;
-      font-weight: 700;
-      font-size: 16px;
-      padding: 14px;
-      border-radius: 14px;
+      padding: 15px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, #ffd700 0%, #ff9900 100%);
       border: none;
+      color: #000000;
+      font-size: 16px;
+      font-weight: 800;
       cursor: pointer;
     }
   </style>
 </head>
 <body>
 
-  <!-- Toast Notification -->
-  <div class="toast-overlay" id="toast"></div>
-
-  <div class="app-container" id="appMain">
-    <!-- Header -->
-    <header class="app-header">
-      <div class="brand-title">
-        🎰 Upgrader
-        <span class="brand-badge">Official</span>
+  <!-- Header -->
+  <header>
+    <div class="user-profile">
+      <div class="user-avatar" id="userAvatar">U</div>
+      <div class="user-info">
+        <span class="user-name" id="userName">Загрузка...</span>
+        <span class="user-status">NerfGram Upgrader</span>
       </div>
-      <div class="user-pill" id="userPill">
-        <span id="userName">Игрок</span>
-        <span class="user-stars-badge" id="userStars">0 ⭐</span>
-      </div>
-    </header>
+    </div>
+    <div class="stars-badge" id="starsBadge">
+      <span>⭐</span>
+      <span id="userStars">0</span>
+    </div>
+  </header>
 
-    <!-- Upgrader Cards (Left: Source Gift / Stars, Right: Target Gift) -->
-    <div class="upgrade-grid">
+  <!-- App Body -->
+  <div class="app-container">
+    
+    <!-- Cards Arena -->
+    <div class="arena-grid">
       <!-- Source Card -->
-      <div class="upgrade-card" id="sourceCard" onclick="openSourceSheet()">
-        <div class="card-label">Твой вклад</div>
-        <img id="srcImg" class="gift-preview-img" src="gifts/5226539835577100016.webp" alt="Source">
-        <div>
-          <div class="gift-name" id="srcTitle">50 Звёзд ⭐</div>
-          <div class="gift-price" id="srcStars">50 ⭐</div>
-          <div class="change-btn">Изменить</div>
+      <div class="gift-card" id="sourceCard" onclick="openSourceSheet()">
+        <span class="card-label">Твой вклад</span>
+        <div class="gift-artwork-box" id="sourceArtBox">
+          <span class="gift-emoji" id="sourceEmoji">⭐</span>
         </div>
+        <div class="gift-title" id="sourceTitle">50 Звёзд</div>
+        <div class="gift-stars">
+          <span>⭐</span>
+          <span id="sourceStars">50</span>
+        </div>
+        <span class="card-change-hint">Изменить ▾</span>
       </div>
 
-      <div class="grid-center-arrow">➜</div>
+      <!-- Arrow -->
+      <div class="upgrade-arrow-badge">➜</div>
 
       <!-- Target Card -->
-      <div class="upgrade-card" id="targetCard" onclick="openTargetSheet()">
-        <div class="card-label">Цель апгрейда</div>
-        <img id="tgtImg" class="gift-preview-img" src="gifts/5226539835577100016.webp" alt="Target">
-        <div>
-          <div class="gift-name" id="tgtTitle">Candy Cane</div>
-          <div class="gift-price" id="tgtStars">100 ⭐</div>
-          <div class="change-btn">Выбрать</div>
+      <div class="gift-card" id="targetCard" onclick="openTargetSheet()">
+        <span class="card-label">Цель апгрейда</span>
+        <div class="gift-artwork-box" id="targetArtBox">
+          <span class="gift-emoji" id="targetEmoji">🐸</span>
         </div>
+        <div class="gift-title" id="targetTitle">Plush Pepe NFT</div>
+        <div class="gift-stars">
+          <span>⭐</span>
+          <span id="targetStars">2,000</span>
+        </div>
+        <span class="card-change-hint">Изменить ▾</span>
       </div>
     </div>
 
-    <!-- Circular Spinner Wheel -->
+    <!-- Wheel Section -->
     <div class="wheel-section">
       <div class="wheel-container">
-        <div class="wheel-pointer">
-          <svg viewBox="0 0 24 24"><polygon points="12,24 0,0 24,0"/></svg>
-        </div>
-        <canvas id="wheelCanvas" class="wheel-canvas" width="560" height="560"></canvas>
-        <div class="wheel-center-hub">
-          <div class="hub-chance" id="hubChance">47.5%</div>
-          <div class="hub-label">Шанс победы</div>
-          <div class="hub-multiplier" id="hubMult">2.0x</div>
+        <div class="wheel-pointer"></div>
+        <canvas class="wheel-canvas" id="wheelCanvas" width="520" height="520"></canvas>
+        <div class="wheel-center-cap">
+          <div class="wheel-chance-val" id="wheelChanceVal">2.4%</div>
+          <div class="wheel-chance-lbl">Шанс победы</div>
         </div>
       </div>
     </div>
 
-    <!-- Main Action Button -->
-    <button class="action-btn" id="spinBtn" onclick="startUpgrade()">
-      <span>🎰</span>
-      <span id="spinBtnText">Улучшить за 50 ⭐</span>
-    </button>
+    <!-- Controls -->
+    <div class="controls-wrapper">
+      <button class="spin-btn" id="spinBtn" onclick="startUpgrade()">
+        <span>🎰</span>
+        <span id="spinBtnText">Улучшить подарок</span>
+      </button>
+    </div>
+
   </div>
 
-  <!-- Source Selection Sheet -->
-  <div class="sheet-overlay" id="sourceSheet">
-    <div class="sheet-content">
-      <div class="sheet-handle"></div>
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <!-- Source Sheet Modal -->
+  <div class="modal-overlay" id="sourceModal" onclick="closeModal(event, 'sourceModal')">
+    <div class="sheet-modal">
       <div class="sheet-header">
-        <div class="sheet-title">Выберите подарок или Звёзды ⭐</div>
-        <button class="sheet-close" onclick="closeSheets()">✕</button>
+        <h3 class="sheet-title">Выбери вклад для апгрейда</h3>
+        <button class="sheet-close" onclick="closeSheet('sourceModal')">✕</button>
       </div>
 
-      <div class="card-label" style="text-align: left; margin-bottom: 0;">Быстрый выбор Звёзд ⭐:</div>
-      <div class="star-presets">
-        <div class="preset-chip active" onclick="selectStarPreset(25)">25 ⭐</div>
-        <div class="preset-chip" onclick="selectStarPreset(50)">50 ⭐</div>
-        <div class="preset-chip" onclick="selectStarPreset(100)">100 ⭐</div>
-        <div class="preset-chip" onclick="selectStarPreset(250)">250 ⭐</div>
-        <div class="preset-chip" onclick="selectStarPreset(500)">500 ⭐</div>
-        <div class="preset-chip" onclick="selectStarPreset(1000)">1000 ⭐</div>
+      <div class="card-label" style="margin-bottom: 8px;">Быстрый выбор звёзд ⭐</div>
+      <div class="quick-chips-grid">
+        <div class="quick-chip" onclick="selectStarsSource(25)">25 ⭐</div>
+        <div class="quick-chip" onclick="selectStarsSource(50)">50 ⭐</div>
+        <div class="quick-chip" onclick="selectStarsSource(100)">100 ⭐</div>
+        <div class="quick-chip" onclick="selectStarsSource(250)">250 ⭐</div>
+        <div class="quick-chip" onclick="selectStarsSource(500)">500 ⭐</div>
+        <div class="quick-chip" onclick="selectStarsSource(1000)">1,000 ⭐</div>
+        <div class="quick-chip" onclick="selectStarsSource(2500)">2,500 ⭐</div>
+        <div class="quick-chip" onclick="selectStarsSource(5000)">5,000 ⭐</div>
       </div>
 
-      <div class="card-label" style="text-align: left; margin-bottom: 0;">Подарки из вашего профиля:</div>
-      <div class="catalog-list" id="userGiftsList">
-        <div style="grid-column: 1/-1; color: var(--text-secondary); font-size: 13px; padding: 20px 0; text-align: center;">
-          У вас пока нет подарков в профиле.<br>Вы можете крутить за Звёзды ⭐ выше!
+      <div class="card-label" style="margin-bottom: 8px;">Подарки из вашего профиля</div>
+      <div class="sheet-content">
+        <div class="items-grid" id="userGiftsGrid">
+          <div class="empty-state">У вас пока нет подарков для улучшения</div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Target Selection Sheet -->
-  <div class="sheet-overlay" id="targetSheet">
-    <div class="sheet-content">
-      <div class="sheet-handle"></div>
+  <!-- Target Sheet Modal -->
+  <div class="modal-overlay" id="targetModal" onclick="closeModal(event, 'targetModal')">
+    <div class="sheet-modal">
       <div class="sheet-header">
-        <div class="sheet-title">Выберите желаемый подарок</div>
-        <button class="sheet-close" onclick="closeSheets()">✕</button>
+        <h3 class="sheet-title">Выбери желаемый подарок</h3>
+        <button class="sheet-close" onclick="closeSheet('targetModal')">✕</button>
       </div>
-      <div class="catalog-list" id="targetCatalogList">
-        <!-- Loaded via API -->
+
+      <div class="sheet-tabs">
+        <button class="sheet-tab active" id="tabNft" onclick="switchTargetTab('nft')">💎 Уникальные NFT</button>
+        <button class="sheet-tab" id="tabCatalog" onclick="switchTargetTab('catalog')">⚡ Все подарки</button>
+      </div>
+
+      <div class="sheet-content">
+        <div class="items-grid" id="catalogGiftsGrid"></div>
       </div>
     </div>
   </div>
 
-  <!-- Win / Lose Result Modal -->
-  <div class="result-overlay" id="resultModal">
-    <div class="result-card">
-      <img id="resImg" class="result-img" src="" alt="Result">
-      <div id="resBadge" class="result-badge win">УСПЕХ!</div>
-      <div id="resTitle" class="result-title">Вы выиграли!</div>
-      <div id="resDesc" class="result-desc">Подарок успешно добавлен в ваш профиль NerfGram.</div>
-      <button class="result-btn" onclick="closeResultModal()">Продолжить</button>
+  <!-- Win Modal -->
+  <div class="win-modal-overlay" id="winModal">
+    <div class="win-modal-box">
+      <h2 class="win-title">🎉 ПОБЕДА!</h2>
+      <p class="win-subtitle">Подарок успешно отправлен в ваш профиль!</p>
+      
+      <div class="win-artwork-large" id="winArtBox">
+        <span class="gift-emoji" id="winEmoji">🐸</span>
+      </div>
+
+      <div class="win-item-name" id="winItemName">Plush Pepe NFT</div>
+      <div class="win-item-stars" id="winItemStars">⭐ 2,000</div>
+
+      <button class="win-claim-btn" onclick="closeWinModal()">Забрать подарок</button>
     </div>
   </div>
 
   <script>
-    // Telegram WebApp Initialization
-    const tg = window.Telegram?.WebApp;
+    // Audio synthesis
+    const AudioEngine = {
+      ctx: null,
+      init() {
+        if (!this.ctx) {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          this.ctx = new AudioContext();
+        }
+        if (this.ctx.state === 'suspended') {
+          this.ctx.resume();
+        }
+      },
+      tick() {
+        if (!this.ctx) return;
+        try {
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(320, this.ctx.currentTime);
+          osc.frequency.exponentialRampToValueAtTime(120, this.ctx.currentTime + 0.04);
+          gain.gain.setValueAtTime(0.12, this.ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.04);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start();
+          osc.stop(this.ctx.currentTime + 0.04);
+        } catch(e) {}
+      },
+      win() {
+        if (!this.ctx) return;
+        try {
+          const freqs = [523.25, 659.25, 783.99, 1046.50];
+          freqs.forEach((f, i) => {
+            const osc = this.ctx.createOscillator();
+            const gain = this.ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = f;
+            const startTime = this.ctx.currentTime + (i * 0.09);
+            gain.gain.setValueAtTime(0.2, startTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.4);
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.start(startTime);
+            osc.stop(startTime + 0.4);
+          });
+        } catch(e) {}
+      }
+    };
+
+    // State
+    const tg = window.Telegram ? window.Telegram.WebApp : null;
+    let currentUser = { id: 0, first_name: "Игрок", stars: 0, gifts: [] };
+    let catalog = [];
+    let currentTab = 'nft';
+
+    let currentSource = {
+      type: 'stars',
+      stars: 50,
+      title: '50 Звёзд',
+      peer_gift_id: 0,
+      icon: '⭐',
+      bg_center: '#ffb300',
+      bg_edge: '#e65100',
+      is_nft: false
+    };
+
+    let currentTarget = {
+      id: 9000000000000156,
+      title: 'Plush Pepe NFT',
+      base_title: 'Plush Pepe',
+      stars: 2000,
+      is_nft: true,
+      icon: '🐸',
+      bg_center: '#363738',
+      bg_edge: '#0e0f0f',
+      model_name: 'Fifty Shades'
+    };
+
+    let isSpinning = false;
+    let currentWheelAngle = 0; // in degrees
+
+    // Init Telegram WebApp
     if (tg) {
       try {
         tg.ready();
         tg.expand();
-        tg.setHeaderColor('#000000');
-        tg.setBackgroundColor('#000000');
-      } catch(e){}
+      } catch (e) {}
     }
 
-    // Resolve Current User from WebApp, URL params, or Hash
-    function resolveUser() {
-      // 1. From Telegram WebApp
-      if (tg?.initDataUnsafe?.user?.id) {
-        return tg.initDataUnsafe.user;
-      }
-      // 2. From hash tgWebAppData
-      if (window.location.hash) {
-        try {
-          const hashParams = new URLSearchParams(window.location.hash.substring(1));
-          const appData = hashParams.get('tgWebAppData');
-          if (appData) {
-            const parsed = new URLSearchParams(appData);
-            const userStr = parsed.get('user');
-            if (userStr) return JSON.parse(userStr);
-          }
-        } catch(e){}
-      }
-      // 3. From URL query params ?user_id=123&name=...
+    // Resolve User ID
+    function getResolvedUserID() {
       const urlParams = new URLSearchParams(window.location.search);
-      const uid = urlParams.get('user_id') || urlParams.get('uid');
-      if (uid) {
-        return {
-          id: parseInt(uid, 10),
-          first_name: urlParams.get('name') || urlParams.get('first_name') || "Игрок"
-        };
+      const qUser = urlParams.get('user_id');
+      if (qUser && parseInt(qUser) > 0) return parseInt(qUser);
+
+      if (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) {
+        return tg.initDataUnsafe.user.id;
       }
-      // 4. Default fallback
-      return { id: 1780243200, first_name: "Игрок" };
+
+      const hash = window.location.hash.slice(1);
+      if (hash) {
+        const hashParams = new URLSearchParams(hash);
+        const tgData = hashParams.get('tgWebAppData');
+        if (tgData) {
+          const innerParams = new URLSearchParams(tgData);
+          const rawUser = innerParams.get('user');
+          if (rawUser) {
+            try {
+              const parsed = JSON.parse(rawUser);
+              if (parsed && parsed.id) return parsed.id;
+            } catch(e) {}
+          }
+        }
+      }
+
+      return 1780243200; // Default fallback account
     }
 
-    const currentUser = resolveUser();
-    document.getElementById('userName').textContent = currentUser.first_name || "Игрок";
-
-    function showToast(text) {
+    // Toast
+    function showToast(msg, isError = false) {
       const t = document.getElementById('toast');
-      t.textContent = text;
-      t.classList.add('active');
-      setTimeout(() => t.classList.remove('active'), 3200);
+      t.textContent = msg;
+      t.className = 'toast show' + (isError ? ' error' : '');
+      setTimeout(() => {
+        t.className = 'toast';
+      }, 3500);
     }
 
-    // Audio synthesizer via Web Audio API
-    let audioCtx = null;
-    function initAudio() {
-      if (!audioCtx) {
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      }
-    }
-
-    function playTick() {
-      if (!audioCtx) return;
-      try {
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.setValueAtTime(440, audioCtx.currentTime);
-        osc.frequency.exponentialRampToValueAtTime(120, audioCtx.currentTime + 0.04);
-        gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.04);
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start();
-        osc.stop(audioCtx.currentTime + 0.04);
-      } catch(e){}
-    }
-
-    function playWinSound() {
-      if (!audioCtx) return;
-      try {
-        const notes = [523.25, 659.25, 783.99, 1046.50];
-        notes.forEach((freq, i) => {
-          const osc = audioCtx.createOscillator();
-          const gain = audioCtx.createGain();
-          osc.type = 'sine';
-          osc.frequency.setValueAtTime(freq, audioCtx.currentTime + i * 0.08);
-          gain.gain.setValueAtTime(0.2, audioCtx.currentTime + i * 0.08);
-          gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i * 0.08 + 0.4);
-          osc.connect(gain);
-          gain.connect(audioCtx.destination);
-          osc.start(audioCtx.currentTime + i * 0.08);
-          osc.stop(audioCtx.currentTime + i * 0.08 + 0.45);
-        });
-      } catch(e){}
-    }
-
-    // State
-    let catalog = [];
-    let userGifts = [];
-    let currentSource = { type: 'stars', stars: 50, title: '50 Звёзд ⭐', img: 'gifts/5226539835577100016.webp', peer_gift_id: 0 };
-    let currentTarget = { id: 1, title: 'Candy Cane', stars: 100, img: 'gifts/5226539835577100016.webp' };
-    let isSpinning = false;
-    let currentWheelRotation = 0;
-
-    async function loadData() {
-      try {
-        const catRes = await fetch('/api/catalog');
-        if (catRes.ok) {
-          const list = await catRes.json();
-          if (list && list.length > 0) {
-            catalog = list.map((g) => ({
-              id: g.id,
-              title: g.title,
-              stars: g.stars,
-              convert_stars: g.convert_stars,
-              img: g.image || 'gifts/5226539835577100016.webp'
-            }));
-          }
-        }
-      } catch(e){}
-
-      try {
-        const uRes = await fetch(`/api/user-data?user_id=${currentUser.id}`);
-        if (uRes.ok) {
-          const uData = await uRes.json();
-          userGifts = (uData.gifts || []).map(g => ({
-            ...g,
-            img: g.image || 'gifts/5226539835577100016.webp'
-          }));
-          if (uData.first_name) {
-            document.getElementById('userName').textContent = uData.first_name;
-          }
-          if (uData.stars !== undefined) {
-            document.getElementById('userStars').textContent = `${uData.stars.toLocaleString()} ⭐`;
-          }
-        }
-      } catch(e){}
-
-      // Set default target if not set
-      if (!currentTarget || currentTarget.stars <= currentSource.stars) {
-        currentTarget = catalog.find(g => g.stars > currentSource.stars) || catalog[catalog.length - 1] || currentTarget;
-      }
-      updateUI();
-      renderTargetCatalog();
-      renderUserGifts();
-    }
-
-    function calculateChance() {
+    // Calculate Chance
+    function getWinChance() {
       const src = currentSource.stars;
       const tgt = currentTarget.stars;
-      if (src >= tgt) return 95.0;
+      if (tgt <= src) return 95.0;
       const ratio = (src / tgt) * 0.95;
-      return Math.min(95.0, Math.max(1.0, +(ratio * 100).toFixed(1)));
+      return Math.min(95.0, Math.max(1.0, ratio * 100.0));
     }
 
-    function updateUI() {
-      document.getElementById('srcImg').src = currentSource.img;
-      document.getElementById('srcTitle').textContent = currentSource.title;
-      document.getElementById('srcStars').textContent = `${currentSource.stars} ⭐`;
-
-      document.getElementById('tgtImg').src = currentTarget.img;
-      document.getElementById('tgtTitle').textContent = currentTarget.title;
-      document.getElementById('tgtStars').textContent = `${currentTarget.stars} ⭐`;
-
-      const chance = calculateChance();
-      const mult = (currentTarget.stars / currentSource.stars).toFixed(1);
-      document.getElementById('hubChance').textContent = `${chance}%`;
-      document.getElementById('hubMult').textContent = `${mult}x`;
-
-      const btnText = currentSource.type === 'gift' 
-        ? `Улучшить подарок (${currentSource.stars} ⭐)` 
-        : `Улучшить за ${currentSource.stars} ⭐`;
-      document.getElementById('spinBtnText').textContent = btnText;
-
-      drawWheel(chance, currentWheelRotation);
-    }
-
-    function drawWheel(chancePercent, rotationDeg = 0) {
+    // Draw Wheel
+    function drawWheel() {
       const canvas = document.getElementById('wheelCanvas');
       const ctx = canvas.getContext('2d');
-      const w = canvas.width;
-      const h = canvas.height;
-      const center = w / 2;
-      const radius = center - 16;
+      const size = canvas.width;
+      const center = size / 2;
+      const radius = center - 8;
 
-      ctx.clearRect(0, 0, w, h);
+      ctx.clearRect(0, 0, size, size);
 
-      const winAngle = (chancePercent / 100) * 2 * Math.PI;
-      const rotRad = (rotationDeg * Math.PI) / 180;
+      const chance = getWinChance();
+      const winAngleRad = (chance / 100.0) * (2 * Math.PI);
+      const rotRad = (currentWheelAngle * Math.PI) / 180.0;
 
       ctx.save();
       ctx.translate(center, center);
       ctx.rotate(rotRad);
-      ctx.translate(-center, -center);
 
-      // 1. Lose Sector (Dark Grey)
+      // 1. Loss segment
       ctx.beginPath();
-      ctx.moveTo(center, center);
-      ctx.arc(center, center, radius, winAngle, 2 * Math.PI);
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, radius, winAngleRad, 2 * Math.PI);
       ctx.closePath();
-      ctx.fillStyle = '#2C2C2E';
+      const lossGrad = ctx.createRadialGradient(0, 0, 40, 0, 0, radius);
+      lossGrad.addColorStop(0, '#3a1414');
+      lossGrad.addColorStop(1, '#ff3b30');
+      ctx.fillStyle = lossGrad;
       ctx.fill();
 
-      // 2. Win Sector (Vibrant Apple Green)
+      // 2. Win segment
       ctx.beginPath();
-      ctx.moveTo(center, center);
-      ctx.arc(center, center, radius, 0, winAngle);
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, radius, 0, winAngleRad);
       ctx.closePath();
-      const greenGrad = ctx.createRadialGradient(center, center, radius * 0.4, center, center, radius);
-      greenGrad.addColorStop(0, '#34C759');
-      greenGrad.addColorStop(1, '#30D158');
-      ctx.fillStyle = greenGrad;
+      const winGrad = ctx.createRadialGradient(0, 0, 40, 0, 0, radius);
+      winGrad.addColorStop(0, '#10381e');
+      winGrad.addColorStop(1, '#34c759');
+      ctx.fillStyle = winGrad;
       ctx.fill();
 
-      // Glowing outer rim
+      // Outer Ring
       ctx.beginPath();
-      ctx.arc(center, center, radius, 0, 2 * Math.PI);
+      ctx.arc(0, 0, radius, 0, 2 * Math.PI);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
       ctx.lineWidth = 6;
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
       ctx.stroke();
 
       ctx.restore();
+
+      // Update Center Cap
+      document.getElementById('wheelChanceVal').textContent = `${chance.toFixed(1)}%`;
     }
 
+    // Update UI Cards
+    function updateCards() {
+      // Source
+      document.getElementById('sourceTitle').textContent = currentSource.title;
+      document.getElementById('sourceStars').textContent = currentSource.stars.toLocaleString();
+      document.getElementById('sourceEmoji').textContent = currentSource.icon;
+      
+      const sBox = document.getElementById('sourceArtBox');
+      sBox.style.background = `radial-gradient(circle at 35% 35%, ${currentSource.bg_center}, ${currentSource.bg_edge})`;
+
+      // Remove existing pills
+      sBox.querySelectorAll('.nft-pill, .model-pill').forEach(el => el.remove());
+      if (currentSource.is_nft) {
+        const nftPill = document.createElement('div');
+        nftPill.className = 'nft-pill';
+        nftPill.textContent = `NFT #${currentSource.num || ''}`;
+        sBox.appendChild(nftPill);
+
+        if (currentSource.model_name) {
+          const mPill = document.createElement('div');
+          mPill.className = 'model-pill';
+          mPill.textContent = currentSource.model_name;
+          sBox.appendChild(mPill);
+        }
+        document.getElementById('sourceCard').classList.add('nft-card');
+      } else {
+        document.getElementById('sourceCard').classList.remove('nft-card');
+      }
+
+      // Target
+      document.getElementById('targetTitle').textContent = currentTarget.title;
+      document.getElementById('targetStars').textContent = currentTarget.stars.toLocaleString();
+      document.getElementById('targetEmoji').textContent = currentTarget.icon;
+      
+      const tBox = document.getElementById('targetArtBox');
+      tBox.style.background = `radial-gradient(circle at 35% 35%, ${currentTarget.bg_center}, ${currentTarget.bg_edge})`;
+
+      tBox.querySelectorAll('.nft-pill, .model-pill').forEach(el => el.remove());
+      if (currentTarget.is_nft) {
+        const nftPill = document.createElement('div');
+        nftPill.className = 'nft-pill';
+        nftPill.textContent = 'NFT';
+        tBox.appendChild(nftPill);
+
+        if (currentTarget.model_name) {
+          const mPill = document.createElement('div');
+          mPill.className = 'model-pill';
+          mPill.textContent = currentTarget.model_name;
+          tBox.appendChild(mPill);
+        }
+        document.getElementById('targetCard').classList.add('nft-card');
+      } else {
+        document.getElementById('targetCard').classList.remove('nft-card');
+      }
+
+      drawWheel();
+    }
+
+    // Load Data
+    async function loadData() {
+      const uid = getResolvedUserID();
+      try {
+        const [uRes, cRes] = await Promise.all([
+          fetch(`/api/user-data?user_id=${uid}`).then(r => r.json()),
+          fetch(`/api/catalog`).then(r => r.json())
+        ]);
+
+        currentUser = uRes;
+        catalog = cRes;
+
+        // Populate User Info
+        document.getElementById('userName').textContent = currentUser.first_name || 'Игрок';
+        document.getElementById('userAvatar').textContent = (currentUser.first_name || 'U')[0].toUpperCase();
+        document.getElementById('userStars').textContent = (currentUser.stars || 0).toLocaleString();
+
+        renderUserGifts();
+        renderCatalogGifts();
+        updateCards();
+
+      } catch (err) {
+        console.error("Failed to load data:", err);
+        showToast("Ошибка соединения с сервером", true);
+      }
+    }
+
+    // Render User Inventory Gifts
+    function renderUserGifts() {
+      const grid = document.getElementById('userGiftsGrid');
+      grid.innerHTML = '';
+
+      if (!currentUser.gifts || currentUser.gifts.length === 0) {
+        grid.innerHTML = '<div class="empty-state">В профиле пока нет подарков для улучшения.<br>Используйте звёзды ⭐ выше!</div>';
+        return;
+      }
+
+      currentUser.gifts.forEach(g => {
+        const card = document.createElement('div');
+        card.className = 'sheet-item-card' + (g.is_nft ? ' nft-item' : '');
+        
+        let pillsHtml = '';
+        if (g.is_nft) {
+          pillsHtml = `<div class="nft-pill">NFT #${g.num}</div>`;
+          if (g.model_name) {
+            pillsHtml += `<div class="model-pill">${g.model_name}</div>`;
+          }
+        }
+
+        card.innerHTML = `
+          <div class="gift-artwork-box" style="width: 72px; height: 72px; background: radial-gradient(circle at 35% 35%, ${g.bg_center}, ${g.bg_edge})">
+            ${pillsHtml}
+            <span class="gift-emoji" style="font-size: 38px;">${g.icon}</span>
+          </div>
+          <div class="gift-title" style="font-size: 12px; margin-top: 4px;">${g.title}</div>
+          <div class="gift-stars" style="font-size: 12px;">⭐ ${g.stars.toLocaleString()}</div>
+        `;
+
+        card.onclick = () => selectGiftSource(g);
+        grid.appendChild(card);
+      });
+    }
+
+    // Render Target Catalog
+    function renderCatalogGifts() {
+      const grid = document.getElementById('catalogGiftsGrid');
+      grid.innerHTML = '';
+
+      const items = catalog.filter(item => {
+        if (currentTab === 'nft') return item.is_nft;
+        return !item.is_nft;
+      });
+
+      items.forEach(item => {
+        const card = document.createElement('div');
+        card.className = 'sheet-item-card' + (item.is_nft ? ' nft-item' : '');
+
+        let pillsHtml = '';
+        if (item.is_nft) {
+          pillsHtml = `<div class="nft-pill">NFT</div>`;
+          if (item.model_name) {
+            pillsHtml += `<div class="model-pill">${item.model_name}</div>`;
+          }
+        }
+
+        card.innerHTML = `
+          <div class="gift-artwork-box" style="width: 72px; height: 72px; background: radial-gradient(circle at 35% 35%, ${item.bg_center}, ${item.bg_edge})">
+            ${pillsHtml}
+            <span class="gift-emoji" style="font-size: 38px;">${item.icon}</span>
+          </div>
+          <div class="gift-title" style="font-size: 12px; margin-top: 4px;">${item.title}</div>
+          <div class="gift-stars" style="font-size: 12px;">⭐ ${item.stars.toLocaleString()}</div>
+        `;
+
+        card.onclick = () => selectTarget(item);
+        grid.appendChild(card);
+      });
+    }
+
+    function switchTargetTab(tab) {
+      currentTab = tab;
+      document.getElementById('tabNft').className = 'sheet-tab' + (tab === 'nft' ? ' active' : '');
+      document.getElementById('tabCatalog').className = 'sheet-tab' + (tab === 'catalog' ? ' active' : '');
+      renderCatalogGifts();
+    }
+
+    // Selection Handlers
+    function selectStarsSource(amount) {
+      currentSource = {
+        type: 'stars',
+        stars: amount,
+        title: `${amount} Звёзд`,
+        peer_gift_id: 0,
+        icon: '⭐',
+        bg_center: '#ffb300',
+        bg_edge: '#e65100',
+        is_nft: false
+      };
+      closeSheet('sourceModal');
+      updateCards();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+    }
+
+    function selectGiftSource(g) {
+      currentSource = {
+        type: 'gift',
+        stars: g.stars,
+        title: g.title,
+        peer_gift_id: g.peer_gift_id,
+        icon: g.icon,
+        bg_center: g.bg_center,
+        bg_edge: g.bg_edge,
+        is_nft: g.is_nft,
+        num: g.num,
+        model_name: g.model_name
+      };
+      closeSheet('sourceModal');
+      updateCards();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+    }
+
+    function selectTarget(item) {
+      currentTarget = {
+        id: item.id,
+        title: item.title,
+        base_title: item.base_title || item.title,
+        stars: item.stars,
+        is_nft: item.is_nft,
+        icon: item.icon,
+        bg_center: item.bg_center,
+        bg_edge: item.bg_edge,
+        model_name: item.model_name
+      };
+      closeSheet('targetModal');
+      updateCards();
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.selectionChanged();
+    }
+
+    // Modal Sheet Helpers
     function openSourceSheet() {
       if (isSpinning) return;
-      document.getElementById('sourceSheet').classList.add('active');
+      document.getElementById('sourceModal').classList.add('open');
     }
 
     function openTargetSheet() {
       if (isSpinning) return;
-      document.getElementById('targetSheet').classList.add('active');
+      document.getElementById('targetModal').classList.add('open');
     }
 
-    function closeSheets() {
-      document.getElementById('sourceSheet').classList.remove('active');
-      document.getElementById('targetSheet').classList.remove('active');
+    function closeSheet(id) {
+      document.getElementById(id).classList.remove('open');
     }
 
-    function selectStarPreset(stars) {
-      currentSource = {
-        type: 'stars',
-        stars: stars,
-        title: `${stars} Звёзд ⭐`,
-        img: 'gifts/5226539835577100016.webp',
-        peer_gift_id: 0
-      };
-      document.querySelectorAll('.preset-chip').forEach(c => {
-        c.classList.toggle('active', c.textContent.includes(stars));
-      });
-      if (currentTarget.stars <= currentSource.stars) {
-        currentTarget = catalog.find(g => g.stars > currentSource.stars) || catalog[catalog.length - 1];
-      }
-      closeSheets();
-      updateUI();
+    function closeModal(e, id) {
+      if (e.target.id === id) closeSheet(id);
     }
 
-    function selectUserGift(gift) {
-      currentSource = {
-        type: 'gift',
-        stars: gift.stars,
-        title: gift.title,
-        img: gift.img,
-        peer_gift_id: gift.peer_gift_id
-      };
-      if (currentTarget.stars <= currentSource.stars) {
-        currentTarget = catalog.find(g => g.stars > currentSource.stars) || catalog[catalog.length - 1];
-      }
-      closeSheets();
-      updateUI();
-    }
-
-    function selectTargetGift(gift) {
-      if (gift.stars <= currentSource.stars) {
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
-        showToast('Цель должна быть дороже вашего вклада!');
-        return;
-      }
-      currentTarget = gift;
-      closeSheets();
-      updateUI();
-    }
-
-    function renderTargetCatalog() {
-      const list = document.getElementById('targetCatalogList');
-      list.innerHTML = '';
-      catalog.forEach(g => {
-        const item = document.createElement('div');
-        item.className = `catalog-item ${currentTarget.id === g.id ? 'active' : ''}`;
-        item.onclick = () => selectTargetGift(g);
-        item.innerHTML = `
-          <img src="${g.img}" class="catalog-img" alt="${g.title}">
-          <div class="catalog-title">${g.title}</div>
-          <div class="catalog-cost">${g.stars} ⭐</div>
-        `;
-        list.appendChild(item);
-      });
-    }
-
-    function renderUserGifts() {
-      const list = document.getElementById('userGiftsList');
-      if (!userGifts || userGifts.length === 0) {
-        list.innerHTML = `
-          <div style="grid-column: 1/-1; color: var(--text-secondary); font-size: 13px; padding: 20px 0; text-align: center;">
-            У вас пока нет доступных подарков в профиле.<br>Вы можете крутить за Звёзды ⭐ выше!
-          </div>
-        `;
-        return;
-      }
-      list.innerHTML = '';
-      userGifts.forEach((g) => {
-        const item = document.createElement('div');
-        item.className = 'catalog-item';
-        item.onclick = () => selectUserGift(g);
-        item.innerHTML = `
-          <img src="${g.img}" class="catalog-img" alt="${g.title}">
-          <div class="catalog-title">${g.title}</div>
-          <div class="catalog-cost">${g.stars} ⭐</div>
-        `;
-        list.appendChild(item);
-      });
-    }
-
+    // Upgrade Action
     async function startUpgrade() {
       if (isSpinning) return;
-      initAudio();
 
-      if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+      if (currentTarget.stars <= currentSource.stars) {
+        showToast("Цель должна быть дороже вашего вклада!", true);
+        return;
+      }
 
+      if (currentSource.type === 'stars' && currentUser.stars < currentSource.stars) {
+        showToast(`Недостаточно звёзд на балансе (нужно ${currentSource.stars} ⭐)`, true);
+        return;
+      }
+
+      AudioEngine.init();
       isSpinning = true;
       document.getElementById('spinBtn').disabled = true;
+      document.getElementById('spinBtnText').textContent = "Вращение...";
 
       try {
         const payload = {
-          user_id: currentUser.id,
+          user_id: currentUser.user_id,
           source_peer_gift_id: currentSource.peer_gift_id || 0,
           source_stars: currentSource.stars,
           target_gift_id: currentTarget.id,
+          target_is_nft: currentTarget.is_nft,
           target_stars: currentTarget.stars,
           target_title: currentTarget.title
         };
@@ -1065,94 +1273,122 @@
 
         const data = await res.json();
         if (!data.success) {
-          throw new Error(data.error || 'Ошибка апгрейда');
+          showToast(data.error || "Ошибка проведения апгрейда", true);
+          isSpinning = false;
+          document.getElementById('spinBtn').disabled = false;
+          document.getElementById('spinBtnText').textContent = "Улучшить подарок";
+          return;
         }
 
-        // Animate the wheel with spring deceleration
-        const fullSpins = 5 + Math.floor(Math.random() * 3);
-        const targetStopAngle = data.stop_angle;
-        const totalDelta = (fullSpins * 360) + (360 - targetStopAngle);
-        const startRotation = currentWheelRotation;
-        const finalRotation = startRotation + totalDelta;
+        // Pointer is at TOP (270 degrees in canvas space)
+        // Wheel must rotate so that stop_angle lands at 270 deg
+        const targetLanding = (270 - data.stop_angle + 360) % 360;
+        const totalRotations = 5 * 360; // 5 full spins
+        const finalAngle = totalRotations + targetLanding;
 
-        const duration = 4200; // 4.2s Apple deceleration
-        const startTime = performance.now();
-        let lastTickAngle = 0;
+        animateWheel(finalAngle, 4500, () => {
+          isSpinning = false;
+          document.getElementById('spinBtn').disabled = false;
+          document.getElementById('spinBtnText').textContent = "Улучшить подарок";
 
-        function animate(now) {
-          const elapsed = now - startTime;
-          const progress = Math.min(1, elapsed / duration);
-          // Ease out cubic
-          const easeOut = 1 - Math.pow(1 - progress, 3);
-          const currentRot = startRotation + totalDelta * easeOut;
+          // Update balance
+          currentUser.stars = data.new_balance;
+          document.getElementById('userStars').textContent = data.new_balance.toLocaleString();
 
-          // Sound tick every 30 degrees
-          if (Math.abs(currentRot - lastTickAngle) >= 30) {
-            playTick();
-            lastTickAngle = currentRot;
-          }
-
-          drawWheel(data.win_chance, currentRot);
-
-          if (progress < 1) {
-            requestAnimationFrame(animate);
+          if (data.is_win) {
+            AudioEngine.win();
+            if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+            openWinModal(data.won_gift || currentTarget);
           } else {
-            currentWheelRotation = finalRotation % 360;
-            if (data.new_balance !== undefined) {
-              document.getElementById('userStars').textContent = `${data.new_balance.toLocaleString()} ⭐`;
-            }
-            finishUpgrade(data.is_win);
+            if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+            showToast("Не повезло! Попробуйте снова");
           }
-        }
 
-        requestAnimationFrame(animate);
+          // Reload fresh profile data
+          loadData();
+        });
 
-      } catch(e) {
-        console.error(e);
+      } catch (err) {
+        console.error("Upgrade error:", err);
+        showToast("Ошибка сети при проведении апгрейда", true);
         isSpinning = false;
         document.getElementById('spinBtn').disabled = false;
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
-        showToast(e.message || 'Ошибка соединения');
+        document.getElementById('spinBtnText').textContent = "Улучшить подарок";
       }
     }
 
-    function finishUpgrade(isWin) {
-      isSpinning = false;
-      document.getElementById('spinBtn').disabled = false;
+    // Wheel Animation with Apple-grade Easing
+    function animateWheel(targetAngle, duration, callback) {
+      const startAngle = currentWheelAngle % 360;
+      const change = targetAngle - startAngle;
+      const startTime = performance.now();
+      let lastTickAngle = startAngle;
 
-      const modal = document.getElementById('resultModal');
-      const img = document.getElementById('resImg');
-      const badge = document.getElementById('resBadge');
-      const title = document.getElementById('resTitle');
-      const desc = document.getElementById('resDesc');
-
-      if (isWin) {
-        playWinSound();
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-        img.src = currentTarget.img;
-        badge.className = 'result-badge win';
-        badge.textContent = 'ПОБЕДА!';
-        title.textContent = `Вы получили ${currentTarget.title}!`;
-        desc.textContent = `Подарок стоимостью ${currentTarget.stars} ⭐ успешно добавлен в ваш профиль NerfGram!`;
-      } else {
-        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
-        img.src = currentSource.img;
-        badge.className = 'result-badge lose';
-        badge.textContent = 'НЕ ПОВЕЗЛО';
-        title.textContent = 'Попробуйте ещё раз';
-        desc.textContent = 'Стрелка остановилась в сером секторе. Попробуйте выбрать подарок с большим шансом победы.';
+      function cubicEaseOut(t) {
+        return --t * t * t + 1;
       }
 
-      modal.classList.add('active');
+      function step(now) {
+        const elapsed = now - startTime;
+        const progress = Math.min(1, elapsed / duration);
+        const eased = cubicEaseOut(progress);
+
+        currentWheelAngle = startAngle + (change * eased);
+        drawWheel();
+
+        // Audio tick every 20 degrees
+        if (Math.abs(currentWheelAngle - lastTickAngle) >= 20) {
+          AudioEngine.tick();
+          lastTickAngle = currentWheelAngle;
+        }
+
+        if (progress < 1) {
+          requestAnimationFrame(step);
+        } else {
+          currentWheelAngle = targetAngle % 360;
+          drawWheel();
+          if (callback) callback();
+        }
+      }
+
+      requestAnimationFrame(step);
     }
 
-    function closeResultModal() {
-      document.getElementById('resultModal').classList.remove('active');
+    // Win Modal
+    function openWinModal(gift) {
+      document.getElementById('winItemName').textContent = gift.title;
+      document.getElementById('winItemStars').textContent = `⭐ ${gift.stars ? gift.stars.toLocaleString() : currentTarget.stars.toLocaleString()}`;
+      document.getElementById('winEmoji').textContent = gift.icon || currentTarget.icon;
+
+      const wBox = document.getElementById('winArtBox');
+      wBox.style.background = `radial-gradient(circle at 35% 35%, ${gift.bg_center || currentTarget.bg_center}, ${gift.bg_edge || currentTarget.bg_edge})`;
+
+      wBox.querySelectorAll('.nft-pill, .model-pill').forEach(el => el.remove());
+      if (gift.is_nft) {
+        const nftPill = document.createElement('div');
+        nftPill.className = 'nft-pill';
+        nftPill.textContent = `NFT #${gift.num || ''}`;
+        wBox.appendChild(nftPill);
+
+        if (gift.model_name) {
+          const mPill = document.createElement('div');
+          mPill.className = 'model-pill';
+          mPill.textContent = gift.model_name;
+          wBox.appendChild(mPill);
+        }
+      }
+
+      document.getElementById('winModal').classList.add('open');
+    }
+
+    function closeWinModal() {
+      document.getElementById('winModal').classList.remove('open');
+    }
+
+    // Init
+    window.addEventListener('DOMContentLoaded', () => {
       loadData();
-    }
-
-    // Initialize
-    loadData();
+    });
   </script>
 </body>
 </html>
