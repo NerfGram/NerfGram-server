@@ -75,6 +75,10 @@ const (
 	// retained Premium storefront in this project.
 	GifBotUserID     int64 = 1250000017
 	GifBotAccessHash int64 = 7233282977235616768
+
+	// UpgraderBotUserID is the built-in @upgrader bot for Star Gifts Upgrader.
+	UpgraderBotUserID     int64 = 1250000020
+	UpgraderBotAccessHash int64 = 893475982347598342
 )
 
 // officialSystemUserPhotoDCID/Stripped 由 files.Service.SeedOfficialSystemAvatar
@@ -293,6 +297,19 @@ func GifBotUser() User {
 	}
 }
 
+// UpgraderBotUser returns the built-in @upgrader Star Gifts Upgrader bot.
+func UpgraderBotUser() User {
+	return User{
+		ID:             UpgraderBotUserID,
+		AccessHash:     UpgraderBotAccessHash,
+		FirstName:      "Upgrader",
+		Username:       "upgrader",
+		Verified:       true,
+		Bot:            true,
+		BotInfoVersion: 1,
+	}
+}
+
 // SystemUserByID 返回内置系统账号；非系统账号返回 ok=false。
 // 所有对 777000 的硬编码注入点统一经此函数，新增内置账号只改这里。
 func SystemUserByID(id int64) (User, bool) {
@@ -318,6 +335,8 @@ func SystemUserByID(id int64) (User, bool) {
 		return BroadcastBotUser(), true
 	case GifBotUserID:
 		return GifBotUser(), true
+	case UpgraderBotUserID:
+		return UpgraderBotUser(), true
 	}
 	return User{}, false
 }
@@ -344,6 +363,7 @@ func SystemUserIDs() []int64 {
 		BroadcastBotUserID,
 		PremiumBotConfiguredUserID(),
 		GifBotUserID,
+		UpgraderBotUserID,
 	}
 }
 

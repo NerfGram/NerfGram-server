@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -26,36 +27,43 @@ import (
 func starGiftInvalidErr() error { return tgerr.New(400, "STARGIFT_INVALID") }
 
 func devStarsTopupOptions() []tg.StarsTopupOption {
-	return []tg.StarsTopupOption{
-		{Stars: 1000, Currency: "USD", Amount: 99},
-		{Stars: 2500, Currency: "USD", Amount: 199},
-		{Stars: 5000, Currency: "USD", Amount: 399},
+	if os.Getenv("TELESRV_STARS_CARD_TOPUP_ENABLED") == "true" {
+		return []tg.StarsTopupOption{
+			{Stars: 1000, Currency: "USD", Amount: 99},
+			{Stars: 2500, Currency: "USD", Amount: 199},
+			{Stars: 5000, Currency: "USD", Amount: 399},
+		}
 	}
+	return []tg.StarsTopupOption{}
 }
 
 func devStarsGiftOptions() []tg.StarsGiftOption {
-	// No store_product is advertised: telesrv has no Google/Apple product and
-	// sideloaded Android clients must use the invoice checkout path.
-	return []tg.StarsGiftOption{
-		{Stars: 1000, Currency: "USD", Amount: 99},
-		{Stars: 2500, Currency: "USD", Amount: 199},
-		{Stars: 5000, Currency: "USD", Amount: 399},
+	if os.Getenv("TELESRV_STARS_CARD_TOPUP_ENABLED") == "true" {
+		return []tg.StarsGiftOption{
+			{Stars: 1000, Currency: "USD", Amount: 99},
+			{Stars: 2500, Currency: "USD", Amount: 199},
+			{Stars: 5000, Currency: "USD", Amount: 399},
+		}
 	}
+	return []tg.StarsGiftOption{}
 }
 
 func devStarsGiveawayOptions() []tg.StarsGiveawayOption {
-	return []tg.StarsGiveawayOption{
-		{Default: true, Stars: 1000, YearlyBoosts: 4, Currency: "USD", Amount: 99, Winners: []tg.StarsGiveawayWinnersOption{
-			{Default: true, Users: 1, PerUserStars: 1000}, {Users: 2, PerUserStars: 500},
-			{Users: 5, PerUserStars: 200}, {Users: 10, PerUserStars: 100},
-		}},
-		{Stars: 2500, YearlyBoosts: 10, Currency: "USD", Amount: 199, Winners: []tg.StarsGiveawayWinnersOption{
-			{Default: true, Users: 1, PerUserStars: 2500}, {Users: 5, PerUserStars: 500}, {Users: 10, PerUserStars: 250},
-		}},
-		{Stars: 5000, YearlyBoosts: 20, Currency: "USD", Amount: 399, Winners: []tg.StarsGiveawayWinnersOption{
-			{Default: true, Users: 1, PerUserStars: 5000}, {Users: 5, PerUserStars: 1000}, {Users: 10, PerUserStars: 500},
-		}},
+	if os.Getenv("TELESRV_STARS_CARD_TOPUP_ENABLED") == "true" {
+		return []tg.StarsGiveawayOption{
+			{Default: true, Stars: 1000, YearlyBoosts: 4, Currency: "USD", Amount: 99, Winners: []tg.StarsGiveawayWinnersOption{
+				{Default: true, Users: 1, PerUserStars: 1000}, {Users: 2, PerUserStars: 500},
+				{Users: 5, PerUserStars: 200}, {Users: 10, PerUserStars: 100},
+			}},
+			{Stars: 2500, YearlyBoosts: 10, Currency: "USD", Amount: 199, Winners: []tg.StarsGiveawayWinnersOption{
+				{Default: true, Users: 1, PerUserStars: 2500}, {Users: 5, PerUserStars: 500}, {Users: 10, PerUserStars: 250},
+			}},
+			{Stars: 5000, YearlyBoosts: 20, Currency: "USD", Amount: 399, Winners: []tg.StarsGiveawayWinnersOption{
+				{Default: true, Users: 1, PerUserStars: 5000}, {Users: 5, PerUserStars: 1000}, {Users: 10, PerUserStars: 500},
+			}},
+		}
 	}
+	return []tg.StarsGiveawayOption{}
 }
 
 func (r *Router) devStarsFiatPaymentForm(
@@ -878,6 +886,9 @@ func (r *Router) validateStarsTopupPurpose(ctx context.Context, userID int64, pu
 }
 
 func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpose *tg.InputStorePaymentStarsTopup) (tg.PaymentsPaymentFormClass, error) {
+	if os.Getenv("TELESRV_STARS_CARD_TOPUP_ENABLED") != "true" {
+		return nil, tgerr.New(400, "STARS_TOPUP_DISABLED")
+	}
 	service, ok := r.deps.Stars.(starsPurchaseService)
 	if !ok {
 		return nil, notImplementedErr()
@@ -902,6 +913,9 @@ func (r *Router) starsTopupPaymentForm(ctx context.Context, userID int64, purpos
 }
 
 func (r *Router) sendStarsTopupForm(ctx context.Context, userID, formID int64, inv *tg.InputInvoiceStars) (tg.PaymentsPaymentResultClass, error) {
+	if os.Getenv("TELESRV_STARS_CARD_TOPUP_ENABLED") != "true" {
+		return nil, tgerr.New(400, "STARS_TOPUP_DISABLED")
+	}
 	purpose, ok := starsTopupPurpose(inv)
 	if !ok {
 		return nil, notImplementedErr()
