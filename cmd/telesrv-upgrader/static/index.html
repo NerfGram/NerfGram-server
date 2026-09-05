@@ -14,7 +14,6 @@
       --accent-glow: rgba(0, 122, 255, 0.35);
       --gold-color: #ffb300;
       --gold-glow: rgba(255, 179, 0, 0.35);
-      --nft-glow: rgba(255, 215, 0, 0.4);
       --win-color: #34c759;
       --loss-color: #ff3b30;
       --text-main: #ffffff;
@@ -114,7 +113,7 @@
       flex-direction: column;
       align-items: center;
       flex: 1;
-      gap: 20px;
+      gap: 18px;
       z-index: 5;
     }
 
@@ -142,7 +141,7 @@
       cursor: pointer;
       transition: all 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-      min-height: 205px;
+      min-height: 215px;
     }
 
     .gift-card:active {
@@ -163,46 +162,47 @@
       margin-bottom: 8px;
     }
 
-    /* Authentic Gift Artwork Box */
+    /* SVG Artwork Box */
     .gift-artwork-box {
       width: 96px;
       height: 96px;
-      border-radius: 20px;
+      border-radius: 22px;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       position: relative;
       margin-bottom: 10px;
-      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.2), 0 8px 20px rgba(0, 0, 0, 0.4);
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.2), 0 8px 22px rgba(0, 0, 0, 0.45);
       overflow: hidden;
     }
 
-    .gift-artwork-box .gift-emoji {
-      font-size: 52px;
-      line-height: 1;
-      filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.45));
+    .gift-artwork-box svg {
+      width: 68px;
+      height: 68px;
+      filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.5));
     }
 
     .nft-pill {
       position: absolute;
       top: 6px;
       left: 6px;
-      background: rgba(0, 0, 0, 0.7);
+      background: rgba(0, 0, 0, 0.75);
       backdrop-filter: blur(8px);
-      border: 1px solid rgba(255, 215, 0, 0.5);
+      border: 1px solid rgba(255, 215, 0, 0.6);
       color: #ffd700;
       font-size: 9px;
       font-weight: 800;
       padding: 2px 6px;
       border-radius: 10px;
       letter-spacing: 0.3px;
+      z-index: 5;
     }
 
     .model-pill {
       position: absolute;
       bottom: 6px;
-      background: rgba(0, 0, 0, 0.65);
+      background: rgba(0, 0, 0, 0.7);
       backdrop-filter: blur(6px);
       color: #ffffff;
       font-size: 9px;
@@ -213,6 +213,7 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      z-index: 5;
     }
 
     .gift-title {
@@ -262,13 +263,13 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      margin: 10px 0;
+      margin: 6px 0;
       position: relative;
     }
 
     .wheel-container {
-      width: 260px;
-      height: 260px;
+      width: 250px;
+      height: 250px;
       position: relative;
       display: flex;
       align-items: center;
@@ -298,8 +299,8 @@
 
     .wheel-center-cap {
       position: absolute;
-      width: 110px;
-      height: 110px;
+      width: 105px;
+      height: 105px;
       border-radius: 50%;
       background: #12161f;
       border: 3px solid rgba(255, 255, 255, 0.12);
@@ -312,7 +313,7 @@
     }
 
     .wheel-chance-val {
-      font-size: 26px;
+      font-size: 25px;
       font-weight: 800;
       letter-spacing: -0.5px;
       color: #ffffff;
@@ -320,7 +321,7 @@
     }
 
     .wheel-chance-lbl {
-      font-size: 11px;
+      font-size: 10px;
       color: var(--text-muted);
       font-weight: 600;
       text-transform: uppercase;
@@ -365,7 +366,7 @@
       box-shadow: none;
     }
 
-    /* Toast Notification */
+    /* Toast */
     .toast {
       position: fixed;
       top: 20px;
@@ -385,9 +386,6 @@
       transition: all 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
       max-width: 90%;
       text-align: center;
-      display: flex;
-      align-items: center;
-      gap: 8px;
     }
 
     .toast.show {
@@ -399,7 +397,7 @@
       background: rgba(45, 20, 20, 0.95);
     }
 
-    /* Bottom Sheet Modal */
+    /* Modal Sheets */
     .modal-overlay {
       position: fixed;
       inset: 0;
@@ -429,7 +427,7 @@
       padding: 20px 20px 34px;
       transform: translateY(100%);
       transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
-      max-height: 80vh;
+      max-height: 84vh;
       display: flex;
       flex-direction: column;
     }
@@ -442,7 +440,7 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 16px;
+      margin-bottom: 12px;
     }
 
     .sheet-title {
@@ -464,10 +462,41 @@
       cursor: pointer;
     }
 
+    /* Search Input */
+    .search-box {
+      width: 100%;
+      margin-bottom: 12px;
+      position: relative;
+    }
+
+    .search-input {
+      width: 100%;
+      padding: 10px 14px 10px 36px;
+      border-radius: 12px;
+      border: 1px solid var(--card-border);
+      background: rgba(255, 255, 255, 0.05);
+      color: #ffffff;
+      font-size: 14px;
+      outline: none;
+    }
+
+    .search-input::placeholder {
+      color: var(--text-muted);
+    }
+
+    .search-icon {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
     .sheet-tabs {
       display: flex;
       gap: 8px;
-      margin-bottom: 16px;
+      margin-bottom: 14px;
       background: rgba(255, 255, 255, 0.05);
       padding: 4px;
       border-radius: 12px;
@@ -475,15 +504,17 @@
 
     .sheet-tab {
       flex: 1;
-      padding: 8px 12px;
+      padding: 8px 10px;
       border-radius: 9px;
       border: none;
       background: transparent;
       color: var(--text-muted);
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
       cursor: pointer;
       transition: all 0.2s ease;
+      white-space: nowrap;
+      text-align: center;
     }
 
     .sheet-tab.active {
@@ -509,7 +540,7 @@
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       gap: 8px;
-      margin-bottom: 20px;
+      margin-bottom: 16px;
     }
 
     .quick-chip {
@@ -540,7 +571,7 @@
       background: rgba(255, 255, 255, 0.04);
       border: 1px solid var(--card-border);
       border-radius: 16px;
-      padding: 12px 8px;
+      padding: 10px 6px;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -559,12 +590,25 @@
       background: rgba(255, 215, 0, 0.03);
     }
 
+    .sheet-item-card .gift-artwork-box {
+      width: 72px;
+      height: 72px;
+      border-radius: 16px;
+      margin-bottom: 6px;
+    }
+
+    .sheet-item-card .gift-artwork-box svg {
+      width: 50px;
+      height: 50px;
+    }
+
     .empty-state {
       text-align: center;
       padding: 30px 10px;
       color: var(--text-muted);
       font-size: 14px;
       line-height: 1.5;
+      grid-column: span 3;
     }
 
     /* Win Celebration Modal */
@@ -634,9 +678,10 @@
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
     }
 
-    .win-artwork-large .gift-emoji {
-      font-size: 78px;
-      line-height: 1;
+    .win-artwork-large svg {
+      width: 100px;
+      height: 100px;
+      filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.5));
     }
 
     .win-item-name {
@@ -690,9 +735,7 @@
       <!-- Source Card -->
       <div class="gift-card" id="sourceCard" onclick="openSourceSheet()">
         <span class="card-label">Твой вклад</span>
-        <div class="gift-artwork-box" id="sourceArtBox">
-          <span class="gift-emoji" id="sourceEmoji">⭐</span>
-        </div>
+        <div class="gift-artwork-box" id="sourceArtBox"></div>
         <div class="gift-title" id="sourceTitle">50 Звёзд</div>
         <div class="gift-stars">
           <span>⭐</span>
@@ -707,9 +750,7 @@
       <!-- Target Card -->
       <div class="gift-card" id="targetCard" onclick="openTargetSheet()">
         <span class="card-label">Цель апгрейда</span>
-        <div class="gift-artwork-box" id="targetArtBox">
-          <span class="gift-emoji" id="targetEmoji">🐸</span>
-        </div>
+        <div class="gift-artwork-box" id="targetArtBox"></div>
         <div class="gift-title" id="targetTitle">Plush Pepe NFT</div>
         <div class="gift-stars">
           <span>⭐</span>
@@ -723,7 +764,7 @@
     <div class="wheel-section">
       <div class="wheel-container">
         <div class="wheel-pointer"></div>
-        <canvas class="wheel-canvas" id="wheelCanvas" width="520" height="520"></canvas>
+        <canvas class="wheel-canvas" id="wheelCanvas" width="500" height="500"></canvas>
         <div class="wheel-center-cap">
           <div class="wheel-chance-val" id="wheelChanceVal">2.4%</div>
           <div class="wheel-chance-lbl">Шанс победы</div>
@@ -781,9 +822,15 @@
         <button class="sheet-close" onclick="closeSheet('targetModal')">✕</button>
       </div>
 
+      <div class="search-box">
+        <span class="search-icon">🔍</span>
+        <input type="text" class="search-input" id="targetSearch" placeholder="Поиск среди всех 244 подарков..." oninput="renderFilteredCatalog()">
+      </div>
+
       <div class="sheet-tabs">
-        <button class="sheet-tab active" id="tabNft" onclick="switchTargetTab('nft')">💎 Уникальные NFT</button>
-        <button class="sheet-tab" id="tabCatalog" onclick="switchTargetTab('catalog')">⚡ Все подарки</button>
+        <button class="sheet-tab active" id="tabNft" onclick="switchTargetTab('nft')">💎 NFT (113)</button>
+        <button class="sheet-tab" id="tabCatalog" onclick="switchTargetTab('catalog')">⚡ Все подарки (131)</button>
+        <button class="sheet-tab" id="tabAll" onclick="switchTargetTab('all')">🌟 Все (244)</button>
       </div>
 
       <div class="sheet-content">
@@ -798,9 +845,7 @@
       <h2 class="win-title">🎉 ПОБЕДА!</h2>
       <p class="win-subtitle">Подарок успешно отправлен в ваш профиль!</p>
       
-      <div class="win-artwork-large" id="winArtBox">
-        <span class="gift-emoji" id="winEmoji">🐸</span>
-      </div>
+      <div class="win-artwork-large" id="winArtBox"></div>
 
       <div class="win-item-name" id="winItemName">Plush Pepe NFT</div>
       <div class="win-item-stars" id="winItemStars">⭐ 2,000</div>
@@ -810,7 +855,252 @@
   </div>
 
   <script>
-    // Audio synthesis
+    // ==========================================
+    // REAL SVG VECTOR GRAPHICS GENERATOR (NO EMOJIS, NO STICKERS)
+    // ==========================================
+    function getGiftSVG(title) {
+      const t = (title || "").toLowerCase();
+
+      // 1. Plush Pepe
+      if (t.includes("pepe")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <ellipse cx="50" cy="54" rx="38" ry="32" fill="#5ea432"/>
+            <ellipse cx="32" cy="30" rx="14" ry="16" fill="#5ea432"/>
+            <ellipse cx="68" cy="30" rx="14" ry="16" fill="#5ea432"/>
+            <ellipse cx="32" cy="28" rx="11" ry="13" fill="#ffffff"/>
+            <ellipse cx="68" cy="28" rx="11" ry="13" fill="#ffffff"/>
+            <ellipse cx="34" cy="28" rx="5" ry="7" fill="#111111"/>
+            <ellipse cx="66" cy="28" rx="5" ry="7" fill="#111111"/>
+            <circle cx="36" cy="25" r="2" fill="#ffffff"/>
+            <circle cx="68" cy="25" r="2" fill="#ffffff"/>
+            <path d="M26 62 Q50 78 74 62 Q50 69 26 62Z" fill="#a83232"/>
+            <path d="M20 54 Q50 62 80 54" stroke="#356516" stroke-width="4" stroke-linecap="round"/>
+            <ellipse cx="44" cy="48" rx="2" ry="3" fill="#356516"/>
+            <ellipse cx="56" cy="48" rx="2" ry="3" fill="#356516"/>
+          </svg>`;
+      }
+
+      // 2. Nail Bracelet
+      if (t.includes("bracelet") || t.includes("nail")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="nailGold" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#FFE082"/>
+                <stop offset="50%" stop-color="#FFB300"/>
+                <stop offset="100%" stop-color="#FF8F00"/>
+              </linearGradient>
+            </defs>
+            <circle cx="50" cy="50" r="34" stroke="url(#nailGold)" stroke-width="9" stroke-linecap="round" stroke-dasharray="190 40"/>
+            <rect x="52" y="10" width="12" height="15" rx="3" fill="url(#nailGold)" transform="rotate(18 58 17)"/>
+            <polygon points="26,30 20,24 29,21" fill="url(#nailGold)"/>
+            <circle cx="50" cy="50" r="28" stroke="rgba(255,255,255,0.4)" stroke-width="2" stroke-dasharray="80 150"/>
+          </svg>`;
+      }
+
+      // 3. Precious Peach
+      if (t.includes("peach")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <radialGradient id="peachGrad" cx="40%" cy="40%" r="60%">
+                <stop offset="0%" stop-color="#FFD180"/>
+                <stop offset="50%" stop-color="#FF6E40"/>
+                <stop offset="100%" stop-color="#D84315"/>
+              </radialGradient>
+            </defs>
+            <path d="M50 26 C30 15 12 36 18 64 C24 88 46 94 50 94 C54 94 76 88 82 64 C88 36 70 15 50 26 Z" fill="url(#peachGrad)"/>
+            <path d="M50 28 Q48 55 50 88" stroke="#BF360C" stroke-width="2.5" opacity="0.6"/>
+            <path d="M50 26 C52 14 62 8 74 10 C76 22 68 28 50 26 Z" fill="#43A047"/>
+            <ellipse cx="64" cy="18" rx="8" ry="4" fill="#66BB6A" transform="rotate(-15 64 18)"/>
+          </svg>`;
+      }
+
+      // 4. Homemade Cake / Mousse Cake / Cupcake
+      if (t.includes("cake") || t.includes("cupcake") || t.includes("muffin")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="22" y="52" width="56" height="34" rx="8" fill="#F48FB1"/>
+            <path d="M22 62 Q36 68 50 62 Q64 68 78 62 L78 52 L22 52 Z" fill="#FFF9C4"/>
+            <rect x="30" y="34" width="40" height="22" rx="6" fill="#F06292"/>
+            <path d="M30 42 Q40 46 50 42 Q60 46 70 42 L70 34 L30 34 Z" fill="#FFFFFF"/>
+            <rect x="48" y="18" width="4" height="16" rx="2" fill="#81D4FA"/>
+            <ellipse cx="50" cy="14" rx="4" ry="7" fill="#FFD54F"/>
+            <circle cx="50" cy="13" r="2" fill="#FF6D00"/>
+            <circle cx="36" cy="58" r="3" fill="#E91E63"/>
+            <circle cx="50" cy="58" r="3" fill="#E91E63"/>
+            <circle cx="64" cy="58" r="3" fill="#E91E63"/>
+          </svg>`;
+      }
+
+      // 5. Chill Flame / Eternal Candle
+      if (t.includes("flame") || t.includes("candle")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <linearGradient id="flameGrad" x1="0" y1="1" x2="0" y2="0">
+                <stop offset="0%" stop-color="#FF3D00"/>
+                <stop offset="40%" stop-color="#FF9100"/>
+                <stop offset="100%" stop-color="#FFEA00"/>
+              </linearGradient>
+            </defs>
+            <path d="M50 12 C40 28 22 44 22 66 C22 84 34 94 50 94 C66 94 78 84 78 66 C78 44 60 28 50 12 Z" fill="url(#flameGrad)"/>
+            <path d="M50 36 C44 48 34 58 34 72 C34 82 40 88 50 88 C60 88 66 82 66 72 C66 58 56 48 50 36 Z" fill="#FFF9C4"/>
+            <path d="M50 54 C47 62 42 68 42 76 C42 82 45 84 50 84 C55 84 58 82 58 76 C58 68 53 62 50 54 Z" fill="#00E5FF"/>
+          </svg>`;
+      }
+
+      // 6. Eternal Rose / Bouquet / Flower
+      if (t.includes("rose") || t.includes("bouquet") || t.includes("flower") || t.includes("posy")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <radialGradient id="roseGrad" cx="50%" cy="40%" r="50%">
+                <stop offset="0%" stop-color="#FF5252"/>
+                <stop offset="60%" stop-color="#D50000"/>
+                <stop offset="100%" stop-color="#880E4F"/>
+              </radialGradient>
+            </defs>
+            <path d="M50 56 Q48 76 52 94" stroke="#2E7D32" stroke-width="4" stroke-linecap="round"/>
+            <path d="M51 72 Q64 68 68 76" stroke="#2E7D32" stroke-width="3" fill="none"/>
+            <path d="M50 20 C34 20 24 32 26 46 C28 60 42 66 50 66 C58 66 72 60 74 46 C76 32 66 20 50 20 Z" fill="url(#roseGrad)"/>
+            <path d="M50 26 C42 26 36 32 38 40 C40 50 50 54 50 54 C50 54 60 50 62 40 C64 32 58 26 50 26 Z" fill="#FF1744"/>
+            <ellipse cx="50" cy="34" rx="6" ry="4" fill="#FF8A80"/>
+          </svg>`;
+      }
+
+      // 7. Candy Cane / Lol Pop / Lollipop
+      if (t.includes("candy") || t.includes("lollipop") || t.includes("pop")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M60 90 L60 40 C60 22 46 16 34 24 C24 32 26 46 26 46" stroke="#E0E0E0" stroke-width="16" stroke-linecap="round"/>
+            <path d="M60 90 L60 40 C60 22 46 16 34 24 C24 32 26 46 26 46" stroke="#D50000" stroke-width="16" stroke-linecap="round" stroke-dasharray="14 14"/>
+            <circle cx="48" cy="56" r="8" fill="#4CAF50"/>
+            <path d="M42 56 L34 68 M54 56 L62 68" stroke="#388E3C" stroke-width="4" stroke-linecap="round"/>
+          </svg>`;
+      }
+
+      // 8. Xmas Stocking / Socks / Mittens
+      if (t.includes("stocking") || t.includes("socks") || t.includes("mittens")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M38 32 L38 64 C38 76 44 86 60 86 C74 86 78 76 74 68 L66 60 L54 32 Z" fill="#D50000"/>
+            <rect x="32" y="22" width="28" height="14" rx="4" fill="#FFFFFF"/>
+            <path d="M66 60 C74 68 76 78 64 84" fill="#C62828"/>
+            <circle cx="42" cy="48" r="3" fill="#FFD54F"/>
+            <circle cx="48" cy="58" r="3" fill="#FFD54F"/>
+          </svg>`;
+      }
+
+      // 9. Witch Hat / Top Hat / Jester Hat / Helmet / Papakha
+      if (t.includes("hat") || t.includes("helmet") || t.includes("papakha")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <ellipse cx="50" cy="78" rx="42" ry="12" fill="#311B92"/>
+            <path d="M24 76 L48 18 Q54 14 62 20 Q56 28 58 38 L74 76 Z" fill="#4527A0"/>
+            <path d="M28 72 Q50 82 72 72 L73 66 Q50 76 27 66 Z" fill="#FFD600"/>
+            <rect x="44" y="66" width="12" height="10" rx="2" fill="#FFAB00"/>
+            <polygon points="62,20 64,16 66,20 70,22 66,24 64,28 62,24 58,22" fill="#FFEA00"/>
+          </svg>`;
+      }
+
+      // 10. Surge Board
+      if (t.includes("board") || t.includes("surf")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M26 86 C20 68 34 32 50 14 C66 32 80 68 74 86 C64 92 36 92 26 86 Z" fill="#00B0FF"/>
+            <path d="M50 14 L50 90" stroke="#FFFFFF" stroke-width="4"/>
+            <path d="M30 60 Q50 72 70 60" stroke="#FFD600" stroke-width="6"/>
+          </svg>`;
+      }
+
+      // 11. Swag Bag / Loot Bag / Money Pot
+      if (t.includes("bag") || t.includes("pot") || t.includes("bundle")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M28 42 C26 32 34 24 50 24 C66 24 74 32 72 42 L78 78 C80 88 72 94 50 94 C28 94 20 88 22 78 Z" fill="#FF8F00"/>
+            <ellipse cx="50" cy="40" rx="22" ry="7" fill="#FFA000"/>
+            <path d="M36 38 Q50 44 64 38" stroke="#D84315" stroke-width="4"/>
+            <circle cx="50" cy="66" r="14" fill="#FFD54F"/>
+            <text x="50" y="73" font-size="18" font-weight="900" text-anchor="middle" fill="#FF6F00">★</text>
+          </svg>`;
+      }
+
+      // 12. Diamond Ring / Gem Signet / Signet Ring
+      if (t.includes("diamond") || t.includes("ring") || t.includes("gem") || t.includes("shard")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="50" cy="62" r="26" stroke="#B0BEC5" stroke-width="8"/>
+            <polygon points="50,14 68,32 50,48 32,32" fill="#00E5FF"/>
+            <polygon points="50,14 60,32 50,48 40,32" fill="#E0F7FA"/>
+            <polygon points="32,32 40,32 50,48" fill="#80DEEA"/>
+            <polygon points="68,32 60,32 50,48" fill="#00B8D4"/>
+          </svg>`;
+      }
+
+      // 13. Swiss Watch
+      if (t.includes("watch")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="42" y="10" width="16" height="80" rx="4" fill="#546E7A"/>
+            <circle cx="50" cy="50" r="28" fill="#ECEFF1" stroke="#263238" stroke-width="6"/>
+            <circle cx="50" cy="50" r="22" fill="#1A237E"/>
+            <line x1="50" y1="50" x2="50" y2="34" stroke="#FFD600" stroke-width="3" stroke-linecap="round"/>
+            <line x1="50" y1="50" x2="62" y2="50" stroke="#FFD600" stroke-width="2.5" stroke-linecap="round"/>
+            <circle cx="50" cy="50" r="3" fill="#FFD600"/>
+          </svg>`;
+      }
+
+      // 14. Potion / Cauldron / Hex Pot
+      if (t.includes("potion") || t.includes("pot") || t.includes("jar")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="42" y="18" width="16" height="12" rx="2" fill="#8D6E63"/>
+            <path d="M42 30 L30 52 C22 66 28 84 50 84 C72 84 78 66 70 52 L58 30 Z" fill="#9C27B0"/>
+            <path d="M32 56 Q50 62 68 56 L66 76 Q50 82 34 76 Z" fill="#E040FB"/>
+            <circle cx="44" cy="66" r="3" fill="#FFFFFF" opacity="0.6"/>
+            <circle cx="56" cy="72" r="2" fill="#FFFFFF" opacity="0.6"/>
+          </svg>`;
+      }
+
+      // 15. Mighty Arm / Westside Sign
+      if (t.includes("arm") || t.includes("sign") || t.includes("strike")) {
+        return `
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M22 72 Q36 44 54 44 Q66 44 68 58 Q78 48 86 64 C90 76 74 88 56 86 Z" fill="#FFB74D"/>
+            <circle cx="52" cy="42" r="14" fill="#FFA726"/>
+            <path d="M40 76 L80 40" stroke="#FFD600" stroke-width="4" stroke-linecap="round"/>
+          </svg>`;
+      }
+
+      // 16. Universal Official Telegram Star Gift (DEFAULT)
+      return `
+        <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="boxGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#4A148C"/>
+              <stop offset="50%" stop-color="#311B92"/>
+              <stop offset="100%" stop-color="#1A237E"/>
+            </linearGradient>
+            <linearGradient id="ribbonGold" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#FFE082"/>
+              <stop offset="50%" stop-color="#FFB300"/>
+              <stop offset="100%" stop-color="#FF8F00"/>
+            </linearGradient>
+          </defs>
+          <rect x="22" y="38" width="56" height="46" rx="10" fill="url(#boxGrad)"/>
+          <rect x="18" y="32" width="64" height="14" rx="5" fill="#5E35B1"/>
+          <rect x="44" y="32" width="12" height="52" fill="url(#ribbonGold)"/>
+          <rect x="18" y="52" width="64" height="10" fill="url(#ribbonGold)"/>
+          <path d="M50 28 C42 14 30 16 34 26 C38 34 50 30 50 30 C50 30 62 34 66 26 C70 16 58 14 50 28 Z" fill="url(#ribbonGold)"/>
+          <polygon points="50,44 53,52 62,52 55,57 58,65 50,60 42,65 45,57 38,52 47,52" fill="#FFFFFF"/>
+        </svg>`;
+    }
+
+    // ==========================================
+    // AUDIO SYNTHESIS ENGINE
+    // ==========================================
     const AudioEngine = {
       ctx: null,
       init() {
@@ -828,9 +1118,9 @@
           const osc = this.ctx.createOscillator();
           const gain = this.ctx.createGain();
           osc.type = 'triangle';
-          osc.frequency.setValueAtTime(320, this.ctx.currentTime);
+          osc.frequency.setValueAtTime(340, this.ctx.currentTime);
           osc.frequency.exponentialRampToValueAtTime(120, this.ctx.currentTime + 0.04);
-          gain.gain.setValueAtTime(0.12, this.ctx.currentTime);
+          gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
           gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.04);
           osc.connect(gain);
           gain.connect(this.ctx.destination);
@@ -859,7 +1149,9 @@
       }
     };
 
-    // State
+    // ==========================================
+    // APPLICATION STATE
+    // ==========================================
     const tg = window.Telegram ? window.Telegram.WebApp : null;
     let currentUser = { id: 0, first_name: "Игрок", stars: 0, gifts: [] };
     let catalog = [];
@@ -870,7 +1162,6 @@
       stars: 50,
       title: '50 Звёзд',
       peer_gift_id: 0,
-      icon: '⭐',
       bg_center: '#ffb300',
       bg_edge: '#e65100',
       is_nft: false
@@ -882,16 +1173,15 @@
       base_title: 'Plush Pepe',
       stars: 2000,
       is_nft: true,
-      icon: '🐸',
       bg_center: '#363738',
       bg_edge: '#0e0f0f',
       model_name: 'Fifty Shades'
     };
 
     let isSpinning = false;
-    let currentWheelAngle = 0; // in degrees
+    let currentWheelAngle = 0;
 
-    // Init Telegram WebApp
+    // Ready Telegram WebApp
     if (tg) {
       try {
         tg.ready();
@@ -899,7 +1189,6 @@
       } catch (e) {}
     }
 
-    // Resolve User ID
     function getResolvedUserID() {
       const urlParams = new URLSearchParams(window.location.search);
       const qUser = urlParams.get('user_id');
@@ -925,10 +1214,9 @@
         }
       }
 
-      return 1780243200; // Default fallback account
+      return 1780243200;
     }
 
-    // Toast
     function showToast(msg, isError = false) {
       const t = document.getElementById('toast');
       t.textContent = msg;
@@ -938,7 +1226,6 @@
       }, 3500);
     }
 
-    // Calculate Chance
     function getWinChance() {
       const src = currentSource.stars;
       const tgt = currentTarget.stars;
@@ -947,7 +1234,9 @@
       return Math.min(95.0, Math.max(1.0, ratio * 100.0));
     }
 
-    // Draw Wheel
+    // ==========================================
+    // WHEEL RENDERING
+    // ==========================================
     function drawWheel() {
       const canvas = document.getElementById('wheelCanvas');
       const ctx = canvas.getContext('2d');
@@ -965,7 +1254,7 @@
       ctx.translate(center, center);
       ctx.rotate(rotRad);
 
-      // 1. Loss segment
+      // Loss segment
       ctx.beginPath();
       ctx.moveTo(0, 0);
       ctx.arc(0, 0, radius, winAngleRad, 2 * Math.PI);
@@ -976,7 +1265,7 @@
       ctx.fillStyle = lossGrad;
       ctx.fill();
 
-      // 2. Win segment
+      // Win segment
       ctx.beginPath();
       ctx.moveTo(0, 0);
       ctx.arc(0, 0, radius, 0, winAngleRad);
@@ -987,7 +1276,7 @@
       ctx.fillStyle = winGrad;
       ctx.fill();
 
-      // Outer Ring
+      // Outer ring
       ctx.beginPath();
       ctx.arc(0, 0, radius, 0, 2 * Math.PI);
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
@@ -996,22 +1285,19 @@
 
       ctx.restore();
 
-      // Update Center Cap
       document.getElementById('wheelChanceVal').textContent = `${chance.toFixed(1)}%`;
     }
 
-    // Update UI Cards
+    // Update Main Cards
     function updateCards() {
-      // Source
+      // Source Card
       document.getElementById('sourceTitle').textContent = currentSource.title;
       document.getElementById('sourceStars').textContent = currentSource.stars.toLocaleString();
-      document.getElementById('sourceEmoji').textContent = currentSource.icon;
       
       const sBox = document.getElementById('sourceArtBox');
       sBox.style.background = `radial-gradient(circle at 35% 35%, ${currentSource.bg_center}, ${currentSource.bg_edge})`;
+      sBox.innerHTML = getGiftSVG(currentSource.base_title || currentSource.title);
 
-      // Remove existing pills
-      sBox.querySelectorAll('.nft-pill, .model-pill').forEach(el => el.remove());
       if (currentSource.is_nft) {
         const nftPill = document.createElement('div');
         nftPill.className = 'nft-pill';
@@ -1029,15 +1315,14 @@
         document.getElementById('sourceCard').classList.remove('nft-card');
       }
 
-      // Target
+      // Target Card
       document.getElementById('targetTitle').textContent = currentTarget.title;
       document.getElementById('targetStars').textContent = currentTarget.stars.toLocaleString();
-      document.getElementById('targetEmoji').textContent = currentTarget.icon;
       
       const tBox = document.getElementById('targetArtBox');
       tBox.style.background = `radial-gradient(circle at 35% 35%, ${currentTarget.bg_center}, ${currentTarget.bg_edge})`;
+      tBox.innerHTML = getGiftSVG(currentTarget.base_title || currentTarget.title);
 
-      tBox.querySelectorAll('.nft-pill, .model-pill').forEach(el => el.remove());
       if (currentTarget.is_nft) {
         const nftPill = document.createElement('div');
         nftPill.className = 'nft-pill';
@@ -1058,7 +1343,7 @@
       drawWheel();
     }
 
-    // Load Data
+    // Load Data from Server
     async function loadData() {
       const uid = getResolvedUserID();
       try {
@@ -1070,13 +1355,12 @@
         currentUser = uRes;
         catalog = cRes;
 
-        // Populate User Info
         document.getElementById('userName').textContent = currentUser.first_name || 'Игрок';
         document.getElementById('userAvatar').textContent = (currentUser.first_name || 'U')[0].toUpperCase();
         document.getElementById('userStars').textContent = (currentUser.stars || 0).toLocaleString();
 
         renderUserGifts();
-        renderCatalogGifts();
+        renderFilteredCatalog();
         updateCards();
 
       } catch (err) {
@@ -1108,9 +1392,9 @@
         }
 
         card.innerHTML = `
-          <div class="gift-artwork-box" style="width: 72px; height: 72px; background: radial-gradient(circle at 35% 35%, ${g.bg_center}, ${g.bg_edge})">
+          <div class="gift-artwork-box" style="background: radial-gradient(circle at 35% 35%, ${g.bg_center}, ${g.bg_edge})">
             ${pillsHtml}
-            <span class="gift-emoji" style="font-size: 38px;">${g.icon}</span>
+            ${getGiftSVG(g.base_title || g.title)}
           </div>
           <div class="gift-title" style="font-size: 12px; margin-top: 4px;">${g.title}</div>
           <div class="gift-stars" style="font-size: 12px;">⭐ ${g.stars.toLocaleString()}</div>
@@ -1121,15 +1405,30 @@
       });
     }
 
-    // Render Target Catalog
-    function renderCatalogGifts() {
+    // Render Target Catalog with Live Filtering
+    function renderFilteredCatalog() {
       const grid = document.getElementById('catalogGiftsGrid');
       grid.innerHTML = '';
 
-      const items = catalog.filter(item => {
+      const query = (document.getElementById('targetSearch').value || "").trim().toLowerCase();
+
+      let items = catalog.filter(item => {
         if (currentTab === 'nft') return item.is_nft;
-        return !item.is_nft;
+        if (currentTab === 'catalog') return !item.is_nft;
+        return true;
       });
+
+      if (query) {
+        items = items.filter(item => 
+          item.title.toLowerCase().includes(query) || 
+          (item.model_name && item.model_name.toLowerCase().includes(query))
+        );
+      }
+
+      if (items.length === 0) {
+        grid.innerHTML = '<div class="empty-state">Подарков по вашему запросу не найдено</div>';
+        return;
+      }
 
       items.forEach(item => {
         const card = document.createElement('div');
@@ -1144,9 +1443,9 @@
         }
 
         card.innerHTML = `
-          <div class="gift-artwork-box" style="width: 72px; height: 72px; background: radial-gradient(circle at 35% 35%, ${item.bg_center}, ${item.bg_edge})">
+          <div class="gift-artwork-box" style="background: radial-gradient(circle at 35% 35%, ${item.bg_center}, ${item.bg_edge})">
             ${pillsHtml}
-            <span class="gift-emoji" style="font-size: 38px;">${item.icon}</span>
+            ${getGiftSVG(item.base_title || item.title)}
           </div>
           <div class="gift-title" style="font-size: 12px; margin-top: 4px;">${item.title}</div>
           <div class="gift-stars" style="font-size: 12px;">⭐ ${item.stars.toLocaleString()}</div>
@@ -1161,7 +1460,8 @@
       currentTab = tab;
       document.getElementById('tabNft').className = 'sheet-tab' + (tab === 'nft' ? ' active' : '');
       document.getElementById('tabCatalog').className = 'sheet-tab' + (tab === 'catalog' ? ' active' : '');
-      renderCatalogGifts();
+      document.getElementById('tabAll').className = 'sheet-tab' + (tab === 'all' ? ' active' : '');
+      renderFilteredCatalog();
     }
 
     // Selection Handlers
@@ -1171,7 +1471,6 @@
         stars: amount,
         title: `${amount} Звёзд`,
         peer_gift_id: 0,
-        icon: '⭐',
         bg_center: '#ffb300',
         bg_edge: '#e65100',
         is_nft: false
@@ -1186,8 +1485,8 @@
         type: 'gift',
         stars: g.stars,
         title: g.title,
+        base_title: g.base_title || g.title,
         peer_gift_id: g.peer_gift_id,
-        icon: g.icon,
         bg_center: g.bg_center,
         bg_edge: g.bg_edge,
         is_nft: g.is_nft,
@@ -1206,7 +1505,6 @@
         base_title: item.base_title || item.title,
         stars: item.stars,
         is_nft: item.is_nft,
-        icon: item.icon,
         bg_center: item.bg_center,
         bg_edge: item.bg_edge,
         model_name: item.model_name
@@ -1280,10 +1578,8 @@
           return;
         }
 
-        // Pointer is at TOP (270 degrees in canvas space)
-        // Wheel must rotate so that stop_angle lands at 270 deg
         const targetLanding = (270 - data.stop_angle + 360) % 360;
-        const totalRotations = 5 * 360; // 5 full spins
+        const totalRotations = 5 * 360;
         const finalAngle = totalRotations + targetLanding;
 
         animateWheel(finalAngle, 4500, () => {
@@ -1291,7 +1587,6 @@
           document.getElementById('spinBtn').disabled = false;
           document.getElementById('spinBtnText').textContent = "Улучшить подарок";
 
-          // Update balance
           currentUser.stars = data.new_balance;
           document.getElementById('userStars').textContent = data.new_balance.toLocaleString();
 
@@ -1304,7 +1599,6 @@
             showToast("Не повезло! Попробуйте снова");
           }
 
-          // Reload fresh profile data
           loadData();
         });
 
@@ -1317,7 +1611,6 @@
       }
     }
 
-    // Wheel Animation with Apple-grade Easing
     function animateWheel(targetAngle, duration, callback) {
       const startAngle = currentWheelAngle % 360;
       const change = targetAngle - startAngle;
@@ -1336,7 +1629,6 @@
         currentWheelAngle = startAngle + (change * eased);
         drawWheel();
 
-        // Audio tick every 20 degrees
         if (Math.abs(currentWheelAngle - lastTickAngle) >= 20) {
           AudioEngine.tick();
           lastTickAngle = currentWheelAngle;
@@ -1358,12 +1650,11 @@
     function openWinModal(gift) {
       document.getElementById('winItemName').textContent = gift.title;
       document.getElementById('winItemStars').textContent = `⭐ ${gift.stars ? gift.stars.toLocaleString() : currentTarget.stars.toLocaleString()}`;
-      document.getElementById('winEmoji').textContent = gift.icon || currentTarget.icon;
 
       const wBox = document.getElementById('winArtBox');
       wBox.style.background = `radial-gradient(circle at 35% 35%, ${gift.bg_center || currentTarget.bg_center}, ${gift.bg_edge || currentTarget.bg_edge})`;
+      wBox.innerHTML = getGiftSVG(gift.base_title || gift.title);
 
-      wBox.querySelectorAll('.nft-pill, .model-pill').forEach(el => el.remove());
       if (gift.is_nft) {
         const nftPill = document.createElement('div');
         nftPill.className = 'nft-pill';
@@ -1385,7 +1676,6 @@
       document.getElementById('winModal').classList.remove('open');
     }
 
-    // Init
     window.addEventListener('DOMContentLoaded', () => {
       loadData();
     });

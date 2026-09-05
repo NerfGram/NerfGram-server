@@ -13,61 +13,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 PORT = 2408
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static_upgrader")
 
-# Emoji mapping for official Telegram Star Gifts
-GIFT_ICONS = {
-    "plush pepe": "🐸",
-    "nail bracelet": "💍",
-    "precious peach": "🍑",
-    "homemade cake": "🎂",
-    "chill flame": "🔥",
-    "eternal rose": "🌹",
-    "surge board": "🏄",
-    "swag bag": "🎒",
-    "candy cane": "🍬",
-    "xmas stocking": "🧦",
-    "witch hat": "🧙",
-    "kissed frog": "🐸",
-    "crystal ball": "🔮",
-    "flying broom": "🧹",
-    "voodoo doll": "🪆",
-    "hex pot": "🧪",
-    "evil eye": "🧿",
-    "spy agaric": "🍄",
-    "lol pop": "🍭",
-    "spiced wine": "🍷",
-    "party sparkler": "✨",
-    "cookie heart": "💖",
-    "ginger cookie": "🍪",
-    "jester hat": "🤡",
-    "diamond ring": "💎",
-    "top hat": "🎩",
-    "love potion": "🧪",
-    "mighty arm": "💪",
-    "westside sign": "🤟",
-    "heart locket": "📿",
-    "heroic helmet": "🪖",
-    "low rider": "🚗",
-    "artisan brick": "🧱",
-    "rare bird": "🦜",
-    "neko helmet": "🐱",
-    "loot bag": "💰",
-    "scared cat": "🙀",
-    "instant ramen": "🍜",
-    "magic potion": "🧪",
-    "snow globe": "🔮",
-    "swiss watch": "⌚",
-    "vintage cigar": "🚬"
-}
-
-def get_gift_icon(title):
-    if not title:
-        return "🎁"
-    t_clean = title.strip().lower()
-    for k, icon in GIFT_ICONS.items():
-        if k in t_clean:
-            return icon
-    return "🎁"
-
 def int_to_hex_color(val, fallback="#2C2C2E"):
     if not val or val <= 0:
         return fallback
@@ -82,32 +27,20 @@ def run_db_query(sql):
         return None
     return stdout.strip()
 
-# Real NFT targets in catalog
-NFT_TARGETS = [
-    {"title": "Plush Pepe NFT", "base_title": "Plush Pepe", "stars": 2000, "gift_id": 9000000000000156, "coll_rev_id": 142, "slug_prefix": "official-5936013938331222567", "icon": "🐸", "bg_center": "#363738", "bg_edge": "#0e0f0f", "model_name": "Fifty Shades"},
-    {"title": "Nail Bracelet NFT", "base_title": "Nail Bracelet", "stars": 10000, "gift_id": 9000000000000142, "coll_rev_id": 128, "slug_prefix": "official-5870720080265871962", "icon": "💍", "bg_center": "#e0192e", "bg_edge": "#a8384b", "model_name": "Resistance"},
-    {"title": "Surge Board NFT", "base_title": "Surge Board", "stars": 2500, "gift_id": 9000000000000059, "coll_rev_id": 48, "slug_prefix": "official-5832497899283415733", "icon": "🏄", "bg_center": "#2ba0d8", "bg_edge": "#155075", "model_name": "Aqua Wave"},
-    {"title": "Precious Peach NFT", "base_title": "Precious Peach", "stars": 1000, "gift_id": 9000000000000144, "coll_rev_id": 130, "slug_prefix": "official-5933671725160989227", "icon": "🍑", "bg_center": "#e07850", "bg_edge": "#b64e32", "model_name": "Pure Peach"},
-    {"title": "Homemade Cake NFT", "base_title": "Homemade Cake", "stars": 500, "gift_id": 9000000000000056, "coll_rev_id": 45, "slug_prefix": "official-5783075783622787539", "icon": "🎂", "bg_center": "#58b548", "bg_edge": "#388231", "model_name": "It's My Party"},
-    {"title": "Swag Bag NFT", "base_title": "Swag Bag", "stars": 500, "gift_id": 9000000000000037, "coll_rev_id": 26, "slug_prefix": "official-6012607142387778152", "icon": "🎒", "bg_center": "#7eb0d4", "bg_edge": "#587a98", "model_name": "Platinum Drip"},
-    {"title": "Chill Flame NFT", "base_title": "Chill Flame", "stars": 150, "gift_id": 9000000000000030, "coll_rev_id": 19, "slug_prefix": "official-5999277561060787166", "icon": "🔥", "bg_center": "#adaf40", "bg_edge": "#6b7d24", "model_name": "Ionic Column"},
-    {"title": "Eternal Rose NFT", "base_title": "Eternal Rose", "stars": 100, "gift_id": 9000000000000093, "coll_rev_id": 80, "slug_prefix": "official-5882125812596999035", "icon": "🌹", "bg_center": "#58a3d8", "bg_edge": "#386588", "model_name": "Moonstone"},
-]
-
 def get_catalog():
-    sql = """
+    catalog = []
+    
+    # 1. All 131 Star Gifts from star_gift_catalog
+    sql_catalog = """
     SELECT c.gift_id, r.title, r.stars, r.convert_stars
     FROM star_gift_catalog c
     JOIN star_gift_catalog_revisions r ON r.id = c.active_revision_id
     WHERE c.enabled = true
     ORDER BY r.stars ASC, r.title ASC;
     """
-    raw = run_db_query(sql)
-    catalog = []
-    
-    # 1. Real catalog star gifts
-    if raw:
-        for line in raw.splitlines():
+    raw_cat = run_db_query(sql_catalog)
+    if raw_cat:
+        for line in raw_cat.splitlines():
             parts = line.split("|")
             if len(parts) >= 3 and parts[0]:
                 gid = int(parts[0])
@@ -119,34 +52,72 @@ def get_catalog():
                 catalog.append({
                     "id": gid,
                     "title": title,
+                    "base_title": title,
                     "stars": stars,
                     "convert_stars": conv,
                     "is_nft": False,
-                    "icon": get_gift_icon(title),
                     "bg_center": "#2C2C2E",
                     "bg_edge": "#1C1C1E",
                     "model_name": ""
                 })
 
-    # 2. Real Collectible NFT targets (high tier)
-    for nft in NFT_TARGETS:
-        catalog.append({
-            "id": nft["gift_id"],
-            "title": nft["title"],
-            "base_title": nft["base_title"],
-            "stars": nft["stars"],
-            "convert_stars": int(nft["stars"] * 0.85),
-            "is_nft": True,
-            "icon": nft["icon"],
-            "bg_center": nft["bg_center"],
-            "bg_edge": nft["bg_edge"],
-            "model_name": nft["model_name"],
-            "coll_rev_id": nft["coll_rev_id"],
-            "slug_prefix": nft["slug_prefix"]
-        })
+    # 2. All 113 Collectible NFT targets from star_gift_collectible_revisions
+    sql_coll = """
+    SELECT 
+        cr.id as coll_rev_id, 
+        cr.gift_id, 
+        r.title, 
+        r.stars, 
+        cr.slug_prefix,
+        COALESCE(b.center_color, 7914885) as center_color,
+        COALESCE(b.edge_color, 4366705) as edge_color,
+        COALESCE(m.name, '') as model_name
+    FROM star_gift_collectible_revisions cr
+    JOIN star_gift_catalog_revisions r ON r.gift_id = cr.gift_id
+    LEFT JOIN LATERAL (
+        SELECT center_color, edge_color 
+        FROM star_gift_collectible_backdrops 
+        WHERE collectible_revision_id = cr.id 
+        LIMIT 1
+    ) b ON true
+    LEFT JOIN LATERAL (
+        SELECT name 
+        FROM star_gift_collectible_models 
+        WHERE collectible_revision_id = cr.id 
+        LIMIT 1
+    ) m ON true
+    ORDER BY r.stars ASC, r.title ASC;
+    """
+    raw_coll = run_db_query(sql_coll)
+    if raw_coll:
+        for line in raw_coll.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 5 and parts[0]:
+                cid = int(parts[0])
+                gid = int(parts[1])
+                btitle = parts[2]
+                if "Official gift" in btitle:
+                    btitle = f"Star Gift #{gid % 1000}"
+                stars = int(parts[3]) if parts[3] else 100
+                slug = parts[4]
+                ccolor = int(parts[5]) if len(parts) > 5 and parts[5] else 7914885
+                ecolor = int(parts[6]) if len(parts) > 6 and parts[6] else 4366705
+                mname = parts[7] if len(parts) > 7 else ""
 
-    # Sort by stars
-    catalog.sort(key=lambda x: (x["stars"], x["is_nft"]))
+                catalog.append({
+                    "id": gid,
+                    "coll_rev_id": cid,
+                    "title": f"{btitle} NFT",
+                    "base_title": btitle,
+                    "stars": stars,
+                    "convert_stars": int(stars * 0.85),
+                    "is_nft": True,
+                    "slug_prefix": slug,
+                    "model_name": mname,
+                    "bg_center": int_to_hex_color(ccolor, "#3A3A3C"),
+                    "bg_edge": int_to_hex_color(ecolor, "#1A1A1C")
+                })
+
     return catalog
 
 def get_user_data(user_id):
@@ -200,6 +171,8 @@ def get_user_data(user_id):
                 gid = int(parts[1])
                 uid = int(parts[2])
                 raw_title = parts[3]
+                if "Official gift" in raw_title:
+                    raw_title = f"Star Gift #{gid % 1000}"
                 num = int(parts[4])
                 gstars = int(parts[5]) if parts[5] else 100
                 conv = int(parts[6]) if parts[6] else int(gstars * 0.85)
@@ -222,7 +195,6 @@ def get_user_data(user_id):
                     "base_title": raw_title,
                     "stars": gstars,
                     "convert_stars": conv,
-                    "icon": get_gift_icon(raw_title),
                     "model_name": mname,
                     "bg_center": bg_center,
                     "bg_edge": bg_edge
@@ -466,11 +438,11 @@ class UpgraderHandler(http.server.SimpleHTTPRequestHandler):
                         won_nft_details = {
                             "is_nft": True,
                             "title": f"{clean_target_title} #{next_num}",
+                            "base_title": clean_target_title,
                             "num": next_num,
                             "model_name": model_name,
                             "bg_center": bg_center,
-                            "bg_edge": bg_edge,
-                            "icon": get_gift_icon(clean_target_title)
+                            "bg_edge": bg_edge
                         }
 
                     else:
@@ -495,11 +467,11 @@ class UpgraderHandler(http.server.SimpleHTTPRequestHandler):
                         won_nft_details = {
                             "is_nft": False,
                             "title": tgt_title,
+                            "base_title": tgt_title,
                             "num": 0,
                             "model_name": "",
                             "bg_center": "#2C2C2E",
-                            "bg_edge": "#1C1C1E",
-                            "icon": get_gift_icon(tgt_title)
+                            "bg_edge": "#1C1C1E"
                         }
 
                 # Flush read models
